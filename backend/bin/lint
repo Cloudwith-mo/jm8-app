@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+python3 -m py_compile function/*.py
+
+echo "Python syntax check passed."
+
+export TABLE_NAME="${TABLE_NAME:-journalm8-dev-main}"
+export RAW_BUCKET="${RAW_BUCKET:-journalm8-dev-raw-local-test}"
+export AWS_REGION="${AWS_REGION:-us-east-1}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
+export AWS_EC2_METADATA_DISABLED=true
+
+PYTHONPATH=function python3 - <<'PY'
+import app
+print("Lambda app import check passed.")
+PY

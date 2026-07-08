@@ -1,0 +1,36 @@
+.aws-sam/
+dist/
+.build/
+__pycache__/
+*.pyc
+.env
+.env.*
+.DS_Store
+.venv/
+
+# Local environment
+.env
+.env.*
+.venv/
+
+# Build/package artifacts
+.build/
+dist/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# Local OCR/review test files
+review-text.txt
+review-payload.json
+dist/response.json
+
+# Mac
+.DS_Store
+
+# Local test images / private journal scans
+journal-page-*.jpg
+phase3-retest-*.jpg
+test-assets/

@@ -1,0 +1,29 @@
+# Environment files
+.env
+.env.*
+.env.local
+.env.*.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Backend artifacts
+backend/.build/
+backend/dist/
+*.zip
+
+# Frontend artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Local test files
+review-text.txt
+review-payload.json
+journal-page-*.jpg
+phase3-retest-*.jpg
+test-assets/
+
+# OS
+.DS_Store

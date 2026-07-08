@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+rm -rf .build
+mkdir -p .build/function
+
+if [ -s function/requirements.txt ]; then
+  python3 -m pip install -r function/requirements.txt -t .build/function
+fi
+
+cp function/*.py .build/function/
+
+echo "Build complete: .build/function"

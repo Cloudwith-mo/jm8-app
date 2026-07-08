@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p dist
+
+./bin/build
+
+cd .build/function
+zip -r ../../dist/function.zip .
+cd ../..
+
+echo "Package complete: dist/function.zip"

@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${ACCOUNT_ID:?ACCOUNT_ID is required. Run: source .env}"
+: "${API_NAME:?API_NAME is required. Run: source .env}"
+
+FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
+
+FUNCTION_ARN=$(aws lambda get-function \
+  --function-name "$FUNCTION_NAME" \
+  --query "Configuration.FunctionArn" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")
+
+echo "Checking API Gateway HTTP API: $API_NAME"
+
+API_ID=$(aws apigatewayv2 get-apis \
+  --query "Items[?Name=='${API_NAME}'].ApiId | [0]" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")
+
+if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
+  API_ID=$(aws apigatewayv2 create-api \
+    --name "$API_NAME" \
+    --protocol-type HTTP \
+    --cors-configuration '{
+      "AllowOrigins": ["*"],
+      "AllowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      "AllowHeaders": ["content-type", "x-user-id"],
+      "MaxAge": 300
+    }' \
+    --query "ApiId" \
+    --output text \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION")
+
+  echo "Created API: $API_ID"
+else
+  echo "API already exists: $API_ID"
+fi
+
+echo "Checking Lambda integration."
+
+INTEGRATION_ID=$(aws apigatewayv2 get-integrations \
+  --api-id "$API_ID" \
+  --query "Items[?IntegrationUri=='${FUNCTION_ARN}'].IntegrationId | [0]" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")
+
+if [ "$INTEGRATION_ID" = "None" ] || [ -z "$INTEGRATION_ID" ]; then
+  INTEGRATION_ID=$(aws apigatewayv2 create-integration \
+    --api-id "$API_ID" \
+    --integration-type AWS_PROXY \
+    --integration-uri "$FUNCTION_ARN" \
+    --payload-format-version "2.0" \
+    --query "IntegrationId" \
+    --output text \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION")
+
+  echo "Created integration: $INTEGRATION_ID"
+else
+  echo "Integration already exists: $INTEGRATION_ID"
+fi
+
+create_route_if_missing () {
+  local ROUTE_KEY="$1"
+
+  local EXISTING_ROUTE_ID
+  EXISTING_ROUTE_ID=$(aws apigatewayv2 get-routes \
+    --api-id "$API_ID" \
+    --query "Items[?RouteKey=='${ROUTE_KEY}'].RouteId | [0]" \
+    --output text \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION")
+
+  if [ "$EXISTING_ROUTE_ID" = "None" ] || [ -z "$EXISTING_ROUTE_ID" ]; then
+    aws apigatewayv2 create-route \
+      --api-id "$API_ID" \
+      --route-key "$ROUTE_KEY" \
+      --target "integrations/${INTEGRATION_ID}" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+
+    echo "Created route: $ROUTE_KEY"
+  else
+    echo "Route already exists: $ROUTE_KEY"
+  fi
+}
+
+create_route_if_missing "POST /entries"
+create_route_if_missing "GET /entries"
+create_route_if_missing "GET /entries/{entryId}"
+create_route_if_missing "POST /entries/{entryId}/analyze"
+create_route_if_missing "POST /entries/{entryId}/ocr"
+create_route_if_missing "PUT /entries/{entryId}/review"
+create_route_if_missing "POST /upload-url"
+
+echo "Checking default stage."
+
+STAGE_ID=$(aws apigatewayv2 get-stages \
+  --api-id "$API_ID" \
+  --query "Items[?StageName=='\$default'].StageName | [0]" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")
+
+if [ "$STAGE_ID" = "None" ] || [ -z "$STAGE_ID" ]; then
+  aws apigatewayv2 create-stage \
+    --api-id "$API_ID" \
+    --stage-name '$default' \
+    --auto-deploy \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  echo "Created default stage."
+else
+  echo "Default stage already exists."
+fi
+
+echo "Adding Lambda permission for API Gateway."
+
+SOURCE_ARN="arn:aws:execute-api:${AWS_REGION}:${ACCOUNT_ID}:${API_ID}/*/*"
+
+set +e
+aws lambda add-permission \
+  --function-name "$FUNCTION_NAME" \
+  --statement-id "${API_NAME}-invoke-permission" \
+  --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "$SOURCE_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null 2>&1
+PERMISSION_RESULT=$?
+set -e
+
+if [ "$PERMISSION_RESULT" -eq 0 ]; then
+  echo "Lambda permission added."
+else
+  echo "Lambda permission may already exist. Continuing."
+fi
+
+API_ENDPOINT=$(aws apigatewayv2 get-api \
+  --api-id "$API_ID" \
+  --query "ApiEndpoint" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")
+
+echo ""
+echo "API ready:"
+echo "$API_ENDPOINT"
+echo ""
+echo "Save it:"
+echo "export API_ENDPOINT=$API_ENDPOINT"

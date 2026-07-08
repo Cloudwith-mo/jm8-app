@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+
+FUNCTION_NAME="${APP_NAME}-${STAGE}-analyze-entry"
+
+aws lambda invoke \
+  --function-name "$FUNCTION_NAME" \
+  --payload fileb://events/analyze-entry.json \
+  --cli-binary-format raw-in-base64-out \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  dist/response.json \
+  >/dev/null
+
+echo "Raw Lambda response:"
+cat dist/response.json
+echo

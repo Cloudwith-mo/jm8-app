@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+
+FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
+LOG_GROUP="/aws/lambda/${FUNCTION_NAME}"
+
+aws logs tail "$LOG_GROUP" \
+  --since 30m \
+  --format short \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
