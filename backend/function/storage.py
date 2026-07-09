@@ -43,6 +43,33 @@ def clean_for_json(value):
     return value
 
 
+def attach_image_preview_url(entry: dict) -> dict:
+    """
+    Adds a temporary signed GET URL for private S3 journal images.
+    The URL is safe to return to the frontend because it expires.
+    """
+    clean_entry = clean_for_json(entry)
+
+    bucket = clean_entry.get("s3RawBucket")
+    key = clean_entry.get("s3RawKey")
+
+    if bucket and key:
+        clean_entry["imagePreviewUrl"] = s3.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": key
+            },
+            ExpiresIn=3600
+        )
+
+    return clean_entry
+
+
+def attach_image_preview_urls(entries: list[dict]) -> list[dict]:
+    return [attach_image_preview_url(entry) for entry in entries]
+
+
 def create_text_entry(user_id: str, text: str) -> dict:
     now = utc_now()
     entry_id = new_entry_id()
@@ -75,7 +102,7 @@ def list_entries(user_id: str, limit: int = 25) -> list[dict]:
         Limit=limit
     )
 
-    return clean_for_json(result.get("Items", []))
+    return attach_image_preview_urls(result.get("Items", []))
 
 
 def get_entry_by_id(user_id: str, entry_id: str) -> dict | None:
@@ -89,7 +116,7 @@ def get_entry_by_id(user_id: str, entry_id: str) -> dict | None:
     if not items:
         return None
 
-    return clean_for_json(items[0])
+    return attach_image_preview_url(items[0])
 
 
 def update_entry_analysis(user_id: str, entry_id: str, analysis: dict) -> dict:

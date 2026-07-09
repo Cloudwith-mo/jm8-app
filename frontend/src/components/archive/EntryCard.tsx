@@ -33,17 +33,21 @@ export default function EntryCard({ entry, isSelected, onClick }: EntryCardProps
     <article className={isSelected ? "entry-card selected" : "entry-card"} onClick={onClick}>
       <button className="entry-card-click-target" aria-label="Open entry" />
 
-      <div className="notebook-preview">
+      <div className={entry.imagePreviewUrl ? "notebook-preview has-real-image" : "notebook-preview"}>
         {isSelected && (
           <div className="selected-check">
             <Check size={16} />
           </div>
         )}
 
-        <div className="paper-lines">
-          <span>{entry.sourceType === "image" ? "GROWTH IS" : "TODAY I"}</span>
-          <span>{entry.sourceType === "image" ? "UNCOMFORTABLE." : "REFLECTED."}</span>
-        </div>
+        {entry.imagePreviewUrl ? (
+          <img src={entry.imagePreviewUrl} alt="Journal page preview" />
+        ) : (
+          <div className="paper-lines">
+            <span>{entry.sourceType === "image" ? "GROWTH IS" : "TODAY I"}</span>
+            <span>{entry.sourceType === "image" ? "UNCOMFORTABLE." : "REFLECTED."}</span>
+          </div>
+        )}
       </div>
 
       <div className="entry-card-body">

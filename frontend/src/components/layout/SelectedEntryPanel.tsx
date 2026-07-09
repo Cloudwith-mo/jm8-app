@@ -55,9 +55,16 @@ export default function SelectedEntryPanel({
       <section className="selected-image-card">
         <button className="image-arrow">‹</button>
 
-        <div className="selected-notebook-image">
-          <span>{entry?.sourceType === "typed" ? "TODAY I" : "GROWTH IS"}</span>
-          <span>{entry?.sourceType === "typed" ? "REFLECTED." : "UNCOMFORTABLE."}</span>
+        <div className={entry?.imagePreviewUrl ? "selected-notebook-image has-real-image" : "selected-notebook-image"}>
+          {entry?.imagePreviewUrl ? (
+            <img src={entry.imagePreviewUrl} alt="Selected journal page" />
+          ) : (
+            <>
+              <span>{entry?.sourceType === "typed" ? "TODAY I" : "GROWTH IS"}</span>
+              <span>{entry?.sourceType === "typed" ? "REFLECTED." : "UNCOMFORTABLE."}</span>
+            </>
+          )}
+
           <em>1 of 8</em>
         </div>
 

@@ -37,6 +37,7 @@ export type JournalEntry = {
   s3RawKey?: string;
   originalFileName?: string;
   contentType?: string;
+  imagePreviewUrl?: string;
   analysis?: Analysis;
 };
 
