@@ -1,8 +1,13 @@
 import {
   Bot,
+  Brain,
   CheckCircle2,
+  FileText,
+  HeartPulse,
   MoreHorizontal,
   Send,
+  Sparkles,
+  Target,
   X,
 } from "lucide-react";
 import type { JournalEntry } from "../../types/journal";
@@ -28,6 +33,32 @@ function formatDate(value?: string) {
   });
 }
 
+function getPreviewText(entry: JournalEntry | null) {
+  return (
+    entry?.cleanText ||
+    entry?.rawText ||
+    "Select an entry to preview its transcript."
+  );
+}
+
+function getThemes(entry: JournalEntry | null) {
+  const themes = entry?.analysis?.themes || [];
+
+  if (themes.length > 0) return themes;
+
+  if (entry?.sourceType === "image") return ["ocr", "journal", "reflection"];
+
+  return ["typed", "reflection"];
+}
+
+function getWordCount(entry: JournalEntry | null) {
+  const text = entry?.cleanText || entry?.rawText || "";
+
+  if (!text.trim()) return 0;
+
+  return text.trim().split(/\s+/).length;
+}
+
 export default function SelectedEntryPanel({
   entry,
   isBusy,
@@ -36,17 +67,19 @@ export default function SelectedEntryPanel({
   onReview,
   onAnalyze,
 }: SelectedEntryPanelProps) {
-  const previewText =
-    entry?.cleanText ||
-    entry?.rawText ||
-    "Select an entry to preview its transcript.";
-
-  const tags = entry?.analysis?.themes || ["growth", "discipline", "mindset"];
+  const previewText = getPreviewText(entry);
+  const tags = getThemes(entry);
+  const hasAnalysis = Boolean(entry?.analysis);
+  const wordCount = getWordCount(entry);
 
   return (
     <aside className={isOpen ? "selected-panel open" : "selected-panel"}>
       <header className="selected-panel-header">
-        <strong>Selected Entry</strong>
+        <div>
+          <strong>Selected Entry</strong>
+          <span>{entry?.sourceType || "No source"}</span>
+        </div>
+
         <button onClick={onClose} aria-label="Close selected entry panel">
           <X size={18} />
         </button>
@@ -65,7 +98,7 @@ export default function SelectedEntryPanel({
             </>
           )}
 
-          <em>1 of 8</em>
+          <em>{entry?.sourceType === "image" ? "image entry" : "typed entry"}</em>
         </div>
 
         <button className="image-arrow">›</button>
@@ -81,10 +114,9 @@ export default function SelectedEntryPanel({
         <p>{previewText}</p>
 
         <div className="selected-tags">
-          {tags.map((tag) => (
+          {tags.slice(0, 6).map((tag) => (
             <span key={tag}>{tag}</span>
           ))}
-          <span>+</span>
         </div>
 
         <div className="selected-actions">
@@ -100,6 +132,66 @@ export default function SelectedEntryPanel({
             <MoreHorizontal size={16} />
           </button>
         </div>
+      </section>
+
+      <section className={hasAnalysis ? "analysis-panel-card analyzed" : "analysis-panel-card"}>
+        <div className="analysis-panel-heading">
+          <div>
+            <p>JM8 Analysis</p>
+            <h3>{hasAnalysis ? "Insight generated" : "No analysis yet"}</h3>
+          </div>
+
+          <div className="analysis-icon">
+            <Brain size={19} />
+          </div>
+        </div>
+
+        {hasAnalysis ? (
+          <>
+            <div className="analysis-metric-grid">
+              <div>
+                <HeartPulse size={18} />
+                <span>Mood</span>
+                <strong>{entry?.analysis?.mood || "Reflective"}</strong>
+              </div>
+
+              <div>
+                <Sparkles size={18} />
+                <span>Sentiment</span>
+                <strong>{entry?.analysis?.sentiment || "Neutral"}</strong>
+              </div>
+
+              <div>
+                <FileText size={18} />
+                <span>Words</span>
+                <strong>{wordCount}</strong>
+              </div>
+            </div>
+
+            <div className="analysis-summary-block">
+              <h4>Summary</h4>
+              <p>{entry?.analysis?.summary || "No summary returned yet."}</p>
+            </div>
+
+            <div className="analysis-summary-block next-step">
+              <h4>
+                <Target size={16} />
+                Next Step
+              </h4>
+              <p>{entry?.analysis?.nextStep || "Review this entry and decide one small action."}</p>
+            </div>
+          </>
+        ) : (
+          <div className="no-analysis-state">
+            <Sparkles size={22} />
+            <p>
+              Analyze this entry to generate mood, sentiment, themes, summary, and a next step.
+            </p>
+            <button onClick={onAnalyze} disabled={!entry || isBusy}>
+              Run Analysis
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="entry-details-card">
@@ -119,6 +211,13 @@ export default function SelectedEntryPanel({
             <dd>
               <CheckCircle2 size={14} />
               {entry?.ocrStatus || "—"}
+            </dd>
+          </div>
+          <div>
+            <dt>Review</dt>
+            <dd>
+              <CheckCircle2 size={14} />
+              {entry?.reviewStatus || "—"}
             </dd>
           </div>
           <div>
@@ -146,14 +245,14 @@ export default function SelectedEntryPanel({
         </div>
 
         {[
-          ["IMG_1305.JPG", "Completed"],
-          ["IMG_1298.JPG", "Completed"],
-          ["IMG_1290.JPG", "Failed"],
-          ["IMG_1280.JPG", "Pending"],
+          ["Recent upload", entry?.ocrStatus || "Current"],
+          ["Image processing", entry?.sourceType === "image" ? "Completed" : "N/A"],
+          ["Transcript review", entry?.reviewStatus || "Pending"],
+          ["AI analysis", entry?.analysisStatus || "Pending"],
         ].map(([name, status]) => (
           <div className="ocr-job-row" key={name}>
             <span>{name}</span>
-            <em className={status.toLowerCase()}>{status}</em>
+            <em className={status.toLowerCase().replaceAll("_", "-")}>{status}</em>
           </div>
         ))}
       </section>
@@ -165,11 +264,10 @@ export default function SelectedEntryPanel({
           <span>Beta</span>
         </div>
 
-        <button className="ask-chip">What was my biggest challenge last year?</button>
+        <button className="ask-chip">What pattern is showing up in this entry?</button>
 
         <p>
-          Your biggest challenge was maintaining consistency while balancing ambition,
-          self-doubt, and pressure.
+          Soon, this panel will let you ask questions across your entire journal archive.
         </p>
 
         <div className="ask-input">
