@@ -6,6 +6,7 @@ import SelectedEntryPanel from "../components/layout/SelectedEntryPanel";
 import ArchiveChips from "../components/archive/ArchiveChips";
 import EntryCard from "../components/archive/EntryCard";
 import ActionModal from "../components/archive/ActionModal";
+import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
 import type { JournalEntry } from "../types/journal";
 import {
   analyzeEntry,
@@ -60,6 +61,10 @@ function groupEntries(entries: JournalEntry[]) {
   return groups;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 export default function ArchivePage() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [selectedEntry, setSelectedEntry] = useState<JournalEntry | null>(null);
@@ -73,6 +78,7 @@ export default function ArchivePage() {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("newest");
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -111,6 +117,29 @@ export default function ArchivePage() {
 
   const groupedEntries = useMemo(() => groupEntries(filteredEntries), [filteredEntries]);
 
+  function dismissToast(id: string) {
+    setToasts((currentToasts) => currentToasts.filter((toast) => toast.id !== id));
+  }
+
+  function showToast(kind: ToastKind, title: string, message?: string) {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    setToasts((currentToasts) => [
+      { id, kind, title, message },
+      ...currentToasts.slice(0, 3),
+    ]);
+
+    window.setTimeout(() => dismissToast(id), kind === "loading" ? 2600 : 4200);
+  }
+
+  function updateStatus(message: string, kind?: ToastKind, toastTitle?: string) {
+    setStatusMessage(message);
+
+    if (kind && toastTitle) {
+      showToast(kind, toastTitle, message);
+    }
+  }
+
   async function refreshEntries(nextSelectedEntryId?: string) {
     const result = await listEntries();
     setEntries(result.entries);
@@ -130,26 +159,26 @@ export default function ArchivePage() {
 
   async function openEntry(entryId: string) {
     try {
-      setStatusMessage("Entry selected.");
+      updateStatus("Entry selected.");
       const result = await getEntry(entryId);
       setSelectedEntry(result.entry);
       setIsSelectedPanelOpen(true);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Failed to open entry.");
+      updateStatus(getErrorMessage(error, "Failed to open entry."), "error", "Could not open entry");
     }
   }
 
   async function handleCreateText(text: string) {
     setIsBusy(true);
-    setStatusMessage("Creating typed entry...");
+    updateStatus("Saving typed journal entry...", "loading", "Saving entry");
 
     try {
       const result = await createEntry(text);
       await refreshEntries(result.entry.entryId);
-      setStatusMessage("Typed entry created.");
+      updateStatus("Typed entry created.", "success", "Entry saved");
       setModalMode(null);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Failed to create entry.");
+      updateStatus(getErrorMessage(error, "Failed to create entry."), "error", "Entry failed");
     } finally {
       setIsBusy(false);
     }
@@ -157,22 +186,22 @@ export default function ArchivePage() {
 
   async function handleUploadImage(file: File) {
     setIsBusy(true);
-    setStatusMessage("Creating S3 upload URL...");
+    updateStatus("Creating secure S3 upload URL...", "loading", "Preparing upload");
 
     try {
       const upload = await createUploadUrl(file.name, file.type || "image/jpeg");
 
-      setStatusMessage("Uploading image to S3...");
+      updateStatus("Uploading image to S3...", "loading", "Uploading image");
       await uploadFileToS3(upload.upload.uploadUrl, file);
 
-      setStatusMessage("Running OCR...");
+      updateStatus("Running OCR on journal image...", "loading", "OCR running");
       const ocrResult = await runOcr(upload.upload.entryId);
 
       await refreshEntries(ocrResult.entry.entryId);
-      setStatusMessage("Image uploaded and OCR completed.");
+      updateStatus("Image uploaded and OCR completed.", "success", "OCR complete");
       setModalMode(null);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Upload/OCR failed.");
+      updateStatus(getErrorMessage(error, "Upload/OCR failed."), "error", "Upload failed");
     } finally {
       setIsBusy(false);
     }
@@ -180,15 +209,15 @@ export default function ArchivePage() {
 
   async function handleSaveReview(entryId: string, cleanText: string) {
     setIsBusy(true);
-    setStatusMessage("Saving reviewed transcript...");
+    updateStatus("Saving reviewed transcript...", "loading", "Saving review");
 
     try {
       const result = await reviewEntry(entryId, cleanText);
       await refreshEntries(result.entry.entryId);
-      setStatusMessage("Review saved.");
+      updateStatus("Review saved.", "success", "Review saved");
       setModalMode(null);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Failed to save review.");
+      updateStatus(getErrorMessage(error, "Failed to save review."), "error", "Review failed");
     } finally {
       setIsBusy(false);
     }
@@ -198,14 +227,14 @@ export default function ArchivePage() {
     if (!selectedEntry) return;
 
     setIsBusy(true);
-    setStatusMessage("Analyzing selected entry...");
+    updateStatus("Analyzing selected entry...", "loading", "Analysis running");
 
     try {
       const result = await analyzeEntry(selectedEntry.entryId);
       await refreshEntries(result.entry.entryId);
-      setStatusMessage("Analysis completed.");
+      updateStatus("Analysis completed.", "success", "Analysis complete");
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Analysis failed.");
+      updateStatus(getErrorMessage(error, "Analysis failed."), "error", "Analysis failed");
     } finally {
       setIsBusy(false);
     }
@@ -216,14 +245,14 @@ export default function ArchivePage() {
     setSourceFilter("all");
     setStatusFilter("all");
     setSortOrder("newest");
-    setStatusMessage("Filters cleared.");
+    updateStatus("Filters cleared.", "info", "Filters reset");
   }
 
   useEffect(() => {
     refreshEntries()
-      .then(() => setStatusMessage("Archive loaded."))
+      .then(() => updateStatus("Archive loaded."))
       .catch((error) => {
-        setStatusMessage(error instanceof Error ? error.message : "Failed to load archive.");
+        updateStatus(getErrorMessage(error, "Failed to load archive."), "error", "Archive failed");
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -369,6 +398,7 @@ export default function ArchivePage() {
         onUploadImage={handleUploadImage}
         onSaveReview={handleSaveReview}
       />
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </main>
   );
 }
