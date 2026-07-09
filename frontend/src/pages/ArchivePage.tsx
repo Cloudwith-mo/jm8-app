@@ -20,6 +20,32 @@ import {
 
 type ModalMode = "write" | "upload" | "review" | null;
 
+function getEntrySearchText(entry: JournalEntry) {
+  return [
+    entry.entryId,
+    entry.sourceType,
+    entry.status,
+    entry.analysisStatus,
+    entry.ocrStatus,
+    entry.reviewStatus,
+    entry.rawText,
+    entry.cleanText,
+    entry.originalFileName,
+    entry.analysis?.sentiment,
+    entry.analysis?.mood,
+    entry.analysis?.summary,
+    entry.analysis?.nextStep,
+    ...(entry.analysis?.themes || []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function getEntryDateValue(entry: JournalEntry) {
+  return entry.createdAt ? new Date(entry.createdAt).getTime() : 0;
+}
+
 function groupEntries(entries: JournalEntry[]) {
   const groups: Record<string, JournalEntry[]> = {};
 
@@ -43,7 +69,47 @@ export default function ArchivePage() {
   const [isSelectedPanelOpen, setIsSelectedPanelOpen] = useState(true);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
-  const groupedEntries = useMemo(() => groupEntries(entries), [entries]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortOrder, setSortOrder] = useState("newest");
+
+  const filteredEntries = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    return entries
+      .filter((entry) => {
+        if (sourceFilter !== "all" && entry.sourceType !== sourceFilter) {
+          return false;
+        }
+
+        if (statusFilter !== "all") {
+          if (statusFilter === "NOT_ANALYZED") {
+            return entry.analysisStatus !== "COMPLETED";
+          }
+
+          return entry.status === statusFilter || entry.analysisStatus === statusFilter;
+        }
+
+        return true;
+      })
+      .filter((entry) => {
+        if (!query) return true;
+        return getEntrySearchText(entry).includes(query);
+      })
+      .sort((a, b) => {
+        const aTime = getEntryDateValue(a);
+        const bTime = getEntryDateValue(b);
+
+        if (sortOrder === "oldest") {
+          return aTime - bTime;
+        }
+
+        return bTime - aTime;
+      });
+  }, [entries, searchQuery, sourceFilter, statusFilter, sortOrder]);
+
+  const groupedEntries = useMemo(() => groupEntries(filteredEntries), [filteredEntries]);
 
   async function refreshEntries(nextSelectedEntryId?: string) {
     const result = await listEntries();
@@ -145,6 +211,14 @@ export default function ArchivePage() {
     }
   }
 
+  function clearFilters() {
+    setSearchQuery("");
+    setSourceFilter("all");
+    setStatusFilter("all");
+    setSortOrder("newest");
+    setStatusMessage("Filters cleared.");
+  }
+
   useEffect(() => {
     refreshEntries()
       .then(() => setStatusMessage("Archive loaded."))
@@ -201,7 +275,20 @@ export default function ArchivePage() {
       />
 
       <section className="archive-main">
-        <ArchiveTopbar />
+        <ArchiveTopbar
+          searchQuery={searchQuery}
+          sourceFilter={sourceFilter}
+          statusFilter={statusFilter}
+          sortOrder={sortOrder}
+          resultCount={filteredEntries.length}
+          totalCount={entries.length}
+          onSearchChange={setSearchQuery}
+          onSourceFilterChange={setSourceFilter}
+          onStatusFilterChange={setStatusFilter}
+          onSortOrderChange={setSortOrder}
+          onClearFilters={clearFilters}
+        />
+
         <ArchiveChips />
 
         <div className="archive-heading-row">
@@ -225,8 +312,8 @@ export default function ArchivePage() {
 
         {Object.keys(groupedEntries).length === 0 ? (
           <section className="empty-archive">
-            <h2>No entries found</h2>
-            <p>Create or upload your first journal entry from the sidebar.</p>
+            <h2>No matching entries found</h2>
+            <p>Try clearing filters or searching for another mood, theme, or keyword.</p>
           </section>
         ) : (
           Object.entries(groupedEntries).map(([group, groupEntries]) => (
