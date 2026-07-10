@@ -316,3 +316,47 @@ def update_entry_review(user_id: str, entry_id: str, clean_text: str) -> dict:
     )
 
     return get_entry_by_id(user_id, entry_id)
+
+
+def delete_entry(user_id: str, entry_id: str) -> dict:
+    """
+    Deletes a journal entry metadata record from DynamoDB and attempts to delete
+    the original S3 image if one exists.
+    """
+    result = table.query(
+        IndexName="GSI1",
+        KeyConditionExpression=Key("GSI1PK").eq(f"ENTRY#{entry_id}")
+    )
+
+    items = result.get("Items", [])
+
+    if not items:
+        raise ValueError("Entry not found")
+
+    entry = items[0]
+
+    if entry.get("PK") != f"USER#{user_id}":
+        raise ValueError("Entry not found")
+
+    table.delete_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        }
+    )
+
+    bucket = entry.get("s3RawBucket")
+    key = entry.get("s3RawKey")
+
+    if bucket and key:
+        try:
+            s3.delete_object(Bucket=bucket, Key=key)
+        except Exception:
+            pass
+
+    return {
+        "entryId": entry_id,
+        "deleted": True,
+        "deletedImage": bool(bucket and key),
+    }
+

@@ -13,6 +13,7 @@ from storage import (
     update_entry_ocr_result,
     update_entry_status,
     update_entry_review,
+    delete_entry,
 )
 
 
@@ -181,6 +182,15 @@ def lambda_handler(event, context):
             return response(200, {
                 "message": "Entry review saved.",
                 "entry": updated_entry
+            })
+
+        if method == "DELETE" and path.startswith("/entries/"):
+            entry_id = path.split("/entries/")[1].split("/")[0]
+            result = delete_entry(user_id, entry_id)
+
+            return response(200, {
+                "message": "Entry deleted",
+                "result": result,
             })
 
         return response(404, {

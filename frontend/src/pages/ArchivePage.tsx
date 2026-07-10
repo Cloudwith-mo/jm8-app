@@ -12,6 +12,7 @@ import {
   analyzeEntry,
   createEntry,
   createUploadUrl,
+  deleteEntry,
   getEntry,
   listEntries,
   reviewEntry,
@@ -248,6 +249,116 @@ export default function ArchivePage() {
     updateStatus("Filters cleared.", "info", "Filters reset");
   }
 
+  function getSelectedTranscript() {
+    return selectedEntry?.cleanText || selectedEntry?.rawText || "";
+  }
+
+  async function handleCopyTranscript() {
+    const transcript = getSelectedTranscript();
+
+    if (!selectedEntry || !transcript.trim()) {
+      updateStatus("No transcript available to copy.", "error", "Nothing to copy");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(transcript);
+      updateStatus("Transcript copied to clipboard.", "success", "Copied");
+    } catch {
+      updateStatus("Could not copy transcript.", "error", "Copy failed");
+    }
+  }
+
+  function handleExportTranscript() {
+    const transcript = getSelectedTranscript();
+
+    if (!selectedEntry || !transcript.trim()) {
+      updateStatus("No transcript available to export.", "error", "Nothing to export");
+      return;
+    }
+
+    const createdDate = selectedEntry.createdAt
+      ? new Date(selectedEntry.createdAt).toISOString().slice(0, 10)
+      : "unknown-date";
+
+    const filename = `jm8-entry-${createdDate}-${selectedEntry.entryId}.txt`;
+
+    const fileBody = [
+      "JournalM8 Entry Export",
+      "======================",
+      "",
+      `Entry ID: ${selectedEntry.entryId}`,
+      `Created: ${selectedEntry.createdAt || "Unknown"}`,
+      `Source: ${selectedEntry.sourceType || "Unknown"}`,
+      `Status: ${selectedEntry.status || "Unknown"}`,
+      "",
+      "Transcript",
+      "----------",
+      transcript,
+    ].join("\n");
+
+    const blob = new Blob([fileBody], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+
+    window.URL.revokeObjectURL(url);
+    updateStatus("Transcript exported as a text file.", "success", "Export ready");
+  }
+
+  function handleDownloadImage() {
+    if (!selectedEntry?.imagePreviewUrl) {
+      updateStatus("No image is available for this entry.", "error", "No image found");
+      return;
+    }
+
+    const anchor = document.createElement("a");
+    anchor.href = selectedEntry.imagePreviewUrl;
+    anchor.target = "_blank";
+    anchor.rel = "noreferrer";
+    anchor.download = `jm8-image-${selectedEntry.entryId}.jpg`;
+    anchor.click();
+
+    updateStatus("Image opened in a new tab for download.", "success", "Image ready");
+  }
+
+  async function handleDeleteSelected() {
+    if (!selectedEntry) {
+      updateStatus("No entry selected.", "error", "Delete failed");
+      return;
+    }
+
+    const shouldDelete = window.confirm(
+      "Delete this journal entry? This will remove the entry from your archive."
+    );
+
+    if (!shouldDelete) return;
+
+    setIsBusy(true);
+    updateStatus("Deleting selected entry...", "loading", "Deleting entry");
+
+    try {
+      await deleteEntry(selectedEntry.entryId);
+
+      const remainingEntries = entries.filter(
+        (entry) => entry.entryId !== selectedEntry.entryId
+      );
+
+      setEntries(remainingEntries);
+      setSelectedEntry(remainingEntries[0] || null);
+      setIsSelectedPanelOpen(Boolean(remainingEntries[0]));
+
+      updateStatus("Entry deleted from archive.", "success", "Entry deleted");
+    } catch (error) {
+      updateStatus(getErrorMessage(error, "Failed to delete entry."), "error", "Delete failed");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   useEffect(() => {
     refreshEntries()
       .then(() => updateStatus("Archive loaded."))
@@ -387,6 +498,10 @@ export default function ArchivePage() {
         onClose={() => setIsSelectedPanelOpen(false)}
         onReview={() => setModalMode("review")}
         onAnalyze={handleAnalyzeSelected}
+        onCopyTranscript={handleCopyTranscript}
+        onExportTranscript={handleExportTranscript}
+        onDownloadImage={handleDownloadImage}
+        onDelete={handleDeleteSelected}
       />
 
       <ActionModal

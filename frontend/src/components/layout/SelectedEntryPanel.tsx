@@ -2,12 +2,16 @@ import {
   Bot,
   Brain,
   CheckCircle2,
+  Clipboard,
+  Download,
+  FileDown,
   FileText,
   HeartPulse,
   MoreHorizontal,
   Send,
   Sparkles,
   Target,
+  Trash2,
   X,
 } from "lucide-react";
 import type { JournalEntry } from "../../types/journal";
@@ -19,6 +23,10 @@ type SelectedEntryPanelProps = {
   onClose: () => void;
   onReview: () => void;
   onAnalyze: () => void;
+  onCopyTranscript: () => void;
+  onExportTranscript: () => void;
+  onDownloadImage: () => void;
+  onDelete: () => void;
 };
 
 function formatDate(value?: string) {
@@ -66,11 +74,16 @@ export default function SelectedEntryPanel({
   onClose,
   onReview,
   onAnalyze,
+  onCopyTranscript,
+  onExportTranscript,
+  onDownloadImage,
+  onDelete,
 }: SelectedEntryPanelProps) {
   const previewText = getPreviewText(entry);
   const tags = getThemes(entry);
   const hasAnalysis = Boolean(entry?.analysis);
   const wordCount = getWordCount(entry);
+  const hasImage = Boolean(entry?.imagePreviewUrl);
 
   return (
     <aside className={isOpen ? "selected-panel open" : "selected-panel"}>
@@ -130,6 +143,34 @@ export default function SelectedEntryPanel({
 
           <button className="icon-action">
             <MoreHorizontal size={16} />
+          </button>
+        </div>
+      </section>
+
+      <section className="lifecycle-card">
+        <div className="panel-card-heading">
+          <h3>Manage Entry</h3>
+        </div>
+
+        <div className="lifecycle-grid">
+          <button onClick={onCopyTranscript} disabled={!entry || isBusy}>
+            <Clipboard size={16} />
+            Copy Text
+          </button>
+
+          <button onClick={onExportTranscript} disabled={!entry || isBusy}>
+            <FileDown size={16} />
+            Export .txt
+          </button>
+
+          <button onClick={onDownloadImage} disabled={!entry || !hasImage || isBusy}>
+            <Download size={16} />
+            Image
+          </button>
+
+          <button className="danger-action" onClick={onDelete} disabled={!entry || isBusy}>
+            <Trash2 size={16} />
+            Delete
           </button>
         </div>
       </section>

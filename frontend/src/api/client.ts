@@ -90,3 +90,16 @@ export async function reviewEntry(
     body: JSON.stringify({ cleanText }),
   });
 }
+
+export async function deleteEntry(entryId: string) {
+  return apiRequest<{
+    message: string;
+    result: {
+      entryId: string;
+      deleted: boolean;
+      deletedImage?: boolean;
+    };
+  }>(`/entries/${entryId}`, {
+    method: "DELETE",
+  });
+}

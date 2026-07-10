@@ -134,6 +134,7 @@ cat > .build/lambda-app-policy.json <<POLICY
       "Effect": "Allow",
       "Action": [
         "dynamodb:PutItem",
+        "dynamodb:DeleteItem",
         "dynamodb:GetItem",
         "dynamodb:UpdateItem",
         "dynamodb:Query"
@@ -148,6 +149,7 @@ cat > .build/lambda-app-policy.json <<POLICY
       "Effect": "Allow",
       "Action": [
         "s3:PutObject",
+        "s3:DeleteObject",
         "s3:GetObject"
       ],
       "Resource": "arn:aws:s3:::${RAW_BUCKET}/*"

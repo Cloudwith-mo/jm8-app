@@ -102,6 +102,7 @@ create_route_if_missing "GET /entries/{entryId}"
 create_route_if_missing "POST /entries/{entryId}/analyze"
 create_route_if_missing "POST /entries/{entryId}/ocr"
 create_route_if_missing "PUT /entries/{entryId}/review"
+create_route_if_missing "DELETE /entries/{entryId}"
 create_route_if_missing "POST /upload-url"
 
 echo "Checking default stage."

@@ -1772,3 +1772,53 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* Upgrade 6: entry lifecycle controls */
+
+.lifecycle-card {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: white;
+}
+
+.lifecycle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 9px;
+}
+
+.lifecycle-grid button {
+  min-height: 42px;
+  padding: 0 10px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: #f5f2ed;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.lifecycle-grid button:hover {
+  color: var(--purple);
+  background: var(--surface-purple);
+}
+
+.lifecycle-grid button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.lifecycle-grid .danger-action {
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.lifecycle-grid .danger-action:hover {
+  color: white;
+  background: var(--red);
+}
