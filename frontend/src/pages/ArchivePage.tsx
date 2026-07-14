@@ -80,7 +80,7 @@ export default function ArchivePage() {
   const [statusMessage, setStatusMessage] = useState("Loading archive...");
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [isBusy, setIsBusy] = useState(false);
-  const [isSelectedPanelOpen, setIsSelectedPanelOpen] = useState(true);
+  const [isSelectedPanelOpen, setIsSelectedPanelOpen] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -164,7 +164,7 @@ export default function ArchivePage() {
 
     if (result.entries.length > 0 && !selectedEntry) {
       setSelectedEntry(result.entries[0]);
-      setIsSelectedPanelOpen(true);
+      setIsSelectedPanelOpen(false);
     }
   }
 

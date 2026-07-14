@@ -111,7 +111,7 @@ export default function SelectedEntryPanel({
             </>
           )}
 
-          <em>{entry?.sourceType === "image" ? "image entry" : "typed entry"}</em>
+          <em>{entry?.sourceType === "image" ? "Journal image" : "Typed note"}</em>
         </div>
 
         <button className="image-arrow">›</button>

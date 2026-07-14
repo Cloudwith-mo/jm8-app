@@ -1993,3 +1993,963 @@ button {
     margin-right: auto;
   }
 }
+
+/* Upgrade 9: desktop layout and card polish */
+
+@media (min-width: 1280px) {
+  .jm8-archive-shell {
+    grid-template-columns:
+      clamp(240px, 16vw, 285px)
+      minmax(640px, 1fr)
+      clamp(330px, 22vw, 390px);
+  }
+
+  .archive-main {
+    padding: 26px 24px 72px;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 22px;
+  }
+
+  .notebook-preview {
+    height: clamp(175px, 13vw, 230px);
+  }
+}
+
+@media (min-width: 1500px) {
+  .jm8-archive-shell {
+    grid-template-columns:
+      clamp(260px, 15vw, 300px)
+      minmax(820px, 1fr)
+      clamp(360px, 22vw, 420px);
+  }
+
+  .archive-main {
+    padding-left: 32px;
+    padding-right: 32px;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  }
+}
+
+.archive-topbar {
+  align-items: stretch;
+}
+
+.archive-search {
+  min-height: 58px;
+}
+
+.archive-controls {
+  align-items: stretch;
+}
+
+.archive-controls button,
+.filter-control,
+.result-count-pill {
+  min-height: 58px;
+}
+
+.archive-heading-row {
+  margin-top: 6px;
+  margin-bottom: 22px;
+}
+
+.archive-heading-row h1 {
+  color: var(--text);
+  opacity: 1;
+}
+
+.archive-kicker {
+  color: #6f6a78;
+}
+
+.month-section {
+  margin-top: 24px;
+}
+
+.month-heading {
+  margin-bottom: 18px;
+}
+
+.month-heading h2 {
+  letter-spacing: -0.04em;
+}
+
+.entry-card {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease;
+}
+
+.entry-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 24px 52px rgba(20, 20, 30, 0.1);
+  border-color: rgba(109, 53, 232, 0.26);
+}
+
+.entry-card.selected {
+  outline: 3px solid var(--purple);
+  box-shadow: 0 24px 58px rgba(109, 53, 232, 0.18);
+}
+
+.entry-card-body {
+  padding: 16px;
+}
+
+.entry-meta-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.entry-meta-row strong,
+.entry-meta-row small {
+  white-space: nowrap;
+}
+
+.entry-card h3 {
+  margin-top: 12px;
+  font-size: 0.98rem;
+  letter-spacing: -0.02em;
+}
+
+.entry-card p {
+  min-height: 46px;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.entry-tags {
+  gap: 7px;
+  margin-top: 16px;
+}
+
+.entry-tags span,
+.selected-tags span {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-badge {
+  min-width: 64px;
+  text-align: center;
+}
+
+.selected-panel {
+  padding: 24px 22px 34px;
+}
+
+.selected-panel-header {
+  padding-bottom: 8px;
+}
+
+.selected-notebook-image {
+  height: clamp(168px, 15vw, 220px);
+}
+
+.selected-summary,
+.lifecycle-card,
+.analysis-panel-card,
+.entry-details-card,
+.ocr-jobs-card,
+.ask-card {
+  padding: 18px;
+}
+
+.selected-summary p {
+  max-height: 165px;
+  line-height: 1.62;
+}
+
+.analysis-metric-grid {
+  gap: 11px;
+}
+
+.analysis-metric-grid div {
+  padding: 13px;
+}
+
+.analysis-summary-block {
+  padding: 15px;
+}
+
+.lifecycle-grid {
+  gap: 10px;
+}
+
+.lifecycle-grid button {
+  min-height: 44px;
+}
+
+.archive-status {
+  z-index: 120;
+}
+
+@media (max-width: 1279px) and (min-width: 921px) {
+  .jm8-archive-shell {
+    grid-template-columns: 245px minmax(0, 1fr);
+  }
+
+  .archive-main {
+    padding: 22px 20px 64px;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .entry-card {
+    grid-template-columns: 140px minmax(0, 1fr);
+  }
+
+  .entry-meta-row {
+    grid-template-columns: auto auto 1fr;
+  }
+
+  .status-badge {
+    grid-column: 1 / -1;
+    width: fit-content;
+    margin-left: 0;
+  }
+}
+
+/* Upgrade 9B: breathable desktop layout */
+
+body {
+  overflow-x: hidden;
+}
+
+/* Medium desktop / laptop: prioritize the archive grid.
+   Right panel behaves like a drawer instead of permanently squeezing the grid. */
+@media (min-width: 921px) and (max-width: 1439px) {
+  .jm8-archive-shell {
+    grid-template-columns: clamp(220px, 17vw, 255px) minmax(0, 1fr) !important;
+  }
+
+  .archive-main {
+    padding: 28px 34px 82px !important;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)) !important;
+    gap: 24px !important;
+  }
+
+  .notebook-preview {
+    height: clamp(145px, 14vw, 180px) !important;
+  }
+
+  .selected-panel {
+    display: block !important;
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    z-index: 65;
+    width: min(390px, 92vw);
+    height: 100vh;
+    transform: translateX(110%) !important;
+    transition: transform 240ms ease;
+    box-shadow: -24px 0 60px rgba(0, 0, 0, 0.16);
+  }
+
+  .selected-panel.open {
+    transform: translateX(0) !important;
+  }
+
+  .selected-panel-backdrop.visible {
+    display: block !important;
+  }
+
+  .reflection-note {
+    display: none;
+  }
+}
+
+/* Wide desktop: bring back the full 3-column reference-style layout. */
+@media (min-width: 1440px) {
+  .jm8-archive-shell {
+    grid-template-columns:
+      clamp(260px, 16vw, 305px)
+      minmax(760px, 1fr)
+      clamp(360px, 24vw, 430px) !important;
+  }
+
+  .archive-main {
+    padding: 30px 36px 84px !important;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important;
+    gap: 24px !important;
+  }
+
+  .selected-panel {
+    position: sticky !important;
+    top: 0;
+    height: 100vh;
+    transform: none !important;
+    box-shadow: none;
+  }
+
+  .selected-panel-backdrop {
+    display: none !important;
+  }
+}
+
+/* Extra-wide desktop: closer to the sample image. */
+@media (min-width: 1680px) {
+  .jm8-archive-shell {
+    grid-template-columns:
+      clamp(285px, 15vw, 330px)
+      minmax(980px, 1fr)
+      clamp(390px, 22vw, 460px) !important;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)) !important;
+  }
+
+  .archive-main {
+    padding-left: 44px !important;
+    padding-right: 44px !important;
+  }
+}
+
+/* Reduce sidebar visual weight so it feels less crowded. */
+.archive-sidebar {
+  gap: 16px;
+}
+
+.brand-wordmark {
+  margin-bottom: 4px;
+}
+
+.profile-avatar {
+  width: 82px;
+  height: 82px;
+}
+
+.profile-card h2 {
+  font-size: 0.98rem;
+  line-height: 1.16;
+}
+
+.profile-card p {
+  font-size: 0.8rem;
+}
+
+.profile-stats strong {
+  font-size: 0.9rem;
+}
+
+.profile-stats small {
+  font-size: 0.55rem;
+}
+
+/* Make the archive header breathe. */
+.archive-chips {
+  padding-top: 30px;
+  padding-bottom: 30px;
+  gap: 24px;
+}
+
+.chip-image {
+  width: 62px;
+  height: 62px;
+}
+
+.archive-heading-row {
+  margin-top: 12px;
+  margin-bottom: 28px;
+}
+
+.archive-heading-row h1 {
+  font-size: clamp(1.8rem, 2.4vw, 2.65rem);
+}
+
+.month-heading {
+  margin-bottom: 22px;
+}
+
+/* Softer cards, less heavy/cluttered. */
+.entry-card {
+  border-radius: 20px;
+}
+
+.entry-card-body {
+  padding: 18px;
+}
+
+.entry-card h3 {
+  font-size: 1rem;
+}
+
+.entry-card p {
+  color: #5a5661;
+}
+
+.entry-tags span,
+.selected-tags span {
+  background: #f4f1ec;
+}
+
+/* Hide reflection note when vertical space is tight. */
+@media (max-height: 880px) {
+  .reflection-note {
+    display: none;
+  }
+
+  .archive-sidebar {
+    padding-top: 22px;
+    padding-bottom: 18px;
+  }
+}
+
+/* Keep mobile clean. */
+@media (max-width: 620px) {
+  .archive-main {
+    padding: 14px !important;
+  }
+
+  .entry-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .notebook-preview {
+    height: 100% !important;
+  }
+}
+
+/* Upgrade 9C: make left sidebar usable at 100% zoom */
+
+.archive-sidebar {
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-top: 22px !important;
+  padding-bottom: 18px !important;
+}
+
+/* Slim the left panel so the bottom is reachable. */
+.archive-sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.archive-sidebar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.archive-sidebar::-webkit-scrollbar-thumb {
+  background: rgba(109, 53, 232, 0.18);
+  border-radius: 999px;
+}
+
+.archive-sidebar .brand-wordmark {
+  font-size: 1.25rem;
+  margin-bottom: 0;
+}
+
+.archive-sidebar .profile-card {
+  padding-top: 4px;
+  padding-bottom: 6px;
+}
+
+.archive-sidebar .profile-avatar {
+  width: 70px !important;
+  height: 70px !important;
+  margin-bottom: 10px;
+}
+
+.archive-sidebar .profile-card h2 {
+  font-size: 0.92rem;
+  line-height: 1.15;
+}
+
+.archive-sidebar .profile-card p {
+  margin-top: 5px;
+  margin-bottom: 10px;
+  font-size: 0.76rem;
+}
+
+.archive-sidebar .profile-stats div {
+  padding: 8px 3px;
+}
+
+.archive-sidebar .archive-nav {
+  gap: 4px;
+}
+
+.archive-sidebar .archive-nav-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 0.88rem;
+}
+
+.archive-sidebar .sidebar-actions {
+  gap: 8px;
+}
+
+.archive-sidebar .primary-sidebar-action,
+.archive-sidebar .secondary-sidebar-action {
+  height: 42px;
+  border-radius: 12px;
+  font-size: 0.82rem;
+}
+
+/* Make Today's Reflection compact instead of pushing the footer off-screen. */
+.archive-sidebar .reflection-note {
+  margin-top: 8px;
+  padding: 14px;
+  border-radius: 16px;
+}
+
+.archive-sidebar .reflection-note p {
+  margin-bottom: 6px;
+  font-size: 0.76rem;
+}
+
+.archive-sidebar .reflection-note strong {
+  font-size: 1.5rem;
+}
+
+.archive-sidebar .reflection-note span {
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.archive-sidebar .signature {
+  margin-top: 8px;
+  font-size: 1.45rem;
+}
+
+/* Footer should remain reachable and not consume too much height. */
+.archive-sidebar .sidebar-bottom {
+  margin-top: 10px;
+  padding-bottom: 2px;
+}
+
+/* On shorter screens, hide reflection card so nav/buttons/footer stay visible. */
+@media (max-height: 820px) {
+  .archive-sidebar .reflection-note {
+    display: none !important;
+  }
+
+  .archive-sidebar {
+    gap: 12px !important;
+  }
+}
+
+/* On very short screens, reduce profile even more. */
+@media (max-height: 720px) {
+  .archive-sidebar .profile-avatar {
+    width: 58px !important;
+    height: 58px !important;
+  }
+
+  .archive-sidebar .profile-stats {
+    display: none;
+  }
+}
+
+/* Upgrade 9D: compact 3-column desktop mode at normal 100% zoom */
+
+/*
+  The app was switching to drawer mode too early.
+  This keeps left + center + right visible on laptop/desktop widths.
+*/
+@media (min-width: 980px) and (max-width: 1439px) {
+  .jm8-archive-shell {
+    display: grid !important;
+    grid-template-columns:
+      clamp(210px, 20vw, 245px)
+      minmax(430px, 1fr)
+      clamp(300px, 28vw, 350px) !important;
+  }
+
+  .archive-main {
+    padding: 22px 22px 72px !important;
+    overflow-x: hidden;
+  }
+
+  .archive-sidebar {
+    display: flex !important;
+    position: sticky !important;
+    top: 0;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    overflow-y: auto;
+  }
+
+  .selected-panel {
+    display: block !important;
+    position: sticky !important;
+    top: 0 !important;
+    right: auto !important;
+    width: auto !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    transform: none !important;
+    box-shadow: none !important;
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+  }
+
+  .selected-panel.open {
+    transform: none !important;
+  }
+
+  .selected-panel-backdrop,
+  .selected-panel-backdrop.visible {
+    display: none !important;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)) !important;
+    gap: 20px !important;
+  }
+
+  .notebook-preview {
+    height: clamp(145px, 15vw, 178px) !important;
+  }
+
+  .entry-card-body {
+    padding: 14px !important;
+  }
+
+  .entry-card h3 {
+    font-size: 0.92rem;
+  }
+
+  .entry-card p {
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+
+  .archive-topbar {
+    grid-template-columns: minmax(180px, 1fr) auto;
+    gap: 12px;
+  }
+
+  .archive-search {
+    min-width: 0 !important;
+    height: 50px;
+    min-height: 50px;
+  }
+
+  .archive-controls {
+    gap: 8px;
+  }
+
+  .archive-controls button,
+  .filter-control,
+  .result-count-pill {
+    height: 50px;
+    min-height: 50px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .filter-control select {
+    max-width: 115px;
+  }
+
+  .archive-chips {
+    gap: 18px;
+    padding-top: 24px;
+    padding-bottom: 24px;
+  }
+
+  .chip-image {
+    width: 58px;
+    height: 58px;
+  }
+
+  .archive-chip {
+    min-width: 66px;
+  }
+
+  .archive-heading-row h1 {
+    font-size: clamp(1.55rem, 2.1vw, 2.05rem);
+  }
+
+  .month-section {
+    margin-top: 20px;
+  }
+
+  .month-heading {
+    margin-bottom: 16px;
+  }
+
+  .selected-panel {
+    padding: 22px 18px 34px !important;
+  }
+
+  .selected-notebook-image {
+    height: clamp(145px, 15vw, 178px) !important;
+  }
+
+  .selected-summary,
+  .lifecycle-card,
+  .analysis-panel-card,
+  .entry-details-card,
+  .ocr-jobs-card,
+  .ask-card {
+    padding: 15px !important;
+  }
+
+  .selected-summary p {
+    max-height: 150px;
+    font-size: 0.88rem;
+  }
+
+  .analysis-metric-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .analysis-metric-grid div {
+    padding: 10px;
+  }
+}
+
+/* True tablet/mobile should still use drawer mode. */
+@media (max-width: 979px) {
+  .selected-panel {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    z-index: 65;
+    width: min(390px, 92vw);
+    height: 100vh;
+    transform: translateX(110%) !important;
+    transition: transform 240ms ease;
+    box-shadow: -24px 0 60px rgba(0, 0, 0, 0.16);
+  }
+
+  .selected-panel.open {
+    transform: translateX(0) !important;
+  }
+
+  .selected-panel-backdrop.visible {
+    display: block !important;
+  }
+}
+
+/* Upgrade 9E: center the app shell and prevent horizontal drift */
+
+html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Keep the full app centered in the viewport instead of drifting right. */
+.jm8-archive-shell {
+  width: 100%;
+  max-width: 1560px;
+  margin: 0 auto;
+  overflow-x: hidden;
+}
+
+/* Prevent grid children from forcing the whole app wider than the viewport. */
+.archive-sidebar,
+.archive-main,
+.selected-panel,
+.archive-topbar,
+.archive-search,
+.archive-controls,
+.entry-grid,
+.entry-card {
+  min-width: 0;
+}
+
+/* Better normal desktop balance: left + center + right, but not too wide. */
+@media (min-width: 980px) and (max-width: 1439px) {
+  .jm8-archive-shell {
+    grid-template-columns:
+      clamp(215px, 18vw, 250px)
+      minmax(0, 1fr)
+      clamp(300px, 25vw, 340px) !important;
+  }
+
+  .archive-main {
+    padding-left: clamp(20px, 2vw, 28px) !important;
+    padding-right: clamp(20px, 2vw, 28px) !important;
+  }
+
+  .selected-panel {
+    overflow-x: hidden;
+  }
+
+  .selected-image-card {
+    grid-template-columns: 28px minmax(0, 1fr) 28px;
+  }
+
+  .selected-notebook-image {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .archive-topbar {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+  }
+
+  .archive-controls {
+    max-width: 100%;
+  }
+
+  .filter-control select {
+    max-width: 105px;
+  }
+
+  .entry-grid {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  }
+}
+
+/* On screens that are not wide enough for 3 comfortable columns,
+   use drawer mode instead of forcing overflow. */
+@media (min-width: 980px) and (max-width: 1180px) {
+  .jm8-archive-shell {
+    grid-template-columns:
+      clamp(210px, 21vw, 240px)
+      minmax(0, 1fr) !important;
+  }
+
+  .selected-panel {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    z-index: 65;
+    width: min(380px, 92vw) !important;
+    height: 100vh;
+    transform: translateX(110%) !important;
+    box-shadow: -24px 0 60px rgba(0, 0, 0, 0.16) !important;
+  }
+
+  .selected-panel.open {
+    transform: translateX(0) !important;
+  }
+
+  .selected-panel-backdrop.visible {
+    display: block !important;
+  }
+}
+
+/* Wide screens should feel like the reference image but remain centered. */
+@media (min-width: 1440px) {
+  .jm8-archive-shell {
+    max-width: 1640px;
+    grid-template-columns:
+      clamp(260px, 16vw, 300px)
+      minmax(0, 1fr)
+      clamp(360px, 23vw, 430px) !important;
+  }
+}
+
+/* Upgrade 9F: remove independent desktop panel scrolling */
+
+/*
+  Desktop behavior:
+  - left, middle, and right panels all participate in the main page scroll
+  - no internal left/right panel scrollbars
+  - panels stretch naturally with the page
+*/
+@media (min-width: 980px) {
+  body {
+    overflow-y: auto;
+  }
+
+  .jm8-archive-shell {
+    align-items: stretch !important;
+    min-height: 100vh;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .archive-sidebar,
+  .selected-panel {
+    position: static !important;
+    top: auto !important;
+    height: auto !important;
+    min-height: 100vh !important;
+    max-height: none !important;
+    overflow: visible !important;
+    overflow-y: visible !important;
+    transform: none !important;
+  }
+
+  .archive-sidebar {
+    align-self: stretch !important;
+    border-right: 1px solid var(--border);
+  }
+
+  .selected-panel {
+    align-self: stretch !important;
+    width: auto !important;
+    box-shadow: none !important;
+    border-left: 1px solid var(--border);
+  }
+
+  .selected-panel.open {
+    transform: none !important;
+  }
+
+  .selected-panel-backdrop,
+  .selected-panel-backdrop.visible {
+    display: none !important;
+  }
+
+  .archive-main {
+    min-height: 100vh;
+    overflow: visible !important;
+  }
+
+  .reflection-note {
+    display: block !important;
+  }
+
+  .sidebar-bottom {
+    margin-top: 18px !important;
+  }
+}
+
+/* Keep true tablet/mobile drawer behavior. */
+@media (max-width: 979px) {
+  .selected-panel {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    z-index: 65;
+    width: min(390px, 92vw) !important;
+    height: 100vh !important;
+    overflow-y: auto !important;
+    transform: translateX(110%) !important;
+    transition: transform 240ms ease;
+    box-shadow: -24px 0 60px rgba(0, 0, 0, 0.16) !important;
+  }
+
+  .selected-panel.open {
+    transform: translateX(0) !important;
+  }
+
+  .mobile-sidebar-shell .archive-sidebar {
+    height: 100vh !important;
+    overflow-y: auto !important;
+  }
+}

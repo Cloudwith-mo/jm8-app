@@ -26,6 +26,25 @@ function getTags(entry: JournalEntry) {
   return ["reflection"];
 }
 
+function formatEntryDate(value?: string) {
+  if (!value) return "No date";
+
+  return new Date(value).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatEntryTime(value?: string) {
+  if (!value) return "";
+
+  return new Date(value).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 export default function EntryCard({ entry, isSelected, onClick }: EntryCardProps) {
   const tags = getTags(entry);
 
@@ -52,9 +71,9 @@ export default function EntryCard({ entry, isSelected, onClick }: EntryCardProps
 
       <div className="entry-card-body">
         <div className="entry-meta-row">
-          <strong>{entry.createdAt ? new Date(entry.createdAt).toLocaleDateString() : "No date"}</strong>
+          <strong>{formatEntryDate(entry.createdAt)}</strong>
           <span>•</span>
-          <small>{entry.createdAt ? new Date(entry.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}</small>
+          <small>{formatEntryTime(entry.createdAt)}</small>
           <em className={entry.status?.includes("FAILED") ? "status-badge failed" : "status-badge"}>
             {entry.status || "NEW"}
           </em>
