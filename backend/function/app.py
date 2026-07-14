@@ -219,13 +219,29 @@ def get_method_and_path(event: dict[str, Any]) -> tuple[str, str]:
     return "POST", "/entries/analyze-direct"
 
 
-def get_user_id(event: dict[str, Any]) -> str:
-    headers = event.get("headers") or {}
+def get_user_id(event):
+    """
+    Auth priority:
+    1. Cognito JWT claim sub from API Gateway authorizer
+    2. x-user-id header for local/demo development
+    3. demo-user fallback
+    """
+    claims = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("jwt", {})
+        .get("claims", {})
+    )
 
-    # Temporary until Cognito in Phase 3.
-    # Use this header when testing:
-    # x-user-id: demo-user
-    return headers.get("x-user-id") or headers.get("X-User-Id") or "demo-user"
+    if claims.get("sub"):
+        return claims["sub"]
+
+    headers = event.get("headers") or {}
+    normalized_headers = {
+        str(key).lower(): value for key, value in headers.items()
+    }
+
+    return normalized_headers.get("x-user-id", "demo-user")
 
 
 def parse_body(event: dict[str, Any]) -> dict[str, Any]:
@@ -252,7 +268,7 @@ def response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
         "headers": {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "content-type,x-user-id",
+            "Access-Control-Allow-Headers": "content-type,x-user-id,authorization",
             "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS"
         },
         "body": json.dumps(body)

@@ -1,3 +1,4 @@
+import { getAccessToken } from "../auth/cognito";
 import type { JournalEntry, UploadResponse } from "../types/journal";
 
 const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
@@ -14,6 +15,7 @@ async function apiRequest<T>(
     headers: {
       "content-type": "application/json",
       "x-user-id": DEMO_USER_ID,
+      ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
       ...(options.headers || {}),
     },
   });

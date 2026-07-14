@@ -7,7 +7,15 @@ import ArchiveChips from "../components/archive/ArchiveChips";
 import EntryCard from "../components/archive/EntryCard";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
+import AuthStatus from "../components/layout/AuthStatus";
 import type { JournalEntry } from "../types/journal";
+import {
+  getCurrentUser,
+  handleCognitoCallback,
+  loginWithCognito,
+  logoutFromCognito,
+  type AuthUser,
+} from "../auth/cognito";
 import {
   analyzeEntry,
   createEntry,
@@ -80,6 +88,8 @@ export default function ArchivePage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("newest");
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(getCurrentUser());
+  const [isAuthReady, setIsAuthReady] = useState(false);
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -360,11 +370,31 @@ export default function ArchivePage() {
   }
 
   useEffect(() => {
-    refreshEntries()
-      .then(() => updateStatus("Archive loaded."))
-      .catch((error) => {
+    async function bootstrap() {
+      try {
+        const callbackUser = await handleCognitoCallback();
+
+        if (callbackUser) {
+          setAuthUser(callbackUser);
+          updateStatus("Signed in with Cognito.", "success", "Login successful");
+        } else {
+          setAuthUser(getCurrentUser());
+        }
+      } catch (error) {
+        updateStatus(getErrorMessage(error, "Cognito login failed."), "error", "Login failed");
+      } finally {
+        setIsAuthReady(true);
+      }
+
+      try {
+        await refreshEntries();
+        updateStatus("Archive loaded.");
+      } catch (error) {
         updateStatus(getErrorMessage(error, "Failed to load archive."), "error", "Archive failed");
-      });
+      }
+    }
+
+    bootstrap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -427,6 +457,13 @@ export default function ArchivePage() {
           onStatusFilterChange={setStatusFilter}
           onSortOrderChange={setSortOrder}
           onClearFilters={clearFilters}
+        />
+
+        <AuthStatus
+          user={authUser}
+          isAuthReady={isAuthReady}
+          onLogin={loginWithCognito}
+          onLogout={logoutFromCognito}
         />
 
         <ArchiveChips />

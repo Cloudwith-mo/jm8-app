@@ -1822,3 +1822,73 @@ button {
   color: white;
   background: var(--red);
 }
+
+/* Upgrade 7B: Cognito login/logout card */
+
+.auth-status-card {
+  margin-top: 16px;
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: white;
+  box-shadow: var(--shadow);
+}
+
+.auth-status-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  color: var(--purple);
+  background: var(--surface-purple);
+}
+
+.auth-status-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.auth-status-copy strong {
+  font-size: 0.92rem;
+}
+
+.auth-status-copy span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.auth-status-card button {
+  min-height: 40px;
+  padding: 0 13px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: white;
+  background: var(--dark);
+  font-weight: 900;
+}
+
+.auth-status-card button:hover {
+  background: var(--purple);
+}
+
+@media (max-width: 620px) {
+  .auth-status-card {
+    grid-template-columns: auto 1fr;
+  }
+
+  .auth-status-card button {
+    grid-column: 1 / -1;
+    width: 100%;
+    justify-content: center;
+  }
+}
