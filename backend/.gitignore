@@ -34,3 +34,6 @@ dist/response.json
 journal-page-*.jpg
 phase3-retest-*.jpg
 test-assets/
+
+# Local Cognito outputs
+infra/cognito.env
