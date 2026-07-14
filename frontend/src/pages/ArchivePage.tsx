@@ -3,7 +3,7 @@ import { ChevronDown, LayoutGrid, List, Menu, Sprout, X } from "lucide-react";
 import ArchiveSidebar from "../components/layout/ArchiveSidebar";
 import ArchiveTopbar from "../components/layout/ArchiveTopbar";
 import SelectedEntryPanel from "../components/layout/SelectedEntryPanel";
-import ArchiveChips from "../components/archive/ArchiveChips";
+import ArchiveChips, { type ArchiveChipFilter } from "../components/archive/ArchiveChips";
 import EntryCard from "../components/archive/EntryCard";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
@@ -87,6 +87,7 @@ export default function ArchivePage() {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("newest");
+  const [chipFilter, setChipFilter] = useState<ArchiveChipFilter>({ type: "all", value: "all" });
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [authUser, setAuthUser] = useState<AuthUser | null>(getCurrentUser());
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -105,7 +106,26 @@ export default function ArchivePage() {
             return entry.analysisStatus !== "COMPLETED";
           }
 
-          return entry.status === statusFilter || entry.analysisStatus === statusFilter;
+          if (!(entry.status === statusFilter || entry.analysisStatus === statusFilter)) {
+            return false;
+          }
+        }
+
+        if (chipFilter.type === "year") {
+          const entryYear = entry.createdAt
+            ? String(new Date(entry.createdAt).getFullYear())
+            : "";
+
+          return entryYear === chipFilter.value;
+        }
+
+        if (chipFilter.type === "theme") {
+          const fallbackTheme = entry.sourceType === "image" ? "OCR" : "Typed";
+          const themes = [...(entry.analysis?.themes || []), fallbackTheme];
+
+          return themes.some(
+            (theme) => theme.toLowerCase() === chipFilter.value.toLowerCase()
+          );
         }
 
         return true;
@@ -124,7 +144,7 @@ export default function ArchivePage() {
 
         return bTime - aTime;
       });
-  }, [entries, searchQuery, sourceFilter, statusFilter, sortOrder]);
+  }, [entries, searchQuery, sourceFilter, statusFilter, sortOrder, chipFilter]);
 
   const groupedEntries = useMemo(() => groupEntries(filteredEntries), [filteredEntries]);
 
@@ -256,6 +276,7 @@ export default function ArchivePage() {
     setSourceFilter("all");
     setStatusFilter("all");
     setSortOrder("newest");
+    setChipFilter({ type: "all", value: "all" });
     updateStatus("Filters cleared.", "info", "Filters reset");
   }
 
@@ -490,7 +511,7 @@ export default function ArchivePage() {
           </section>
         )}
 
-        <ArchiveChips entries={entries} />
+        <ArchiveChips entries={entries} activeFilter={chipFilter} onFilterChange={setChipFilter} />
 
         <div className="archive-heading-row">
           <div>

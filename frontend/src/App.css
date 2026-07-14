@@ -2953,3 +2953,38 @@ body,
     overflow-y: auto !important;
   }
 }
+
+/* Upgrade 10: clickable archive chips */
+
+.archive-chip {
+  transition:
+    transform 150ms ease,
+    opacity 150ms ease;
+}
+
+.archive-chip:hover {
+  transform: translateY(-2px);
+}
+
+.archive-chip.active strong {
+  color: var(--text);
+}
+
+.archive-chip.active span {
+  color: var(--purple);
+  font-weight: 900;
+}
+
+.archive-chip:not(.active) {
+  opacity: 0.82;
+}
+
+.archive-chip:not(.active):hover {
+  opacity: 1;
+}
+
+.archive-chip.active .chip-image {
+  box-shadow:
+    0 0 0 3px rgba(109, 53, 232, 0.2),
+    var(--shadow);
+}
