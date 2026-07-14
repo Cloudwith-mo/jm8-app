@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_REGION:?AWS_REGION is required}"
+: "${AWS_PROFILE:?AWS_PROFILE is required}"
+: "${API_NAME:=journalm8-dev-api}"
+: "${COGNITO_APP_CLIENT_ID:?COGNITO_APP_CLIENT_ID is required}"
+: "${COGNITO_ISSUER:?COGNITO_ISSUER is required}"
+
+AUTHORIZER_NAME="${API_NAME}-jwt-authorizer"
+
+echo "Finding API: $API_NAME"
+
+API_ID="$(
+  aws apigatewayv2 get-apis \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Items[?Name=='$API_NAME'].ApiId | [0]" \
+    --output text
+)"
+
+if [[ "$API_ID" == "None" || -z "$API_ID" ]]; then
+  echo "API not found: $API_NAME"
+  exit 1
+fi
+
+echo "API ID: $API_ID"
+
+echo "Checking JWT authorizer: $AUTHORIZER_NAME"
+
+AUTHORIZER_ID="$(
+  aws apigatewayv2 get-authorizers \
+    --api-id "$API_ID" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Items[?Name=='$AUTHORIZER_NAME'].AuthorizerId | [0]" \
+    --output text
+)"
+
+if [[ "$AUTHORIZER_ID" == "None" || -z "$AUTHORIZER_ID" ]]; then
+  echo "Creating JWT authorizer."
+
+  AUTHORIZER_ID="$(
+    aws apigatewayv2 create-authorizer \
+      --api-id "$API_ID" \
+      --name "$AUTHORIZER_NAME" \
+      --authorizer-type JWT \
+      --identity-source '$request.header.Authorization' \
+      --jwt-configuration "Audience=$COGNITO_APP_CLIENT_ID,Issuer=$COGNITO_ISSUER" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query 'AuthorizerId' \
+      --output text
+  )"
+else
+  echo "Authorizer already exists: $AUTHORIZER_ID"
+fi
+
+secure_route() {
+  local route_key="$1"
+
+  local route_id
+  route_id="$(
+    aws apigatewayv2 get-routes \
+      --api-id "$API_ID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query "Items[?RouteKey=='$route_key'].RouteId | [0]" \
+      --output text
+  )"
+
+  if [[ "$route_id" == "None" || -z "$route_id" ]]; then
+    echo "Route not found, skipping: $route_key"
+    return
+  fi
+
+  aws apigatewayv2 update-route \
+    --api-id "$API_ID" \
+    --route-id "$route_id" \
+    --authorization-type JWT \
+    --authorizer-id "$AUTHORIZER_ID" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" >/dev/null
+
+  echo "Secured route: $route_key"
+}
+
+secure_route "POST /entries"
+secure_route "GET /entries"
+secure_route "GET /entries/{entryId}"
+secure_route "POST /entries/{entryId}/analyze"
+secure_route "POST /entries/{entryId}/ocr"
+secure_route "PUT /entries/{entryId}/review"
+secure_route "DELETE /entries/{entryId}"
+secure_route "POST /upload-url"
+
+echo
+echo "API is now protected by Cognito JWT authorizer."
+echo "Authorizer ID: $AUTHORIZER_ID"

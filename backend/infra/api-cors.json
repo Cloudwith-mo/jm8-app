@@ -1,0 +1,22 @@
+{
+  "AllowOrigins": [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+  ],
+  "AllowMethods": [
+    "GET",
+    "POST",
+    "PUT",
+    "DELETE",
+    "OPTIONS"
+  ],
+  "AllowHeaders": [
+    "content-type",
+    "x-user-id",
+    "authorization"
+  ],
+  "ExposeHeaders": [
+    "content-type"
+  ],
+  "MaxAge": 3600
+}

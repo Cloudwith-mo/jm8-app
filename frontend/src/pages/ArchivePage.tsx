@@ -371,19 +371,28 @@ export default function ArchivePage() {
 
   useEffect(() => {
     async function bootstrap() {
+      let currentUser: AuthUser | null = null;
+
       try {
         const callbackUser = await handleCognitoCallback();
+        currentUser = callbackUser || getCurrentUser();
+
+        setAuthUser(currentUser);
 
         if (callbackUser) {
-          setAuthUser(callbackUser);
           updateStatus("Signed in with Cognito.", "success", "Login successful");
-        } else {
-          setAuthUser(getCurrentUser());
         }
       } catch (error) {
         updateStatus(getErrorMessage(error, "Cognito login failed."), "error", "Login failed");
       } finally {
         setIsAuthReady(true);
+      }
+
+      if (!currentUser) {
+        setEntries([]);
+        setSelectedEntry(null);
+        updateStatus("Sign in to load your private archive.", "info", "Login required");
+        return;
       }
 
       try {
@@ -465,6 +474,17 @@ export default function ArchivePage() {
           onLogin={loginWithCognito}
           onLogout={logoutFromCognito}
         />
+
+        {isAuthReady && !authUser && (
+          <section className="auth-required-card">
+            <h2>Sign in to access your private journal archive</h2>
+            <p>
+              JM8 now protects entries by Cognito user identity. Log in to upload,
+              review, analyze, search, and manage your personal journal archive.
+            </p>
+            <button onClick={loginWithCognito}>Login with Cognito</button>
+          </section>
+        )}
 
         <ArchiveChips />
 

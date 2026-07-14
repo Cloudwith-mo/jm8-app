@@ -1892,3 +1892,40 @@ button {
     justify-content: center;
   }
 }
+
+/* Upgrade 7C: auth-required state */
+
+.auth-required-card {
+  margin-top: 18px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, rgba(109, 53, 232, 0.08), rgba(245, 158, 11, 0.05)),
+    white;
+  box-shadow: var(--shadow);
+}
+
+.auth-required-card h2 {
+  margin: 0 0 8px;
+  letter-spacing: -0.04em;
+}
+
+.auth-required-card p {
+  max-width: 720px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.auth-required-card button {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 14px;
+  color: white;
+  background: var(--dark);
+  font-weight: 900;
+}
+
+.auth-required-card button:hover {
+  background: var(--purple);
+}
