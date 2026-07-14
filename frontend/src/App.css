@@ -1929,3 +1929,67 @@ button {
 .auth-required-card button:hover {
   background: var(--purple);
 }
+
+/* Upgrade 8: dynamic profile/stat polish */
+
+.profile-card h2 {
+  overflow-wrap: anywhere;
+}
+
+.profile-card p {
+  overflow-wrap: anywhere;
+}
+
+.profile-stats strong {
+  overflow-wrap: anywhere;
+}
+
+.archive-chip strong {
+  max-width: 82px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-chip span {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sidebar profile visibility polish */
+
+.profile-card h2 {
+  color: var(--text);
+  font-weight: 900;
+  opacity: 1;
+}
+
+.profile-card p {
+  color: #6f6a78;
+  opacity: 1;
+  line-height: 1.35;
+}
+
+.profile-card p span {
+  display: inline-flex;
+  margin-top: 4px;
+}
+
+.profile-avatar {
+  color: white;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.16);
+}
+
+@media (min-width: 921px) {
+  .profile-card h2 {
+    max-width: 190px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .profile-card p {
+    max-width: 190px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}

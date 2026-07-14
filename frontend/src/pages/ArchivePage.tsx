@@ -437,6 +437,8 @@ export default function ArchivePage() {
         </button>
 
         <ArchiveSidebar
+          user={authUser}
+          entries={entries}
           onNewEntry={() => {
             setIsMobileNavOpen(false);
             setModalMode("write");
@@ -449,6 +451,8 @@ export default function ArchivePage() {
       </div>
 
       <ArchiveSidebar
+        user={authUser}
+        entries={entries}
         onNewEntry={() => setModalMode("write")}
         onUpload={() => setModalMode("upload")}
       />
@@ -486,7 +490,7 @@ export default function ArchivePage() {
           </section>
         )}
 
-        <ArchiveChips />
+        <ArchiveChips entries={entries} />
 
         <div className="archive-heading-row">
           <div>
