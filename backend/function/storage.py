@@ -14,6 +14,8 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
 s3 = boto3.client("s3")
 
+MAX_OCR_ATTEMPTS = 3
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -199,6 +201,86 @@ def create_upload_url(user_id: str, file_name: str, content_type: str) -> dict:
     }
 
 
+class OcrStateError(ValueError):
+    """Raised when an OCR job cannot enter the requested state."""
+
+
+def get_ocr_retry_state(
+    entry: dict,
+    max_attempts: int = MAX_OCR_ATTEMPTS,
+) -> dict:
+    attempt_count = int(entry.get("ocrAttemptCount") or 0)
+    job_status = derive_ocr_job_status(entry)
+    remaining_attempts = max(max_attempts - attempt_count, 0)
+
+    return {
+        "jobStatus": job_status,
+        "attemptCount": attempt_count,
+        "maxAttempts": max_attempts,
+        "remainingAttempts": remaining_attempts,
+        "canRetry": job_status == "FAILED" and remaining_attempts > 0,
+    }
+
+
+def begin_ocr_attempt(
+    user_id: str,
+    entry_id: str,
+    force: bool = False,
+) -> dict:
+    entry = get_entry_by_id(user_id, entry_id)
+
+    if not entry:
+        raise OcrStateError("Entry not found.")
+
+    if entry.get("sourceType") != "image":
+        raise OcrStateError("OCR only works on image entries.")
+
+    retry_state = get_ocr_retry_state(entry)
+    current_status = str(entry.get("status") or "").upper()
+    ocr_status = str(entry.get("ocrStatus") or "").upper()
+
+    if current_status == "OCR_PROCESSING" or ocr_status == "PROCESSING":
+        raise OcrStateError("OCR is already processing for this entry.")
+
+    if retry_state["jobStatus"] == "COMPLETED" and not force:
+        raise OcrStateError("OCR has already completed for this entry.")
+
+    if retry_state["remainingAttempts"] <= 0 and not force:
+        raise OcrStateError("Maximum OCR attempt limit reached.")
+
+    now = utc_now()
+    next_attempt = retry_state["attemptCount"] + 1
+
+    table.update_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        },
+        UpdateExpression=(
+            "SET #status = :status, "
+            "ocrStatus = :ocrStatus, "
+            "ocrAttemptCount = :ocrAttemptCount, "
+            "ocrStartedAt = :ocrStartedAt, "
+            "ocrLastAttemptAt = :ocrLastAttemptAt, "
+            "updatedAt = :updatedAt "
+            "REMOVE failureReason, ocrFailedAt, errorMessage"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":status": "OCR_PROCESSING",
+            ":ocrStatus": "PROCESSING",
+            ":ocrAttemptCount": next_attempt,
+            ":ocrStartedAt": now,
+            ":ocrLastAttemptAt": now,
+            ":updatedAt": now,
+        },
+    )
+
+    return get_entry_by_id(user_id, entry_id)
+
+
 def update_entry_ocr_result(user_id: str, entry_id: str, ocr_result: dict) -> dict:
     entry = get_entry_by_id(user_id, entry_id)
 
@@ -220,7 +302,8 @@ def update_entry_ocr_result(user_id: str, entry_id: str, ocr_result: dict) -> di
             "ocrLineCount = :ocrLineCount, "
             "ocrWordCount = :ocrWordCount, "
             "ocrRawBlockCount = :ocrRawBlockCount, "
-            "updatedAt = :updatedAt"
+            "updatedAt = :updatedAt "
+            "REMOVE failureReason, ocrFailedAt, errorMessage"
         ),
         ExpressionAttributeNames={
             "#status": "status"
@@ -235,6 +318,47 @@ def update_entry_ocr_result(user_id: str, entry_id: str, ocr_result: dict) -> di
             ":ocrRawBlockCount": ocr_result.get("rawBlockCount", 0),
             ":updatedAt": now
         }
+    )
+
+    return get_entry_by_id(user_id, entry_id)
+
+
+def mark_ocr_failed(
+    user_id: str,
+    entry_id: str,
+    failure_reason: str,
+) -> dict:
+    entry = get_entry_by_id(user_id, entry_id)
+
+    if not entry:
+        return {}
+
+    now = utc_now()
+
+    table.update_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        },
+        UpdateExpression=(
+            "SET #status = :status, "
+            "ocrStatus = :ocrStatus, "
+            "failureReason = :failureReason, "
+            "errorMessage = :errorMessage, "
+            "ocrFailedAt = :ocrFailedAt, "
+            "updatedAt = :updatedAt"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":status": "OCR_FAILED",
+            ":ocrStatus": "FAILED",
+            ":failureReason": failure_reason,
+            ":errorMessage": failure_reason,
+            ":ocrFailedAt": now,
+            ":updatedAt": now,
+        },
     )
 
     return get_entry_by_id(user_id, entry_id)
@@ -437,6 +561,7 @@ def list_ocr_jobs(
             continue
 
         clean_entry = attach_image_preview_url(entry)
+        retry_state = get_ocr_retry_state(clean_entry)
 
         jobs.append({
             "entryId": clean_entry.get("entryId"),
@@ -452,6 +577,14 @@ def list_ocr_jobs(
             "ocrWordCount": clean_entry.get("ocrWordCount", 0),
             "ocrLineCount": clean_entry.get("ocrLineCount", 0),
             "failureReason": clean_entry.get("failureReason"),
+            "attemptCount": retry_state["attemptCount"],
+            "maxAttempts": retry_state["maxAttempts"],
+            "remainingAttempts": retry_state["remainingAttempts"],
+            "canRetry": retry_state["canRetry"],
+            "lastAttemptAt": clean_entry.get("ocrLastAttemptAt"),
+            "processingStartedAt": clean_entry.get("ocrStartedAt"),
+            "completedAt": clean_entry.get("ocrCompletedAt"),
+            "failedAt": clean_entry.get("ocrFailedAt"),
             "createdAt": clean_entry.get("createdAt"),
             "updatedAt": clean_entry.get("updatedAt"),
         })

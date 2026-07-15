@@ -12,7 +12,10 @@ from storage import (
     update_entry_analysis,
     create_upload_url,
     update_entry_ocr_result,
-    update_entry_status,
+    begin_ocr_attempt,
+    mark_ocr_failed,
+    get_ocr_retry_state,
+    OcrStateError,
     update_entry_review,
     delete_entry,
 )
@@ -148,6 +151,84 @@ def lambda_handler(event, context):
                 "upload": upload
             })
 
+        if method == "POST" and path.startswith("/entries/") and path.endswith("/ocr/retry"):
+            entry_id = path.split("/entries/")[1].split("/")[0]
+
+            entry = get_entry_by_id(user_id=user_id, entry_id=entry_id)
+
+            if not entry:
+                return response(404, {"error": "Entry not found."})
+
+            if entry.get("sourceType") != "image":
+                return response(400, {
+                    "error": "OCR only works on image entries.",
+                    "sourceType": entry.get("sourceType"),
+                })
+
+            bucket = entry.get("s3RawBucket")
+            key = entry.get("s3RawKey")
+
+            if not bucket or not key:
+                return response(400, {
+                    "error": "Entry does not have S3 raw file information."
+                })
+
+            body = parse_body(event)
+            force = body.get("force") is True
+            retry_state = get_ocr_retry_state(entry)
+
+            if not retry_state["canRetry"] and not force:
+                return response(409, {
+                    "error": "OCRRetryNotAllowed",
+                    "message": "Only failed OCR jobs with remaining attempts can be retried.",
+                    "retry": retry_state,
+                })
+
+            try:
+                begin_ocr_attempt(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    force=force,
+                )
+            except OcrStateError as exc:
+                return response(409, {
+                    "error": "OCRRetryNotAllowed",
+                    "message": str(exc),
+                    "retry": get_ocr_retry_state(entry),
+                })
+
+            try:
+                ocr_result = extract_text_from_s3_image(
+                    bucket=bucket,
+                    key=key,
+                )
+
+                updated_entry = update_entry_ocr_result(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    ocr_result=ocr_result,
+                )
+
+                return response(200, {
+                    "message": "OCR retry completed.",
+                    "entry": updated_entry,
+                    "retry": get_ocr_retry_state(updated_entry),
+                })
+
+            except Exception as exc:
+                failed_entry = mark_ocr_failed(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    failure_reason=str(exc),
+                )
+
+                return response(500, {
+                    "error": "OCRFailed",
+                    "message": str(exc),
+                    "entry": failed_entry,
+                    "retry": get_ocr_retry_state(failed_entry),
+                })
+
         if method == "POST" and path.startswith("/entries/") and path.endswith("/ocr"):
             entry_id = path.split("/entries/")[1].split("/")[0]
 
@@ -170,7 +251,17 @@ def lambda_handler(event, context):
                     "error": "Entry does not have S3 raw file information."
                 })
 
-            update_entry_status(user_id=user_id, entry_id=entry_id, status="OCR_PROCESSING")
+            try:
+                begin_ocr_attempt(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                )
+            except OcrStateError as exc:
+                return response(409, {
+                    "error": "OCRNotAllowed",
+                    "message": str(exc),
+                    "retry": get_ocr_retry_state(entry),
+                })
 
             try:
                 ocr_result = extract_text_from_s3_image(bucket=bucket, key=key)
@@ -187,11 +278,10 @@ def lambda_handler(event, context):
                 })
 
             except Exception as exc:
-                update_entry_status(
+                mark_ocr_failed(
                     user_id=user_id,
                     entry_id=entry_id,
-                    status="OCR_FAILED",
-                    error_message=str(exc)
+                    failure_reason=str(exc),
                 )
 
                 return response(500, {
