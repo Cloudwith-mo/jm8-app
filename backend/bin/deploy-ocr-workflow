@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+
+WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-worker"
+WORKER_ROLE_NAME="${APP_NAME}-${STAGE}-ocr-worker-role"
+STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
+STATE_ROLE_NAME="${APP_NAME}-${STAGE}-step-functions-role"
+
+ZIP_FILE="dist/function.zip"
+DEFINITION_TEMPLATE="infra/ocr-workflow.asl.json"
+RESOLVED_DEFINITION=".build/ocr-workflow.resolved.json"
+
+WORKER_POLICY_NAME="${APP_NAME}-${STAGE}-ocr-worker-access"
+STATE_POLICY_NAME="${APP_NAME}-${STAGE}-invoke-ocr-worker"
+
+echo "Checking AWS identity..."
+
+aws sts get-caller-identity \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+./bin/package
+
+TABLE_ARN="$(
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Table.TableArn" \
+    --output text
+)"
+
+mkdir -p .build
+
+cat > .build/lambda-worker-trust.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+python3 - \
+  "$TABLE_ARN" \
+  "$RAW_BUCKET" \
+  > .build/ocr-worker-policy.json <<'PY'
+import json
+import sys
+
+table_arn = sys.argv[1]
+raw_bucket = sys.argv[2]
+
+policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "JournalEntryAccess",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:Query",
+                "dynamodb:UpdateItem"
+            ],
+            "Resource": [
+                table_arn,
+                f"{table_arn}/index/*"
+            ]
+        },
+        {
+            "Sid": "ReadPrivateJournalImages",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject"
+            ],
+            "Resource": [
+                f"arn:aws:s3:::{raw_bucket}/users/*"
+            ]
+        },
+        {
+            "Sid": "RunTextract",
+            "Effect": "Allow",
+            "Action": [
+                "textract:DetectDocumentText"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+
+print(json.dumps(policy))
+PY
+
+echo "Checking OCR worker IAM role: $WORKER_ROLE_NAME"
+
+if aws iam get-role \
+  --role-name "$WORKER_ROLE_NAME" \
+  --profile "$AWS_PROFILE" \
+  >/dev/null 2>&1
+then
+  echo "OCR worker role already exists."
+
+  aws iam update-assume-role-policy \
+    --role-name "$WORKER_ROLE_NAME" \
+    --policy-document file://.build/lambda-worker-trust.json \
+    --profile "$AWS_PROFILE"
+else
+  aws iam create-role \
+    --role-name "$WORKER_ROLE_NAME" \
+    --description "JournalM8 OCR worker Lambda role" \
+    --assume-role-policy-document file://.build/lambda-worker-trust.json \
+    --profile "$AWS_PROFILE" \
+    >/dev/null
+
+  echo "Created OCR worker role."
+  sleep 10
+fi
+
+aws iam attach-role-policy \
+  --role-name "$WORKER_ROLE_NAME" \
+  --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" \
+  --profile "$AWS_PROFILE"
+
+aws iam put-role-policy \
+  --role-name "$WORKER_ROLE_NAME" \
+  --policy-name "$WORKER_POLICY_NAME" \
+  --policy-document file://.build/ocr-worker-policy.json \
+  --profile "$AWS_PROFILE"
+
+WORKER_ROLE_ARN="$(
+  aws iam get-role \
+    --role-name "$WORKER_ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --query "Role.Arn" \
+    --output text
+)"
+
+echo "Checking OCR worker Lambda: $WORKER_FUNCTION_NAME"
+
+if aws lambda get-function \
+  --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null 2>&1
+then
+  echo "Updating OCR worker code."
+
+  aws lambda update-function-code \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --zip-file "fileb://${ZIP_FILE}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws lambda wait function-updated \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  aws lambda update-function-configuration \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --role "$WORKER_ROLE_ARN" \
+    --handler ocr_worker.lambda_handler \
+    --timeout 60 \
+    --memory-size 512 \
+    --environment \
+      "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws lambda wait function-updated \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+else
+  echo "Creating OCR worker Lambda."
+
+  aws lambda create-function \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --runtime python3.12 \
+    --architectures arm64 \
+    --role "$WORKER_ROLE_ARN" \
+    --handler ocr_worker.lambda_handler \
+    --zip-file "fileb://${ZIP_FILE}" \
+    --timeout 60 \
+    --memory-size 512 \
+    --environment \
+      "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
+    --tags \
+      "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws lambda wait function-active-v2 \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+fi
+
+WORKER_ARN="$(
+  aws lambda get-function \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Configuration.FunctionArn" \
+    --output text
+)"
+
+python3 - \
+  "$DEFINITION_TEMPLATE" \
+  "$RESOLVED_DEFINITION" \
+  "$WORKER_ARN" <<'PY'
+from pathlib import Path
+import sys
+
+template_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+worker_arn = sys.argv[3]
+
+definition = template_path.read_text()
+
+if "__OCR_WORKER_ARN__" not in definition:
+    raise SystemExit("Worker ARN placeholder was not found.")
+
+definition = definition.replace(
+    "__OCR_WORKER_ARN__",
+    worker_arn,
+)
+
+output_path.write_text(definition)
+print(f"Resolved workflow definition: {output_path}")
+PY
+
+cat > .build/step-functions-trust.json <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "states.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+python3 - "$WORKER_ARN" \
+  > .build/step-functions-policy.json <<'PY'
+import json
+import sys
+
+worker_arn = sys.argv[1]
+
+policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "lambda:InvokeFunction"
+            ],
+            "Resource": [
+                worker_arn
+            ]
+        }
+    ]
+}
+
+print(json.dumps(policy))
+PY
+
+echo "Checking Step Functions IAM role: $STATE_ROLE_NAME"
+
+if aws iam get-role \
+  --role-name "$STATE_ROLE_NAME" \
+  --profile "$AWS_PROFILE" \
+  >/dev/null 2>&1
+then
+  echo "Step Functions role already exists."
+
+  aws iam update-assume-role-policy \
+    --role-name "$STATE_ROLE_NAME" \
+    --policy-document file://.build/step-functions-trust.json \
+    --profile "$AWS_PROFILE"
+else
+  aws iam create-role \
+    --role-name "$STATE_ROLE_NAME" \
+    --description "JournalM8 Step Functions execution role" \
+    --assume-role-policy-document file://.build/step-functions-trust.json \
+    --profile "$AWS_PROFILE" \
+    >/dev/null
+
+  echo "Created Step Functions role."
+  sleep 10
+fi
+
+aws iam put-role-policy \
+  --role-name "$STATE_ROLE_NAME" \
+  --policy-name "$STATE_POLICY_NAME" \
+  --policy-document file://.build/step-functions-policy.json \
+  --profile "$AWS_PROFILE"
+
+STATE_ROLE_ARN="$(
+  aws iam get-role \
+    --role-name "$STATE_ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --query "Role.Arn" \
+    --output text
+)"
+
+STATE_MACHINE_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "stateMachines[?name=='${STATE_MACHINE_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+
+if [ -z "$STATE_MACHINE_ARN" ] || [ "$STATE_MACHINE_ARN" = "None" ]; then
+  echo "Creating state machine: $STATE_MACHINE_NAME"
+
+  STATE_MACHINE_ARN="$(
+    aws stepfunctions create-state-machine \
+      --name "$STATE_MACHINE_NAME" \
+      --definition "file://${RESOLVED_DEFINITION}" \
+      --role-arn "$STATE_ROLE_ARN" \
+      --type STANDARD \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query "stateMachineArn" \
+      --output text
+  )"
+
+  echo "State machine created."
+else
+  echo "Updating state machine: $STATE_MACHINE_NAME"
+
+  aws stepfunctions update-state-machine \
+    --state-machine-arn "$STATE_MACHINE_ARN" \
+    --definition "file://${RESOLVED_DEFINITION}" \
+    --role-arn "$STATE_ROLE_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  echo "State machine updated."
+fi
+
+echo
+echo "OCR workflow ready."
+echo "Worker Lambda: $WORKER_FUNCTION_NAME"
+echo "Worker ARN: $WORKER_ARN"
+echo "State machine: $STATE_MACHINE_NAME"
+echo "State machine ARN: $STATE_MACHINE_ARN"

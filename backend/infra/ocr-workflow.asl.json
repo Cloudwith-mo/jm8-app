@@ -1,0 +1,12 @@
+{
+  "Comment": "JournalM8 background OCR workflow",
+  "StartAt": "RunOcrWorker",
+  "States": {
+    "RunOcrWorker": {
+      "Type": "Task",
+      "Resource": "__OCR_WORKER_ARN__",
+      "TimeoutSeconds": 70,
+      "End": true
+    }
+  }
+}
