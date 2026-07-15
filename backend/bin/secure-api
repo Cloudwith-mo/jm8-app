@@ -87,6 +87,7 @@ secure_route() {
 
 secure_route "POST /entries"
 secure_route "GET /entries"
+secure_route "GET /ocr-jobs"
 secure_route "GET /entries/{entryId}"
 secure_route "POST /entries/{entryId}/analyze"
 secure_route "POST /entries/{entryId}/ocr"

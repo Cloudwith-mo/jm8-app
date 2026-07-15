@@ -7,6 +7,7 @@ from typing import Any
 from storage import (
     create_text_entry,
     list_entries,
+    list_ocr_jobs,
     get_entry_by_id,
     update_entry_analysis,
     create_upload_url,
@@ -39,6 +40,47 @@ def lambda_handler(event, context):
                 "message": "Entry created.",
                 "entry": entry
             })
+
+        if method == "GET" and path == "/ocr-jobs":
+
+            query_params = event.get("queryStringParameters") or {}
+
+            status_filter = str(query_params.get("status") or "ALL").upper()
+
+
+            allowed_statuses = {"ALL", "PENDING", "COMPLETED", "FAILED"}
+
+
+            if status_filter not in allowed_statuses:
+
+                return response(400, {
+
+                    "error": "Invalid OCR job status.",
+
+                    "allowedStatuses": sorted(allowed_statuses),
+
+                })
+
+
+            jobs = list_ocr_jobs(
+
+                user_id=get_user_id(event),
+
+                status_filter=status_filter,
+
+            )
+
+
+            return response(200, {
+
+                "jobs": jobs,
+
+                "count": len(jobs),
+
+                "statusFilter": status_filter,
+
+            })
+
 
         if method == "GET" and path == "/entries":
             query = event.get("queryStringParameters") or {}

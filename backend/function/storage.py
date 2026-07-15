@@ -360,3 +360,100 @@ def delete_entry(user_id: str, entry_id: str) -> dict:
         "deletedImage": bool(bucket and key),
     }
 
+
+
+def derive_ocr_job_status(entry: dict) -> str:
+    """
+    Converts existing entry/OCR states into a simple job status:
+    PENDING, COMPLETED, or FAILED.
+    """
+    ocr_status = str(entry.get("ocrStatus") or "").upper()
+    entry_status = str(entry.get("status") or "").upper()
+
+    if "FAILED" in ocr_status or "FAILED" in entry_status:
+        return "FAILED"
+
+    if (
+        ocr_status == "COMPLETED"
+        or entry_status in {"OCR_COMPLETED", "REVIEWED", "ANALYZED"}
+    ):
+        return "COMPLETED"
+
+    if (
+        ocr_status in {"PENDING", "IN_PROGRESS", "PROCESSING", "STARTED"}
+        or entry_status in {
+            "UPLOAD_URL_CREATED",
+            "OCR_PENDING",
+            "OCR_IN_PROGRESS",
+            "PROCESSING",
+        }
+    ):
+        return "PENDING"
+
+    return "PENDING"
+
+
+def list_ocr_jobs(
+    user_id: str,
+    status_filter: str | None = None,
+) -> list[dict]:
+    """
+    Returns image-based journal entries as OCR job records.
+
+    Pagination is handled internally so this continues working after the
+    user's archive grows beyond DynamoDB's single-query response limit.
+    """
+    query_args = {
+        "KeyConditionExpression": (
+            Key("PK").eq(f"USER#{user_id}")
+            & Key("SK").begins_with("ENTRY#")
+        ),
+        "ScanIndexForward": False,
+    }
+
+    entries: list[dict] = []
+
+    while True:
+        result = table.query(**query_args)
+        entries.extend(result.get("Items", []))
+
+        last_key = result.get("LastEvaluatedKey")
+
+        if not last_key:
+            break
+
+        query_args["ExclusiveStartKey"] = last_key
+
+    requested_status = (status_filter or "ALL").upper()
+    jobs: list[dict] = []
+
+    for entry in entries:
+        if entry.get("sourceType") != "image":
+            continue
+
+        job_status = derive_ocr_job_status(entry)
+
+        if requested_status != "ALL" and job_status != requested_status:
+            continue
+
+        clean_entry = attach_image_preview_url(entry)
+
+        jobs.append({
+            "entryId": clean_entry.get("entryId"),
+            "jobStatus": job_status,
+            "status": clean_entry.get("status"),
+            "ocrStatus": clean_entry.get("ocrStatus"),
+            "reviewStatus": clean_entry.get("reviewStatus"),
+            "analysisStatus": clean_entry.get("analysisStatus"),
+            "originalFileName": clean_entry.get("originalFileName"),
+            "contentType": clean_entry.get("contentType"),
+            "s3RawKey": clean_entry.get("s3RawKey"),
+            "imagePreviewUrl": clean_entry.get("imagePreviewUrl"),
+            "ocrWordCount": clean_entry.get("ocrWordCount", 0),
+            "ocrLineCount": clean_entry.get("ocrLineCount", 0),
+            "failureReason": clean_entry.get("failureReason"),
+            "createdAt": clean_entry.get("createdAt"),
+            "updatedAt": clean_entry.get("updatedAt"),
+        })
+
+    return jobs
