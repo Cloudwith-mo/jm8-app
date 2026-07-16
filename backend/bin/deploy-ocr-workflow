@@ -9,6 +9,7 @@ set -euo pipefail
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
 
 WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-worker"
+FAILURE_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-failure-handler"
 WORKER_ROLE_NAME="${APP_NAME}-${STAGE}-ocr-worker-role"
 STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 STATE_ROLE_NAME="${APP_NAME}-${STAGE}-step-functions-role"
@@ -220,16 +221,91 @@ WORKER_ARN="$(
     --output text
 )"
 
+echo "Checking OCR failure handler Lambda: $FAILURE_FUNCTION_NAME"
+
+if aws lambda get-function \
+  --function-name "$FAILURE_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null 2>&1
+then
+  echo "Updating OCR failure handler code."
+
+  aws lambda update-function-code \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --zip-file "fileb://${ZIP_FILE}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws lambda wait function-updated \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  aws lambda update-function-configuration \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --role "$WORKER_ROLE_ARN" \
+    --handler ocr_failure_handler.lambda_handler \
+    --timeout 30 \
+    --memory-size 256 \
+    --environment \
+      "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws lambda wait function-updated \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+else
+  echo "Creating OCR failure handler Lambda."
+
+  aws lambda create-function \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --runtime python3.12 \
+    --architectures arm64 \
+    --role "$WORKER_ROLE_ARN" \
+    --handler ocr_failure_handler.lambda_handler \
+    --zip-file "fileb://${ZIP_FILE}" \
+    --timeout 30 \
+    --memory-size 256 \
+    --environment \
+      "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
+    --tags \
+      "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws lambda wait function-active-v2 \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+fi
+
+FAILURE_HANDLER_ARN="$(
+  aws lambda get-function \
+    --function-name "$FAILURE_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Configuration.FunctionArn" \
+    --output text
+)"
+
 python3 - \
   "$DEFINITION_TEMPLATE" \
   "$RESOLVED_DEFINITION" \
-  "$WORKER_ARN" <<'PY'
+  "$WORKER_ARN" \
+  "$FAILURE_HANDLER_ARN" <<'PY'
 from pathlib import Path
 import sys
 
 template_path = Path(sys.argv[1])
 output_path = Path(sys.argv[2])
 worker_arn = sys.argv[3]
+failure_handler_arn = sys.argv[4]
 
 definition = template_path.read_text()
 
@@ -239,6 +315,16 @@ if "__OCR_WORKER_ARN__" not in definition:
 definition = definition.replace(
     "__OCR_WORKER_ARN__",
     worker_arn,
+)
+
+if "__OCR_FAILURE_HANDLER_ARN__" not in definition:
+    raise SystemExit(
+        "Failure handler ARN placeholder was not found."
+    )
+
+definition = definition.replace(
+    "__OCR_FAILURE_HANDLER_ARN__",
+    failure_handler_arn,
 )
 
 output_path.write_text(definition)
@@ -260,12 +346,13 @@ cat > .build/step-functions-trust.json <<'JSON'
 }
 JSON
 
-python3 - "$WORKER_ARN" \
+python3 - "$WORKER_ARN" "$FAILURE_HANDLER_ARN" \
   > .build/step-functions-policy.json <<'PY'
 import json
 import sys
 
 worker_arn = sys.argv[1]
+failure_handler_arn = sys.argv[2]
 
 policy = {
     "Version": "2012-10-17",
@@ -276,7 +363,8 @@ policy = {
                 "lambda:InvokeFunction"
             ],
             "Resource": [
-                worker_arn
+                worker_arn,
+                failure_handler_arn
             ]
         }
     ]
@@ -367,5 +455,7 @@ echo
 echo "OCR workflow ready."
 echo "Worker Lambda: $WORKER_FUNCTION_NAME"
 echo "Worker ARN: $WORKER_ARN"
+echo "Failure handler Lambda: $FAILURE_FUNCTION_NAME"
+echo "Failure handler ARN: $FAILURE_HANDLER_ARN"
 echo "State machine: $STATE_MACHINE_NAME"
 echo "State machine ARN: $STATE_MACHINE_ARN"

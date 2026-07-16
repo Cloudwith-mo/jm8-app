@@ -1,12 +1,51 @@
 {
-  "Comment": "JournalM8 background OCR workflow",
+  "Comment": "JournalM8 reliable background OCR workflow",
   "StartAt": "RunOcrWorker",
   "States": {
     "RunOcrWorker": {
       "Type": "Task",
       "Resource": "__OCR_WORKER_ARN__",
       "TimeoutSeconds": 70,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 10,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.workflowError",
+          "Next": "RecordWorkflowFailure"
+        }
+      ],
       "End": true
+    },
+    "RecordWorkflowFailure": {
+      "Type": "Task",
+      "Resource": "__OCR_FAILURE_HANDLER_ARN__",
+      "Parameters": {
+        "userId.$": "$.userId",
+        "entryId.$": "$.entryId",
+        "workflowError.$": "$.workflowError"
+      },
+      "Next": "FailWorkflow"
+    },
+    "FailWorkflow": {
+      "Type": "Fail",
+      "Error": "JM8.OCRWorkflowFailed",
+      "Cause": "OCR processing failed after workflow error handling."
     }
   }
 }

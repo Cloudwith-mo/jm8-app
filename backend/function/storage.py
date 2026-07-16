@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 
 TABLE_NAME = os.environ["TABLE_NAME"]
@@ -226,12 +227,13 @@ def queue_ocr_job(
     user_id: str,
     entry_id: str,
     force: bool = False,
+    is_retry: bool = False,
 ) -> dict:
     """
-    Marks an image entry as waiting for background OCR.
+    Atomically moves an image entry into the OCR queue.
 
-    The actual attempt count is incremented by the OCR worker when
-    processing begins.
+    The updatedAt condition prevents two simultaneous API requests
+    from starting duplicate workflow executions for the same entry.
     """
     entry = get_entry_by_id(user_id, entry_id)
 
@@ -251,6 +253,13 @@ def queue_ocr_job(
     if ocr_status in {"PENDING", "PROCESSING"}:
         raise OcrStateError("OCR is already queued or processing.")
 
+    if retry_state["jobStatus"] == "FAILED" and not (
+        is_retry or force
+    ):
+        raise OcrStateError(
+            "Failed OCR jobs must use the retry endpoint."
+        )
+
     if retry_state["jobStatus"] == "COMPLETED" and not force:
         raise OcrStateError("OCR has already completed for this entry.")
 
@@ -266,28 +275,56 @@ def queue_ocr_job(
         )
 
     now = utc_now()
+    expected_updated_at = entry.get("updatedAt")
 
-    table.update_item(
-        Key={
-            "PK": entry["PK"],
-            "SK": entry["SK"],
-        },
-        UpdateExpression=(
-            "SET #status = :status, "
-            "ocrStatus = :ocrStatus, "
-            "ocrQueuedAt = :ocrQueuedAt, "
-            "updatedAt = :updatedAt"
-        ),
-        ExpressionAttributeNames={
-            "#status": "status",
-        },
-        ExpressionAttributeValues={
-            ":status": "OCR_PENDING",
-            ":ocrStatus": "PENDING",
-            ":ocrQueuedAt": now,
-            ":updatedAt": now,
-        },
-    )
+    values = {
+        ":status": "OCR_PENDING",
+        ":ocrStatus": "PENDING",
+        ":ocrQueuedAt": now,
+        ":updatedAt": now,
+    }
+
+    if expected_updated_at:
+        condition_expression = "updatedAt = :expectedUpdatedAt"
+        values[":expectedUpdatedAt"] = expected_updated_at
+    else:
+        condition_expression = "attribute_not_exists(updatedAt)"
+
+    try:
+        table.update_item(
+            Key={
+                "PK": entry["PK"],
+                "SK": entry["SK"],
+            },
+            UpdateExpression=(
+                "SET #status = :status, "
+                "ocrStatus = :ocrStatus, "
+                "ocrQueuedAt = :ocrQueuedAt, "
+                "updatedAt = :updatedAt "
+                "REMOVE failureReason, "
+                "errorMessage, "
+                "ocrFailedAt, "
+                "ocrCompletedAt, "
+                "ocrWorkflowError, "
+                "ocrWorkflowCause, "
+                "ocrWorkflowFailedAt"
+            ),
+            ConditionExpression=condition_expression,
+            ExpressionAttributeNames={
+                "#status": "status",
+            },
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+
+        if error_code == "ConditionalCheckFailedException":
+            raise OcrStateError(
+                "OCR state changed while the job was being queued. "
+                "Refresh and try again."
+            ) from exc
+
+        raise
 
     return get_entry_by_id(user_id, entry_id)
 
@@ -428,6 +465,66 @@ def mark_ocr_failed(
             ":errorMessage": failure_reason,
             ":ocrFailedAt": now,
             ":updatedAt": now,
+        },
+    )
+
+    return get_entry_by_id(user_id, entry_id)
+
+
+def record_ocr_workflow_failure(
+    user_id: str,
+    entry_id: str,
+    workflow_error: str,
+    workflow_cause: str,
+) -> dict:
+    """
+    Records a terminal Step Functions failure.
+
+    If the OCR worker already stored a more specific Textract error,
+    that original failure reason is preserved.
+    """
+    entry = get_entry_by_id(user_id, entry_id)
+
+    if not entry:
+        return {}
+
+    now = utc_now()
+    error_name = str(workflow_error or "OCRWorkflowFailed")[:500]
+    cause = str(workflow_cause or "")[:2000]
+
+    failure_reason = str(
+        entry.get("failureReason")
+        or cause
+        or error_name
+        or "OCR workflow failed."
+    )[:2000]
+
+    table.update_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        },
+        UpdateExpression=(
+            "SET #status = :status, "
+            "ocrStatus = :ocrStatus, "
+            "failureReason = :failureReason, "
+            "errorMessage = :failureReason, "
+            "ocrFailedAt = if_not_exists(ocrFailedAt, :now), "
+            "ocrWorkflowError = :workflowError, "
+            "ocrWorkflowCause = :workflowCause, "
+            "ocrWorkflowFailedAt = :now, "
+            "updatedAt = :now"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":status": "OCR_FAILED",
+            ":ocrStatus": "FAILED",
+            ":failureReason": failure_reason,
+            ":workflowError": error_name,
+            ":workflowCause": cause,
+            ":now": now,
         },
     )
 
@@ -647,6 +744,9 @@ def list_ocr_jobs(
             "ocrWordCount": clean_entry.get("ocrWordCount", 0),
             "ocrLineCount": clean_entry.get("ocrLineCount", 0),
             "failureReason": clean_entry.get("failureReason"),
+            "workflowError": clean_entry.get("ocrWorkflowError"),
+            "workflowCause": clean_entry.get("ocrWorkflowCause"),
+            "workflowFailedAt": clean_entry.get("ocrWorkflowFailedAt"),
             "attemptCount": retry_state["attemptCount"],
             "maxAttempts": retry_state["maxAttempts"],
             "remainingAttempts": retry_state["remainingAttempts"],

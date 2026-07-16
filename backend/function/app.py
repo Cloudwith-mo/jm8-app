@@ -186,6 +186,7 @@ def lambda_handler(event, context):
                     user_id=user_id,
                     entry_id=entry_id,
                     force=force,
+                    is_retry=True,
                 )
             except OcrStateError as exc:
                 return response(409, {
