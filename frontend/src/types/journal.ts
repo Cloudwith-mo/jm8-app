@@ -37,6 +37,13 @@ export type JournalEntry = {
   s3RawKey?: string;
   originalFileName?: string;
   contentType?: string;
+  imagePreviewUrl?: string;
+  ocrQueuedAt?: string;
+  ocrStartedAt?: string;
+  ocrLastAttemptAt?: string;
+  ocrFailedAt?: string;
+  ocrAttemptCount?: number;
+  failureReason?: string;
   analysis?: Analysis;
 };
 

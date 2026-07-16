@@ -11,6 +11,8 @@ set -euo pipefail
 ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 ZIP_FILE="dist/function.zip"
+OCR_WORKFLOW_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
+API_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-ocr-workflow"
 
 ./bin/package
 
@@ -26,6 +28,54 @@ ROLE_ARN=$(aws iam get-role \
   --query "Role.Arn" \
   --output text \
   --profile "$AWS_PROFILE")
+
+echo "Resolving OCR workflow: $OCR_WORKFLOW_NAME"
+
+OCR_WORKFLOW_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "stateMachines[?name=='${OCR_WORKFLOW_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+
+if [ -z "$OCR_WORKFLOW_ARN" ] || [ "$OCR_WORKFLOW_ARN" = "None" ]; then
+  echo "OCR workflow was not found."
+  echo "Run: ./bin/deploy-ocr-workflow"
+  exit 1
+fi
+
+mkdir -p .build
+
+python3 - "$OCR_WORKFLOW_ARN" \
+  > .build/api-ocr-workflow-policy.json <<'PY'
+import json
+import sys
+
+workflow_arn = sys.argv[1]
+
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "states:StartExecution"
+            ],
+            "Resource": workflow_arn
+        }
+    ]
+}))
+PY
+
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$API_WORKFLOW_POLICY_NAME" \
+  --policy-document file://.build/api-ocr-workflow-policy.json \
+  --profile "$AWS_PROFILE"
+
+echo "API role can start the OCR workflow."
 
 echo "Checking Lambda function: $FUNCTION_NAME"
 
@@ -50,7 +100,7 @@ if [ "$FUNCTION_EXISTS" -ne 0 ]; then
     --zip-file "fileb://${ZIP_FILE}" \
     --timeout 15 \
     --memory-size 256 \
-    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
+    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN}}" \
     --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
@@ -83,7 +133,7 @@ else
     --function-name "$FUNCTION_NAME" \
     --timeout 15 \
     --memory-size 256 \
-    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
+    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN}}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null

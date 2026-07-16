@@ -1,5 +1,5 @@
 from journal_analyzer import analyze_journal_entry
-from ocr import extract_text_from_s3_image
+from ocr_workflow_client import start_ocr_execution
 import base64
 import json
 import os
@@ -11,10 +11,9 @@ from storage import (
     get_entry_by_id,
     update_entry_analysis,
     create_upload_url,
-    update_entry_ocr_result,
-    begin_ocr_attempt,
     mark_ocr_failed,
     get_ocr_retry_state,
+    queue_ocr_job,
     OcrStateError,
     update_entry_review,
     delete_entry,
@@ -154,7 +153,10 @@ def lambda_handler(event, context):
         if method == "POST" and path.startswith("/entries/") and path.endswith("/ocr/retry"):
             entry_id = path.split("/entries/")[1].split("/")[0]
 
-            entry = get_entry_by_id(user_id=user_id, entry_id=entry_id)
+            entry = get_entry_by_id(
+                user_id=user_id,
+                entry_id=entry_id,
+            )
 
             if not entry:
                 return response(404, {"error": "Entry not found."})
@@ -165,14 +167,6 @@ def lambda_handler(event, context):
                     "sourceType": entry.get("sourceType"),
                 })
 
-            bucket = entry.get("s3RawBucket")
-            key = entry.get("s3RawKey")
-
-            if not bucket or not key:
-                return response(400, {
-                    "error": "Entry does not have S3 raw file information."
-                })
-
             body = parse_body(event)
             force = body.get("force") is True
             retry_state = get_ocr_retry_state(entry)
@@ -180,12 +174,15 @@ def lambda_handler(event, context):
             if not retry_state["canRetry"] and not force:
                 return response(409, {
                     "error": "OCRRetryNotAllowed",
-                    "message": "Only failed OCR jobs with remaining attempts can be retried.",
+                    "message": (
+                        "Only failed OCR jobs with remaining "
+                        "attempts can be retried."
+                    ),
                     "retry": retry_state,
                 })
 
             try:
-                begin_ocr_attempt(
+                queued_entry = queue_ocr_job(
                     user_id=user_id,
                     entry_id=entry_id,
                     force=force,
@@ -198,41 +195,44 @@ def lambda_handler(event, context):
                 })
 
             try:
-                ocr_result = extract_text_from_s3_image(
-                    bucket=bucket,
-                    key=key,
-                )
-
-                updated_entry = update_entry_ocr_result(
+                execution = start_ocr_execution(
                     user_id=user_id,
                     entry_id=entry_id,
-                    ocr_result=ocr_result,
+                    force=force,
                 )
-
-                return response(200, {
-                    "message": "OCR retry completed.",
-                    "entry": updated_entry,
-                    "retry": get_ocr_retry_state(updated_entry),
-                })
-
             except Exception as exc:
                 failed_entry = mark_ocr_failed(
                     user_id=user_id,
                     entry_id=entry_id,
-                    failure_reason=str(exc),
+                    failure_reason=(
+                        f"Could not start OCR workflow: {exc}"
+                    ),
                 )
 
-                return response(500, {
-                    "error": "OCRFailed",
+                return response(502, {
+                    "error": "OCRWorkflowStartFailed",
                     "message": str(exc),
                     "entry": failed_entry,
-                    "retry": get_ocr_retry_state(failed_entry),
                 })
+
+            return response(202, {
+                "message": "OCR retry accepted.",
+                "entry": queued_entry,
+                "job": {
+                    "entryId": entry_id,
+                    "jobStatus": "PENDING",
+                    **execution,
+                },
+                "retry": get_ocr_retry_state(queued_entry),
+            })
 
         if method == "POST" and path.startswith("/entries/") and path.endswith("/ocr"):
             entry_id = path.split("/entries/")[1].split("/")[0]
 
-            entry = get_entry_by_id(user_id=user_id, entry_id=entry_id)
+            entry = get_entry_by_id(
+                user_id=user_id,
+                entry_id=entry_id,
+            )
 
             if not entry:
                 return response(404, {"error": "Entry not found."})
@@ -240,19 +240,11 @@ def lambda_handler(event, context):
             if entry.get("sourceType") != "image":
                 return response(400, {
                     "error": "OCR only works on image entries.",
-                    "sourceType": entry.get("sourceType")
-                })
-
-            bucket = entry.get("s3RawBucket")
-            key = entry.get("s3RawKey")
-
-            if not bucket or not key:
-                return response(400, {
-                    "error": "Entry does not have S3 raw file information."
+                    "sourceType": entry.get("sourceType"),
                 })
 
             try:
-                begin_ocr_attempt(
+                queued_entry = queue_ocr_job(
                     user_id=user_id,
                     entry_id=entry_id,
                 )
@@ -264,30 +256,35 @@ def lambda_handler(event, context):
                 })
 
             try:
-                ocr_result = extract_text_from_s3_image(bucket=bucket, key=key)
-
-                updated_entry = update_entry_ocr_result(
+                execution = start_ocr_execution(
                     user_id=user_id,
                     entry_id=entry_id,
-                    ocr_result=ocr_result
                 )
-
-                return response(200, {
-                    "message": "OCR completed.",
-                    "entry": updated_entry
-                })
-
             except Exception as exc:
-                mark_ocr_failed(
+                failed_entry = mark_ocr_failed(
                     user_id=user_id,
                     entry_id=entry_id,
-                    failure_reason=str(exc),
+                    failure_reason=(
+                        f"Could not start OCR workflow: {exc}"
+                    ),
                 )
 
-                return response(500, {
-                    "error": "OCRFailed",
-                    "message": str(exc)
+                return response(502, {
+                    "error": "OCRWorkflowStartFailed",
+                    "message": str(exc),
+                    "entry": failed_entry,
                 })
+
+            return response(202, {
+                "message": "OCR job accepted.",
+                "entry": queued_entry,
+                "job": {
+                    "entryId": entry_id,
+                    "jobStatus": "PENDING",
+                    **execution,
+                },
+                "retry": get_ocr_retry_state(queued_entry),
+            })
 
         if method == "PUT" and path.startswith("/entries/") and path.endswith("/review"):
             entry_id = path.split("/entries/")[1].split("/")[0]

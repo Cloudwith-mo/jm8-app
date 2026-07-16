@@ -222,6 +222,76 @@ def get_ocr_retry_state(
     }
 
 
+def queue_ocr_job(
+    user_id: str,
+    entry_id: str,
+    force: bool = False,
+) -> dict:
+    """
+    Marks an image entry as waiting for background OCR.
+
+    The actual attempt count is incremented by the OCR worker when
+    processing begins.
+    """
+    entry = get_entry_by_id(user_id, entry_id)
+
+    if not entry:
+        raise OcrStateError("Entry not found.")
+
+    if entry.get("sourceType") != "image":
+        raise OcrStateError("OCR only works on image entries.")
+
+    retry_state = get_ocr_retry_state(entry)
+    current_status = str(entry.get("status") or "").upper()
+    ocr_status = str(entry.get("ocrStatus") or "").upper()
+
+    if current_status in {"OCR_PENDING", "OCR_PROCESSING"}:
+        raise OcrStateError("OCR is already queued or processing.")
+
+    if ocr_status in {"PENDING", "PROCESSING"}:
+        raise OcrStateError("OCR is already queued or processing.")
+
+    if retry_state["jobStatus"] == "COMPLETED" and not force:
+        raise OcrStateError("OCR has already completed for this entry.")
+
+    if retry_state["remainingAttempts"] <= 0 and not force:
+        raise OcrStateError("Maximum OCR attempt limit reached.")
+
+    bucket = entry.get("s3RawBucket")
+    key = entry.get("s3RawKey")
+
+    if not bucket or not key:
+        raise OcrStateError(
+            "Entry does not have S3 raw file information."
+        )
+
+    now = utc_now()
+
+    table.update_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        },
+        UpdateExpression=(
+            "SET #status = :status, "
+            "ocrStatus = :ocrStatus, "
+            "ocrQueuedAt = :ocrQueuedAt, "
+            "updatedAt = :updatedAt"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":status": "OCR_PENDING",
+            ":ocrStatus": "PENDING",
+            ":ocrQueuedAt": now,
+            ":updatedAt": now,
+        },
+    )
+
+    return get_entry_by_id(user_id, entry_id)
+
+
 def begin_ocr_attempt(
     user_id: str,
     entry_id: str,
@@ -581,6 +651,7 @@ def list_ocr_jobs(
             "maxAttempts": retry_state["maxAttempts"],
             "remainingAttempts": retry_state["remainingAttempts"],
             "canRetry": retry_state["canRetry"],
+            "queuedAt": clean_entry.get("ocrQueuedAt"),
             "lastAttemptAt": clean_entry.get("ocrLastAttemptAt"),
             "processingStartedAt": clean_entry.get("ocrStartedAt"),
             "completedAt": clean_entry.get("ocrCompletedAt"),

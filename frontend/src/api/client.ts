@@ -77,10 +77,64 @@ export async function uploadFileToS3(uploadUrl: string, file: File): Promise<voi
   }
 }
 
-export async function runOcr(entryId: string): Promise<{ message: string; entry: JournalEntry }> {
+export type OcrJobAcceptedResponse = {
+  message: string;
+  entry: JournalEntry;
+  job: {
+    entryId: string;
+    jobStatus: "PENDING";
+    executionArn: string;
+    executionName: string;
+    startedAt: string;
+  };
+};
+
+export async function runOcr(
+  entryId: string
+): Promise<OcrJobAcceptedResponse> {
   return apiRequest(`/entries/${entryId}/ocr`, {
     method: "POST",
   });
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
+export async function waitForOcrCompletion(
+  entryId: string,
+  maxPolls = 60,
+  intervalMilliseconds = 1500
+): Promise<{ entry: JournalEntry }> {
+  for (let poll = 0; poll < maxPolls; poll += 1) {
+    const result = await getEntry(entryId);
+    const status = String(result.entry.status || "").toUpperCase();
+    const ocrStatus = String(result.entry.ocrStatus || "").toUpperCase();
+
+    if (
+      status === "OCR_COMPLETED" ||
+      ocrStatus === "COMPLETED"
+    ) {
+      return result;
+    }
+
+    if (
+      status === "OCR_FAILED" ||
+      ocrStatus === "FAILED"
+    ) {
+      throw new Error(
+        "OCR processing failed. The job can be retried."
+      );
+    }
+
+    await sleep(intervalMilliseconds);
+  }
+
+  throw new Error(
+    "OCR is still processing. Refresh the archive shortly."
+  );
 }
 
 export async function reviewEntry(

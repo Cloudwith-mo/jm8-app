@@ -25,6 +25,7 @@ import {
   listEntries,
   reviewEntry,
   runOcr,
+  waitForOcrCompletion,
   uploadFileToS3,
 } from "../api/client";
 
@@ -225,11 +226,31 @@ export default function ArchivePage() {
       updateStatus("Uploading image to S3...", "loading", "Uploading image");
       await uploadFileToS3(upload.upload.uploadUrl, file);
 
-      updateStatus("Running OCR on journal image...", "loading", "OCR running");
-      const ocrResult = await runOcr(upload.upload.entryId);
+      updateStatus(
+        "Starting background OCR...",
+        "loading",
+        "OCR starting"
+      );
+
+      const ocrJob = await runOcr(upload.upload.entryId);
+
+      updateStatus(
+        "OCR is processing securely in the background...",
+        "loading",
+        "OCR processing"
+      );
+
+      const ocrResult = await waitForOcrCompletion(
+        ocrJob.job.entryId
+      );
 
       await refreshEntries(ocrResult.entry.entryId);
-      updateStatus("Image uploaded and OCR completed.", "success", "OCR complete");
+
+      updateStatus(
+        "Image uploaded and OCR completed.",
+        "success",
+        "OCR complete"
+      );
       setModalMode(null);
     } catch (error) {
       updateStatus(getErrorMessage(error, "Upload/OCR failed."), "error", "Upload failed");
