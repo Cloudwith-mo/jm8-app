@@ -1,0 +1,645 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+
+ALERT_EMAIL="${ALERT_EMAIL:-}"
+
+API_FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
+WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-worker"
+FAILURE_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-failure-handler"
+STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
+
+API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"
+WORKER_LOG_GROUP="/aws/lambda/${WORKER_FUNCTION_NAME}"
+FAILURE_LOG_GROUP="/aws/lambda/${FAILURE_FUNCTION_NAME}"
+
+DASHBOARD_NAME="${APP_NAME}-${STAGE}-operations"
+TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
+METRIC_NAMESPACE="JM8/OCR"
+
+API_ERRORS_ALARM="${APP_NAME}-${STAGE}-api-errors"
+API_THROTTLES_ALARM="${APP_NAME}-${STAGE}-api-throttles"
+WORKER_THROTTLES_ALARM="${APP_NAME}-${STAGE}-ocr-worker-throttles"
+FAILURE_HANDLER_ERRORS_ALARM="${APP_NAME}-${STAGE}-failure-handler-errors"
+WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-workflow-failed"
+WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-workflow-timed-out"
+
+mkdir -p .build
+
+echo "Checking AWS identity..."
+
+ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Account \
+    --output text
+)"
+
+STATE_MACHINE_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "stateMachines[?name=='${STATE_MACHINE_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+
+if [ -z "$STATE_MACHINE_ARN" ] ||
+   [ "$STATE_MACHINE_ARN" = "None" ]; then
+  echo "OCR state machine was not found: $STATE_MACHINE_NAME"
+  exit 1
+fi
+
+echo "Creating or resolving SNS alert topic..."
+
+TOPIC_ARN="$(
+  aws sns create-topic \
+    --name "$TOPIC_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query TopicArn \
+    --output text
+)"
+
+aws sns get-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query Attributes.Policy \
+  --output text \
+  > .build/current-alert-topic-policy.json
+
+python3 - \
+  "$TOPIC_ARN" \
+  "$ACCOUNT_ID" \
+  "$AWS_REGION" \
+  "$APP_NAME" \
+  "$STAGE" \
+  .build/current-alert-topic-policy.json \
+  > .build/alert-topic-policy.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+topic_arn = sys.argv[1]
+account_id = sys.argv[2]
+region = sys.argv[3]
+app_name = sys.argv[4]
+stage = sys.argv[5]
+current_policy_path = Path(sys.argv[6])
+
+raw_policy = current_policy_path.read_text().strip()
+
+if raw_policy and raw_policy != "None":
+    policy = json.loads(raw_policy)
+else:
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [],
+    }
+
+statements = policy.get("Statement", [])
+
+if isinstance(statements, dict):
+    statements = [statements]
+
+statements = [
+    statement
+    for statement in statements
+    if statement.get("Sid") != "AllowJM8CloudWatchAlarms"
+]
+
+statements.append({
+    "Sid": "AllowJM8CloudWatchAlarms",
+    "Effect": "Allow",
+    "Principal": {
+        "Service": "cloudwatch.amazonaws.com",
+    },
+    "Action": "SNS:Publish",
+    "Resource": topic_arn,
+    "Condition": {
+        "ArnLike": {
+            "aws:SourceArn": (
+                f"arn:aws:cloudwatch:{region}:{account_id}:"
+                f"alarm:{app_name}-{stage}-*"
+            ),
+        },
+        "StringEquals": {
+            "aws:SourceAccount": account_id,
+        },
+    },
+})
+
+policy["Version"] = "2012-10-17"
+policy["Statement"] = statements
+
+print(json.dumps(policy))
+PY
+
+aws sns set-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --attribute-name Policy \
+  --attribute-value "$(cat .build/alert-topic-policy.json)" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+echo "SNS alert topic is ready."
+
+if [ -n "$ALERT_EMAIL" ]; then
+  SUBSCRIPTION_COUNT="$(
+    aws sns list-subscriptions-by-topic \
+      --topic-arn "$TOPIC_ARN" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query \
+        "length(Subscriptions[?Protocol=='email' && Endpoint=='${ALERT_EMAIL}'])" \
+      --output text
+  )"
+
+  if [ "$SUBSCRIPTION_COUNT" = "0" ]; then
+    aws sns subscribe \
+      --topic-arn "$TOPIC_ARN" \
+      --protocol email \
+      --notification-endpoint "$ALERT_EMAIL" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+
+    echo "SNS confirmation email requested."
+  else
+    echo "SNS email subscription already exists."
+  fi
+else
+  echo "ALERT_EMAIL was not set; email subscription skipped."
+fi
+
+echo "Configuring Lambda log groups and retention..."
+
+for LOG_GROUP in \
+  "$API_LOG_GROUP" \
+  "$WORKER_LOG_GROUP" \
+  "$FAILURE_LOG_GROUP"
+do
+  LOG_GROUP_EXISTS="$(
+    aws logs describe-log-groups \
+      --log-group-name-prefix "$LOG_GROUP" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query \
+        "logGroups[?logGroupName=='${LOG_GROUP}'].logGroupName | [0]" \
+      --output text
+  )"
+
+  if [ -z "$LOG_GROUP_EXISTS" ] ||
+     [ "$LOG_GROUP_EXISTS" = "None" ]; then
+    aws logs create-log-group \
+      --log-group-name "$LOG_GROUP" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION"
+  fi
+
+  aws logs put-retention-policy \
+    --log-group-name "$LOG_GROUP" \
+    --retention-in-days 30 \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+done
+
+echo "Log retention configured for 30 days."
+
+echo "Creating OCR metric filters..."
+
+aws logs put-metric-filter \
+  --log-group-name "$WORKER_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-ocr-completed" \
+  --filter-pattern '"ocr_workflow_completed"' \
+  --metric-transformations \
+    "metricName=OcrCompleted,metricNamespace=${METRIC_NAMESPACE},metricValue=1,defaultValue=0" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$FAILURE_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-ocr-failed" \
+  --filter-pattern '"ocr_workflow_failure_recorded"' \
+  --metric-transformations \
+    "metricName=OcrFailed,metricNamespace=${METRIC_NAMESPACE},metricValue=1,defaultValue=0" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+echo "OCR metric filters created."
+
+put_count_alarm() {
+  local alarm_name="$1"
+  local description="$2"
+  local namespace="$3"
+  local metric_name="$4"
+  local dimension_name="$5"
+  local dimension_value="$6"
+
+  aws cloudwatch put-metric-alarm \
+    --alarm-name "$alarm_name" \
+    --alarm-description "$description" \
+    --namespace "$namespace" \
+    --metric-name "$metric_name" \
+    --dimensions \
+      "Name=${dimension_name},Value=${dimension_value}" \
+    --statistic Sum \
+    --unit Count \
+    --period 300 \
+    --evaluation-periods 1 \
+    --datapoints-to-alarm 1 \
+    --threshold 1 \
+    --comparison-operator GreaterThanOrEqualToThreshold \
+    --treat-missing-data notBreaching \
+    --alarm-actions "$TOPIC_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+}
+
+echo "Creating CloudWatch alarms..."
+
+put_count_alarm \
+  "$API_ERRORS_ALARM" \
+  "JM8 API Lambda reported one or more errors in five minutes." \
+  "AWS/Lambda" \
+  "Errors" \
+  "FunctionName" \
+  "$API_FUNCTION_NAME"
+
+put_count_alarm \
+  "$API_THROTTLES_ALARM" \
+  "JM8 API Lambda was throttled." \
+  "AWS/Lambda" \
+  "Throttles" \
+  "FunctionName" \
+  "$API_FUNCTION_NAME"
+
+put_count_alarm \
+  "$WORKER_THROTTLES_ALARM" \
+  "JM8 OCR worker Lambda was throttled." \
+  "AWS/Lambda" \
+  "Throttles" \
+  "FunctionName" \
+  "$WORKER_FUNCTION_NAME"
+
+put_count_alarm \
+  "$FAILURE_HANDLER_ERRORS_ALARM" \
+  "JM8 OCR failure handler could not record a workflow failure." \
+  "AWS/Lambda" \
+  "Errors" \
+  "FunctionName" \
+  "$FAILURE_FUNCTION_NAME"
+
+put_count_alarm \
+  "$WORKFLOW_FAILED_ALARM" \
+  "JM8 OCR Step Functions execution failed." \
+  "AWS/States" \
+  "ExecutionsFailed" \
+  "StateMachineArn" \
+  "$STATE_MACHINE_ARN"
+
+put_count_alarm \
+  "$WORKFLOW_TIMEOUT_ALARM" \
+  "JM8 OCR Step Functions execution timed out." \
+  "AWS/States" \
+  "ExecutionsTimedOut" \
+  "StateMachineArn" \
+  "$STATE_MACHINE_ARN"
+
+echo "CloudWatch alarms created."
+
+python3 - \
+  "$AWS_REGION" \
+  "$ACCOUNT_ID" \
+  "$APP_NAME" \
+  "$STAGE" \
+  "$API_FUNCTION_NAME" \
+  "$WORKER_FUNCTION_NAME" \
+  "$FAILURE_FUNCTION_NAME" \
+  "$STATE_MACHINE_ARN" \
+  "$API_LOG_GROUP" \
+  "$WORKER_LOG_GROUP" \
+  "$FAILURE_LOG_GROUP" \
+  "$METRIC_NAMESPACE" \
+  > .build/operations-dashboard.json <<'PY'
+import json
+import sys
+
+region = sys.argv[1]
+account_id = sys.argv[2]
+app_name = sys.argv[3]
+stage = sys.argv[4]
+api_function = sys.argv[5]
+worker_function = sys.argv[6]
+failure_function = sys.argv[7]
+state_machine_arn = sys.argv[8]
+api_log_group = sys.argv[9]
+worker_log_group = sys.argv[10]
+failure_log_group = sys.argv[11]
+metric_namespace = sys.argv[12]
+
+alarm_names = [
+    f"{app_name}-{stage}-api-errors",
+    f"{app_name}-{stage}-api-throttles",
+    f"{app_name}-{stage}-ocr-worker-throttles",
+    f"{app_name}-{stage}-failure-handler-errors",
+    f"{app_name}-{stage}-workflow-failed",
+    f"{app_name}-{stage}-workflow-timed-out",
+]
+
+alarm_arns = [
+    (
+        f"arn:aws:cloudwatch:{region}:{account_id}:"
+        f"alarm:{alarm_name}"
+    )
+    for alarm_name in alarm_names
+]
+
+dashboard = {
+    "start": "-PT6H",
+    "periodOverride": "inherit",
+    "widgets": [
+        {
+            "type": "text",
+            "x": 0,
+            "y": 0,
+            "width": 24,
+            "height": 2,
+            "properties": {
+                "markdown": (
+                    f"# Journal M8 Operations — {stage}\n"
+                    "Managed by `backend/bin/deploy-observability`. "
+                    "Update the script instead of editing this dashboard manually."
+                ),
+                "background": "solid",
+            },
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Lambda invocations",
+                "region": region,
+                "view": "timeSeries",
+                "period": 300,
+                "metrics": [
+                    [
+                        "AWS/Lambda",
+                        "Invocations",
+                        "FunctionName",
+                        api_function,
+                        {"stat": "Sum", "label": "API"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Invocations",
+                        "FunctionName",
+                        worker_function,
+                        {"stat": "Sum", "label": "OCR worker"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Invocations",
+                        "FunctionName",
+                        failure_function,
+                        {"stat": "Sum", "label": "Failure handler"},
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 2,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Lambda errors and throttles",
+                "region": region,
+                "view": "timeSeries",
+                "period": 300,
+                "metrics": [
+                    [
+                        "AWS/Lambda",
+                        "Errors",
+                        "FunctionName",
+                        api_function,
+                        {"stat": "Sum", "label": "API errors"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Throttles",
+                        "FunctionName",
+                        api_function,
+                        {"stat": "Sum", "label": "API throttles"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Errors",
+                        "FunctionName",
+                        worker_function,
+                        {"stat": "Sum", "label": "Worker errors"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Throttles",
+                        "FunctionName",
+                        worker_function,
+                        {"stat": "Sum", "label": "Worker throttles"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Errors",
+                        "FunctionName",
+                        failure_function,
+                        {"stat": "Sum", "label": "Handler errors"},
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 8,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Lambda duration",
+                "region": region,
+                "view": "timeSeries",
+                "period": 300,
+                "metrics": [
+                    [
+                        "AWS/Lambda",
+                        "Duration",
+                        "FunctionName",
+                        api_function,
+                        {"stat": "p95", "label": "API p95"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Duration",
+                        "FunctionName",
+                        worker_function,
+                        {"stat": "p95", "label": "Worker p95"},
+                    ],
+                    [
+                        "AWS/Lambda",
+                        "Duration",
+                        "FunctionName",
+                        failure_function,
+                        {"stat": "Maximum", "label": "Handler max"},
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 8,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "OCR workflow executions",
+                "region": region,
+                "view": "timeSeries",
+                "period": 300,
+                "metrics": [
+                    [
+                        "AWS/States",
+                        "ExecutionsStarted",
+                        "StateMachineArn",
+                        state_machine_arn,
+                        {"stat": "Sum", "label": "Started"},
+                    ],
+                    [
+                        "AWS/States",
+                        "ExecutionsSucceeded",
+                        "StateMachineArn",
+                        state_machine_arn,
+                        {"stat": "Sum", "label": "Succeeded"},
+                    ],
+                    [
+                        "AWS/States",
+                        "ExecutionsFailed",
+                        "StateMachineArn",
+                        state_machine_arn,
+                        {"stat": "Sum", "label": "Failed"},
+                    ],
+                    [
+                        "AWS/States",
+                        "ExecutionsTimedOut",
+                        "StateMachineArn",
+                        state_machine_arn,
+                        {"stat": "Sum", "label": "Timed out"},
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "JM8 OCR application metrics",
+                "region": region,
+                "view": "timeSeries",
+                "period": 300,
+                "metrics": [
+                    [
+                        metric_namespace,
+                        "OcrCompleted",
+                        {"stat": "Sum", "label": "Completed OCR"},
+                    ],
+                    [
+                        metric_namespace,
+                        "OcrFailed",
+                        {"stat": "Sum", "label": "Failed OCR"},
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "alarm",
+            "x": 12,
+            "y": 14,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "JM8 alarm status",
+                "alarms": alarm_arns,
+                "sortBy": "stateUpdatedTimestamp",
+            },
+        },
+        {
+            "type": "log",
+            "x": 0,
+            "y": 20,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Recent OCR worker events",
+                "region": region,
+                "view": "table",
+                "query": (
+                    f"SOURCE '{worker_log_group}' "
+                    "| fields @timestamp, @message\n"
+                    "| filter @message like /ocr_workflow_/\n"
+                    "| sort @timestamp desc\n"
+                    "| limit 20"
+                ),
+            },
+        },
+        {
+            "type": "log",
+            "x": 12,
+            "y": 20,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Recent workflow failure events",
+                "region": region,
+                "view": "table",
+                "query": (
+                    f"SOURCE '{failure_log_group}' "
+                    "| fields @timestamp, @message\n"
+                    "| filter @message like /ocr_workflow_/\n"
+                    "| sort @timestamp desc\n"
+                    "| limit 20"
+                ),
+            },
+        },
+    ],
+}
+
+print(json.dumps(dashboard))
+PY
+
+echo "Deploying CloudWatch dashboard..."
+
+aws cloudwatch put-dashboard \
+  --dashboard-name "$DASHBOARD_NAME" \
+  --dashboard-body file://.build/operations-dashboard.json \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+echo
+echo "JM8 observability deployment complete."
+echo "Dashboard: $DASHBOARD_NAME"
+echo "SNS topic: $TOPIC_NAME"
+echo "Metric namespace: $METRIC_NAMESPACE"
+
+if [ -n "$ALERT_EMAIL" ]; then
+  echo "Confirm the Amazon SNS subscription email before testing alerts."
+fi
