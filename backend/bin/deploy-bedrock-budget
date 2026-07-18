@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+
+MONTHLY_LIMIT="${BEDROCK_MONTHLY_BUDGET_USD:-10}"
+
+BUDGET_NAME="${APP_NAME}-${STAGE}-bedrock-monthly"
+TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
+
+BUILD_DIR=".build/bedrock-budget"
+mkdir -p "$BUILD_DIR"
+
+python3 - "$MONTHLY_LIMIT" <<'PY'
+import sys
+from decimal import Decimal, InvalidOperation
+
+try:
+    amount = Decimal(sys.argv[1])
+except InvalidOperation as exc:
+    raise SystemExit(
+        "BEDROCK_MONTHLY_BUDGET_USD must be numeric."
+    ) from exc
+
+if amount <= 0:
+    raise SystemExit(
+        "BEDROCK_MONTHLY_BUDGET_USD must be positive."
+    )
+
+print("Monthly budget amount validated.")
+PY
+
+ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Account \
+    --output text
+)"
+
+TOPIC_ARN="$(
+  aws sns create-topic \
+    --name "$TOPIC_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query TopicArn \
+    --output text
+)"
+
+echo "Updating SNS policy for AWS Budgets..."
+
+aws sns get-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query Attributes.Policy \
+  --output text \
+  > "$BUILD_DIR/current-topic-policy.json"
+
+python3 - \
+  "$BUILD_DIR/current-topic-policy.json" \
+  "$BUILD_DIR/updated-topic-policy.json" \
+  "$TOPIC_ARN" \
+  "$ACCOUNT_ID" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+topic_arn = sys.argv[3]
+account_id = sys.argv[4]
+
+raw_policy = source_path.read_text().strip()
+
+if raw_policy and raw_policy != "None":
+    policy = json.loads(raw_policy)
+else:
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [],
+    }
+
+statements = policy.get("Statement") or []
+
+if isinstance(statements, dict):
+    statements = [statements]
+
+statements = [
+    statement
+    for statement in statements
+    if statement.get("Sid")
+    != "AllowJM8BudgetsToPublish"
+]
+
+statements.append({
+    "Sid": "AllowJM8BudgetsToPublish",
+    "Effect": "Allow",
+    "Principal": {
+        "Service": "budgets.amazonaws.com",
+    },
+    "Action": "SNS:Publish",
+    "Resource": topic_arn,
+    "Condition": {
+        "StringEquals": {
+            "aws:SourceAccount": account_id,
+        },
+        "ArnLike": {
+            "aws:SourceArn": (
+                f"arn:aws:budgets::{account_id}:*"
+            ),
+        },
+    },
+})
+
+policy["Version"] = "2012-10-17"
+policy["Statement"] = statements
+
+output_path.write_text(
+    json.dumps(policy, indent=2) + "\n"
+)
+
+print("AWS Budgets SNS permission prepared.")
+PY
+
+aws sns set-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --attribute-name Policy \
+  --attribute-value \
+    "$(cat "$BUILD_DIR/updated-topic-policy.json")" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+python3 - \
+  "$BUILD_DIR/budget.json" \
+  "$BUDGET_NAME" \
+  "$MONTHLY_LIMIT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+output_path = Path(sys.argv[1])
+budget_name = sys.argv[2]
+monthly_limit = sys.argv[3]
+
+budget = {
+    "BudgetName": budget_name,
+    "BudgetLimit": {
+        "Amount": monthly_limit,
+        "Unit": "USD",
+    },
+    "BudgetType": "COST",
+    "TimeUnit": "MONTHLY",
+    "CostFilters": {
+        "Service": [
+            "Amazon Bedrock",
+        ],
+    },
+    "CostTypes": {
+        "IncludeCredit": True,
+        "IncludeDiscount": True,
+        "IncludeOtherSubscription": True,
+        "IncludeRecurring": True,
+        "IncludeRefund": True,
+        "IncludeSubscription": True,
+        "IncludeSupport": False,
+        "IncludeTax": True,
+        "IncludeUpfront": True,
+        "UseAmortized": False,
+        "UseBlended": False,
+    },
+}
+
+output_path.write_text(
+    json.dumps(budget, indent=2) + "\n"
+)
+
+print("Bedrock budget definition prepared.")
+PY
+
+if aws budgets describe-budget \
+  --account-id "$ACCOUNT_ID" \
+  --budget-name "$BUDGET_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null 2>&1
+then
+  aws budgets update-budget \
+    --account-id "$ACCOUNT_ID" \
+    --new-budget file://"$BUILD_DIR/budget.json" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  echo "Bedrock budget updated."
+else
+  aws budgets create-budget \
+    --account-id "$ACCOUNT_ID" \
+    --budget file://"$BUILD_DIR/budget.json" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  echo "Bedrock budget created."
+fi
+
+aws budgets describe-notifications-for-budget \
+  --account-id "$ACCOUNT_ID" \
+  --budget-name "$BUDGET_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/current-notifications.json"
+
+for THRESHOLD in 50 80 100
+do
+  EXISTS="$(
+    python3 - \
+      "$BUILD_DIR/current-notifications.json" \
+      "$THRESHOLD" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target = float(sys.argv[2])
+
+notifications = (
+    json.loads(path.read_text())
+    .get("Notifications", [])
+)
+
+exists = any(
+    item.get("NotificationType") == "ACTUAL"
+    and item.get("ComparisonOperator")
+        == "GREATER_THAN"
+    and item.get("ThresholdType")
+        in (None, "PERCENTAGE")
+    and float(item.get("Threshold", -1))
+        == target
+    for item in notifications
+)
+
+print("yes" if exists else "no")
+PY
+  )"
+
+  if [ "$EXISTS" = "yes" ]; then
+    echo "Budget notification already exists: ${THRESHOLD}%"
+    continue
+  fi
+
+  aws budgets create-notification \
+    --account-id "$ACCOUNT_ID" \
+    --budget-name "$BUDGET_NAME" \
+    --notification \
+      "NotificationType=ACTUAL,ComparisonOperator=GREATER_THAN,Threshold=${THRESHOLD},ThresholdType=PERCENTAGE" \
+    --subscribers \
+      "SubscriptionType=SNS,Address=${TOPIC_ARN}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  echo "Budget notification created: ${THRESHOLD}%"
+done
+
+echo
+echo "Bedrock budget deployment complete."
+echo "Budget name: $BUDGET_NAME"
+echo "Monthly limit: \$${MONTHLY_LIMIT}"
+echo "Thresholds: 50%, 80%, 100%"
