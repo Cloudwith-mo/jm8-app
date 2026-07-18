@@ -1,4 +1,9 @@
-from journal_analyzer import analyze_journal_entry
+from llm_journal_analyzer import (
+    AnalyzerInputError,
+    AnalyzerInvocationError,
+    AnalyzerResponseError,
+    analyze_journal_entry_llm,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -12,6 +17,7 @@ from storage import (
     update_entry_analysis,
     create_upload_url,
     mark_ocr_failed,
+    mark_entry_analysis_failed,
     get_ocr_retry_state,
     queue_ocr_job,
     OcrStateError,
@@ -108,29 +114,121 @@ def lambda_handler(event, context):
         if method == "POST" and path.startswith("/entries/") and path.endswith("/analyze"):
             entry_id = path.split("/entries/")[1].split("/")[0]
 
-            entry = get_entry_by_id(user_id=user_id, entry_id=entry_id)
+            entry = get_entry_by_id(
+                user_id=user_id,
+                entry_id=entry_id,
+            )
 
             if not entry:
-                return response(404, {"error": "Entry not found."})
+                return response(
+                    404,
+                    {"error": "Entry not found."},
+                )
 
-            text = entry.get("cleanText") or entry.get("rawText") or ""
+            journal_text = (
+                entry.get("cleanText")
+                or entry.get("rawText")
+                or ""
+            )
 
-            if not text:
+            if not journal_text:
                 return response(400, {
                     "error": "Entry has no text to analyze yet.",
-                    "entryStatus": entry.get("status")
+                    "entryStatus": entry.get("status"),
                 })
 
-            analysis = analyze_journal_entry(text)
+            try:
+                analysis = analyze_journal_entry_llm(
+                    journal_text
+                )
+
+            except AnalyzerInputError as exc:
+                failure_code = type(exc).__name__
+
+                failed_entry = mark_entry_analysis_failed(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    failure_code=failure_code,
+                    failure_message=(
+                        "The entry could not be submitted "
+                        "for analysis."
+                    ),
+                )
+
+                print(json.dumps({
+                    "event": "journal_analysis_failed",
+                    "entryId": entry_id,
+                    "failureCode": failure_code,
+                }))
+
+                return response(400, {
+                    "error": "InvalidAnalysisInput",
+                    "message": str(exc),
+                    "entry": failed_entry,
+                })
+
+            except (
+                AnalyzerInvocationError,
+                AnalyzerResponseError,
+            ) as exc:
+                failure_code = type(exc).__name__
+
+                failed_entry = mark_entry_analysis_failed(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    failure_code=failure_code,
+                    failure_message=(
+                        "JM8 could not complete the analysis."
+                    ),
+                )
+
+                print(json.dumps({
+                    "event": "journal_analysis_failed",
+                    "entryId": entry_id,
+                    "failureCode": failure_code,
+                }))
+
+                return response(502, {
+                    "error": "JournalAnalysisFailed",
+                    "message": (
+                        "JM8 could not analyze this entry "
+                        "right now."
+                    ),
+                    "entry": failed_entry,
+                })
+
             updated_entry = update_entry_analysis(
                 user_id=user_id,
                 entry_id=entry_id,
-                analysis=analysis
+                analysis=analysis,
             )
+
+            usage = analysis.get("usage") or {}
+
+            print(json.dumps({
+                "event": "journal_analysis_completed",
+                "entryId": entry_id,
+                "modelId": analysis.get("modelId"),
+                "schemaVersion": analysis.get(
+                    "schemaVersion"
+                ),
+                "inputTokens": usage.get(
+                    "inputTokens",
+                    0,
+                ),
+                "outputTokens": usage.get(
+                    "outputTokens",
+                    0,
+                ),
+                "latencyMs": usage.get(
+                    "latencyMs",
+                    0,
+                ),
+            }))
 
             return response(200, {
                 "message": "Entry analyzed.",
-                "entry": updated_entry
+                "entry": updated_entry,
             })
 
         if method == "POST" and path == "/upload-url":
@@ -330,12 +428,20 @@ def lambda_handler(event, context):
         })
 
     except Exception as exc:
-        print("ERROR:", str(exc))
-        print("EVENT:", json.dumps(event))
+        request_id = (
+            event.get("requestContext", {})
+            .get("requestId")
+        )
+
+        print(json.dumps({
+            "event": "api_unhandled_error",
+            "errorType": type(exc).__name__,
+            "requestId": request_id,
+        }))
 
         return response(500, {
             "error": "InternalServerError",
-            "message": str(exc)
+            "message": "An unexpected server error occurred.",
         })
 
 

@@ -122,7 +122,85 @@ def get_entry_by_id(user_id: str, entry_id: str) -> dict | None:
     return attach_image_preview_url(items[0])
 
 
-def update_entry_analysis(user_id: str, entry_id: str, analysis: dict) -> dict:
+def update_entry_analysis(
+    user_id: str,
+    entry_id: str,
+    analysis: dict,
+) -> dict:
+    entry = get_entry_by_id(user_id, entry_id)
+
+    if not entry:
+        return {}
+
+    now = utc_now()
+    completed_at = analysis.get("analyzedAt") or now
+
+    result = table.update_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        },
+        UpdateExpression=(
+            "SET #status = :status, "
+            "analysisStatus = :analysisStatus, "
+            "analysisLastAttemptStatus = :lastAttemptStatus, "
+            "analysisLastAttemptAt = :lastAttemptAt, "
+            "analysisCompletedAt = :completedAt, "
+            "analysisSchemaVersion = :schemaVersion, "
+            "analysisPromptVersion = :promptVersion, "
+            "analysisModelId = :modelId, "
+            "analysis = :analysis, "
+            "analysisAttemptCount = "
+            "if_not_exists(analysisAttemptCount, :zero) + :one, "
+            "updatedAt = :updatedAt "
+            "REMOVE analysisFailureCode, "
+            "analysisFailureMessage, "
+            "analysisFailedAt"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":status": "ANALYZED",
+            ":analysisStatus": "COMPLETED",
+            ":lastAttemptStatus": "COMPLETED",
+            ":lastAttemptAt": now,
+            ":completedAt": completed_at,
+            ":schemaVersion": str(
+                analysis.get("schemaVersion") or ""
+            ),
+            ":promptVersion": str(
+                analysis.get("promptVersion") or ""
+            ),
+            ":modelId": str(
+                analysis.get("modelId") or ""
+            ),
+            ":analysis": analysis,
+            ":zero": 0,
+            ":one": 1,
+            ":updatedAt": now,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    attributes = result.get("Attributes") or {}
+
+    return attach_image_preview_url(
+        attributes
+    )
+
+
+def mark_entry_analysis_failed(
+    user_id: str,
+    entry_id: str,
+    *,
+    failure_code: str,
+    failure_message: str,
+) -> dict:
+    """
+    Records a failed analysis attempt without deleting an existing
+    successful analysis.
+    """
     entry = get_entry_by_id(user_id, entry_id)
 
     if not entry:
@@ -130,29 +208,58 @@ def update_entry_analysis(user_id: str, entry_id: str, analysis: dict) -> dict:
 
     now = utc_now()
 
-    table.update_item(
-        Key={
-            "PK": entry["PK"],
-            "SK": entry["SK"]
-        },
-        UpdateExpression=(
-            "SET #status = :status, "
-            "analysisStatus = :analysisStatus, "
-            "analysis = :analysis, "
-            "updatedAt = :updatedAt"
-        ),
-        ExpressionAttributeNames={
-            "#status": "status"
-        },
-        ExpressionAttributeValues={
-            ":status": "ANALYZED",
-            ":analysisStatus": "COMPLETED",
-            ":analysis": analysis,
-            ":updatedAt": now
-        }
+    has_previous_analysis = (
+        isinstance(entry.get("analysis"), dict)
+        and str(
+            entry.get("analysisStatus") or ""
+        ).upper() == "COMPLETED"
     )
 
-    return get_entry_by_id(user_id, entry_id)
+    analysis_status = (
+        "COMPLETED"
+        if has_previous_analysis
+        else "FAILED"
+    )
+
+    safe_message = " ".join(
+        str(failure_message or "").split()
+    )[:240]
+
+    result = table.update_item(
+        Key={
+            "PK": entry["PK"],
+            "SK": entry["SK"],
+        },
+        UpdateExpression=(
+            "SET analysisStatus = :analysisStatus, "
+            "analysisLastAttemptStatus = :lastAttemptStatus, "
+            "analysisLastAttemptAt = :lastAttemptAt, "
+            "analysisFailureCode = :failureCode, "
+            "analysisFailureMessage = :failureMessage, "
+            "analysisFailedAt = :failedAt, "
+            "analysisAttemptCount = "
+            "if_not_exists(analysisAttemptCount, :zero) + :one, "
+            "updatedAt = :updatedAt"
+        ),
+        ExpressionAttributeValues={
+            ":analysisStatus": analysis_status,
+            ":lastAttemptStatus": "FAILED",
+            ":lastAttemptAt": now,
+            ":failureCode": failure_code,
+            ":failureMessage": safe_message,
+            ":failedAt": now,
+            ":zero": 0,
+            ":one": 1,
+            ":updatedAt": now,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    attributes = result.get("Attributes") or {}
+
+    return attach_image_preview_url(
+        attributes
+    )
 
 
 def create_upload_url(user_id: str, file_name: str, content_type: str) -> dict:

@@ -7,6 +7,9 @@ set -euo pipefail
 : "${STAGE:?STAGE is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+: "${BEDROCK_ANALYSIS_MODEL_ID:?BEDROCK_ANALYSIS_MODEL_ID is required.}"
+: "${ANALYSIS_SCHEMA_VERSION:?ANALYSIS_SCHEMA_VERSION is required.}"
+: "${ANALYSIS_PROMPT_VERSION:?ANALYSIS_PROMPT_VERSION is required.}"
 
 ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
@@ -19,7 +22,10 @@ API_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-ocr-workflow"
 echo "Checking AWS identity..."
 aws sts get-caller-identity \
   --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION"
+  --region "$AWS_REGION" \
+  >/dev/null
+
+echo "AWS identity verified."
 
 echo "Checking IAM role: $ROLE_NAME"
 
@@ -98,9 +104,9 @@ if [ "$FUNCTION_EXISTS" -ne 0 ]; then
     --role "$ROLE_ARN" \
     --handler app.lambda_handler \
     --zip-file "fileb://${ZIP_FILE}" \
-    --timeout 15 \
-    --memory-size 256 \
-    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN}}" \
+    --timeout 28 \
+    --memory-size 512 \
+    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN},BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID},ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION},ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}" \
     --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
@@ -131,9 +137,9 @@ else
 
   aws lambda update-function-configuration \
     --function-name "$FUNCTION_NAME" \
-    --timeout 15 \
-    --memory-size 256 \
-    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN}}" \
+    --timeout 28 \
+    --memory-size 512 \
+    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN},BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID},ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION},ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null

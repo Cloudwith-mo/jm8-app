@@ -60,6 +60,7 @@ if [ "$INTEGRATION_ID" = "None" ] || [ -z "$INTEGRATION_ID" ]; then
     --integration-type AWS_PROXY \
     --integration-uri "$FUNCTION_ARN" \
     --payload-format-version "2.0" \
+    --timeout-in-millis 30000 \
     --query "IntegrationId" \
     --output text \
     --profile "$AWS_PROFILE" \
@@ -69,6 +70,16 @@ if [ "$INTEGRATION_ID" = "None" ] || [ -z "$INTEGRATION_ID" ]; then
 else
   echo "Integration already exists: $INTEGRATION_ID"
 fi
+
+aws apigatewayv2 update-integration \
+  --api-id "$API_ID" \
+  --integration-id "$INTEGRATION_ID" \
+  --timeout-in-millis 30000 \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+echo "Integration timeout configured for 30 seconds."
 
 create_route_if_missing () {
   local ROUTE_KEY="$1"
