@@ -277,8 +277,39 @@ class AnalyzerInputError(AnalyzerError):
     """Raised when journal text cannot be analyzed."""
 
 
+RETRYABLE_BEDROCK_ERROR_CODES = {
+    "ThrottlingException",
+    "ServiceUnavailableException",
+    "InternalServerException",
+    "ModelNotReadyException",
+    "ModelTimeoutException",
+    "ModelErrorException",
+    "RequestTimeout",
+    "RequestTimeoutException",
+}
+
+
 class AnalyzerInvocationError(AnalyzerError):
     """Raised when Amazon Bedrock cannot complete the request."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "Unknown",
+        retryable: bool = False,
+        retry_attempts: int = 0,
+    ):
+        super().__init__(message)
+
+        self.error_code = str(
+            error_code or "Unknown"
+        )
+        self.retryable = bool(retryable)
+        self.retry_attempts = max(
+            int(retry_attempts or 0),
+            0,
+        )
 
 
 class AnalyzerResponseError(AnalyzerError):
@@ -333,10 +364,10 @@ def create_bedrock_client():
     return session.client(
         "bedrock-runtime",
         config=Config(
-            connect_timeout=10,
-            read_timeout=120,
+            connect_timeout=5,
+            read_timeout=22,
             retries={
-                "max_attempts": 3,
+                "total_max_attempts": 2,
                 "mode": "standard",
             },
         ),
@@ -650,17 +681,35 @@ def analyze_journal_entry_llm(
 
     except ClientError as exc:
         error = exc.response.get("Error") or {}
+        metadata = (
+            exc.response.get("ResponseMetadata")
+            or {}
+        )
+
         error_code = str(
             error.get("Code") or "Unknown"
         )
 
+        retry_attempts = int(
+            metadata.get("RetryAttempts") or 0
+        )
+
         raise AnalyzerInvocationError(
-            f"Bedrock analysis failed with {error_code}."
+            f"Bedrock analysis failed with {error_code}.",
+            error_code=error_code,
+            retryable=(
+                error_code
+                in RETRYABLE_BEDROCK_ERROR_CODES
+            ),
+            retry_attempts=retry_attempts,
         ) from exc
 
     except BotoCoreError as exc:
         raise AnalyzerInvocationError(
-            "Bedrock analysis request could not be completed."
+            "Bedrock analysis request could not be completed.",
+            error_code=type(exc).__name__,
+            retryable=True,
+            retry_attempts=0,
         ) from exc
 
     try:
@@ -680,6 +729,10 @@ def analyze_journal_entry_llm(
 
     usage = response.get("usage") or {}
     metrics = response.get("metrics") or {}
+    response_metadata = (
+        response.get("ResponseMetadata")
+        or {}
+    )
 
     return {
         **normalized,
@@ -705,6 +758,12 @@ def analyze_journal_entry_llm(
             ),
             "stopReason": str(
                 response.get("stopReason") or ""
+            ),
+            "sdkRetryAttempts": int(
+                response_metadata.get(
+                    "RetryAttempts"
+                )
+                or 0
             ),
         },
     }

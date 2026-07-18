@@ -167,11 +167,8 @@ def lambda_handler(event, context):
                     "entry": failed_entry,
                 })
 
-            except (
-                AnalyzerInvocationError,
-                AnalyzerResponseError,
-            ) as exc:
-                failure_code = type(exc).__name__
+            except AnalyzerInvocationError as exc:
+                failure_code = exc.error_code
 
                 failed_entry = mark_entry_analysis_failed(
                     user_id=user_id,
@@ -185,15 +182,71 @@ def lambda_handler(event, context):
                 print(json.dumps({
                     "event": "journal_analysis_failed",
                     "entryId": entry_id,
-                    "failureCode": failure_code,
+                    "failureCode": (
+                        "AnalyzerInvocationError"
+                    ),
+                    "providerErrorCode": failure_code,
+                    "retryable": exc.retryable,
+                    "sdkRetryAttempts": (
+                        exc.retry_attempts
+                    ),
                 }))
 
-                return response(502, {
+                status_code = (
+                    503
+                    if exc.retryable
+                    else 502
+                )
+
+                response_body = {
                     "error": "JournalAnalysisFailed",
                     "message": (
                         "JM8 could not analyze this entry "
                         "right now."
                     ),
+                    "retryable": exc.retryable,
+                    "entry": failed_entry,
+                }
+
+                if exc.retryable:
+                    response_body[
+                        "retryAfterSeconds"
+                    ] = 2
+
+                return response(
+                    status_code,
+                    response_body,
+                )
+
+            except AnalyzerResponseError as exc:
+                failure_code = type(exc).__name__
+
+                failed_entry = mark_entry_analysis_failed(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    failure_code=failure_code,
+                    failure_message=(
+                        "JM8 received an invalid "
+                        "analysis response."
+                    ),
+                )
+
+                print(json.dumps({
+                    "event": "journal_analysis_failed",
+                    "entryId": entry_id,
+                    "failureCode": failure_code,
+                    "providerErrorCode": None,
+                    "retryable": False,
+                    "sdkRetryAttempts": 0,
+                }))
+
+                return response(502, {
+                    "error": "JournalAnalysisFailed",
+                    "message": (
+                        "JM8 could not validate the "
+                        "analysis response."
+                    ),
+                    "retryable": False,
                     "entry": failed_entry,
                 })
 
@@ -220,8 +273,16 @@ def lambda_handler(event, context):
                     "outputTokens",
                     0,
                 ),
+                "totalTokens": usage.get(
+                    "totalTokens",
+                    0,
+                ),
                 "latencyMs": usage.get(
                     "latencyMs",
+                    0,
+                ),
+                "sdkRetryAttempts": usage.get(
+                    "sdkRetryAttempts",
                     0,
                 ),
             }))

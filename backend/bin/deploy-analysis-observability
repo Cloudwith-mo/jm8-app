@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+
+API_FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
+API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"
+
+AI_METRIC_NAMESPACE="JM8/AI"
+DASHBOARD_NAME="${APP_NAME}-${STAGE}-ai-operations"
+TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
+
+FAILURE_ALARM_NAME="${APP_NAME}-${STAGE}-analysis-failed"
+LATENCY_ALARM_NAME="${APP_NAME}-${STAGE}-analysis-high-latency"
+
+mkdir -p .build/analysis-observability
+
+echo "Resolving JM8 alert topic..."
+
+TOPIC_ARN="$(
+  aws sns create-topic \
+    --name "$TOPIC_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query TopicArn \
+    --output text
+)"
+
+echo "Creating analysis metric filters..."
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-completed" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_completed" }' \
+  --metric-transformations \
+    "metricName=AnalysisCompleted,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=1,defaultValue=0,unit=Count" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-failed" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_failed" }' \
+  --metric-transformations \
+    "metricName=AnalysisFailed,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=1,defaultValue=0,unit=Count" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-input-tokens" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_completed" && $.inputTokens = * }' \
+  --metric-transformations \
+    "metricName=AnalysisInputTokens,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=\$.inputTokens,defaultValue=0,unit=Count" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-output-tokens" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_completed" && $.outputTokens = * }' \
+  --metric-transformations \
+    "metricName=AnalysisOutputTokens,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=\$.outputTokens,defaultValue=0,unit=Count" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-total-tokens" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_completed" && $.totalTokens = * }' \
+  --metric-transformations \
+    "metricName=AnalysisTotalTokens,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=\$.totalTokens,defaultValue=0,unit=Count" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-latency" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_completed" && $.latencyMs = * }' \
+  --metric-transformations \
+    "metricName=AnalysisLatencyMs,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=\$.latencyMs,defaultValue=0,unit=Milliseconds" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws logs put-metric-filter \
+  --log-group-name "$API_LOG_GROUP" \
+  --filter-name "${APP_NAME}-${STAGE}-analysis-sdk-retries" \
+  --filter-pattern \
+    '{ $.event = "journal_analysis_completed" && $.sdkRetryAttempts = * }' \
+  --metric-transformations \
+    "metricName=AnalysisSdkRetries,metricNamespace=${AI_METRIC_NAMESPACE},metricValue=\$.sdkRetryAttempts,defaultValue=0,unit=Count" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+echo "Analysis metric filters created."
+
+echo "Creating analysis alarms..."
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name "$FAILURE_ALARM_NAME" \
+  --alarm-description \
+    "JM8 journal analysis failed at least once in five minutes." \
+  --namespace "$AI_METRIC_NAMESPACE" \
+  --metric-name AnalysisFailed \
+  --statistic Sum \
+  --unit Count \
+  --period 300 \
+  --evaluation-periods 1 \
+  --datapoints-to-alarm 1 \
+  --threshold 1 \
+  --comparison-operator \
+    GreaterThanOrEqualToThreshold \
+  --treat-missing-data notBreaching \
+  --alarm-actions "$TOPIC_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name "$LATENCY_ALARM_NAME" \
+  --alarm-description \
+    "JM8 journal analysis exceeded 25 seconds." \
+  --namespace "$AI_METRIC_NAMESPACE" \
+  --metric-name AnalysisLatencyMs \
+  --statistic Maximum \
+  --unit Milliseconds \
+  --period 300 \
+  --evaluation-periods 1 \
+  --datapoints-to-alarm 1 \
+  --threshold 25000 \
+  --comparison-operator \
+    GreaterThanOrEqualToThreshold \
+  --treat-missing-data notBreaching \
+  --alarm-actions "$TOPIC_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+FAILURE_ALARM_ARN="$(
+  aws cloudwatch describe-alarms \
+    --alarm-names "$FAILURE_ALARM_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query 'MetricAlarms[0].AlarmArn' \
+    --output text
+)"
+
+LATENCY_ALARM_ARN="$(
+  aws cloudwatch describe-alarms \
+    --alarm-names "$LATENCY_ALARM_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query 'MetricAlarms[0].AlarmArn' \
+    --output text
+)"
+
+python3 - \
+  "$AWS_REGION" \
+  "$API_LOG_GROUP" \
+  "$AI_METRIC_NAMESPACE" \
+  "$FAILURE_ALARM_ARN" \
+  "$LATENCY_ALARM_ARN" \
+  > .build/analysis-observability/dashboard.json <<'PY'
+import json
+import sys
+
+region = sys.argv[1]
+log_group = sys.argv[2]
+namespace = sys.argv[3]
+failure_alarm_arn = sys.argv[4]
+latency_alarm_arn = sys.argv[5]
+
+dashboard = {
+    "start": "-PT24H",
+    "periodOverride": "inherit",
+    "widgets": [
+        {
+            "type": "text",
+            "x": 0,
+            "y": 0,
+            "width": 24,
+            "height": 2,
+            "properties": {
+                "markdown": (
+                    "# Journal M8 AI Operations\n"
+                    "LLM reliability, latency, retries, "
+                    "and token consumption."
+                ),
+            },
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Analysis outcomes",
+                "region": region,
+                "period": 300,
+                "view": "timeSeries",
+                "metrics": [
+                    [
+                        namespace,
+                        "AnalysisCompleted",
+                        {
+                            "stat": "Sum",
+                            "label": "Completed",
+                        },
+                    ],
+                    [
+                        namespace,
+                        "AnalysisFailed",
+                        {
+                            "stat": "Sum",
+                            "label": "Failed",
+                        },
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 2,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Token consumption",
+                "region": region,
+                "period": 300,
+                "view": "timeSeries",
+                "metrics": [
+                    [
+                        namespace,
+                        "AnalysisInputTokens",
+                        {
+                            "stat": "Sum",
+                            "label": "Input tokens",
+                        },
+                    ],
+                    [
+                        namespace,
+                        "AnalysisOutputTokens",
+                        {
+                            "stat": "Sum",
+                            "label": "Output tokens",
+                        },
+                    ],
+                    [
+                        namespace,
+                        "AnalysisTotalTokens",
+                        {
+                            "stat": "Sum",
+                            "label": "Total tokens",
+                        },
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 8,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Analysis latency",
+                "region": region,
+                "period": 300,
+                "view": "timeSeries",
+                "metrics": [
+                    [
+                        namespace,
+                        "AnalysisLatencyMs",
+                        {
+                            "stat": "Average",
+                            "label": "Average",
+                        },
+                    ],
+                    [
+                        "...",
+                        {
+                            "stat": "Maximum",
+                            "label": "Maximum",
+                        },
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 8,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "SDK retries",
+                "region": region,
+                "period": 300,
+                "view": "timeSeries",
+                "metrics": [
+                    [
+                        namespace,
+                        "AnalysisSdkRetries",
+                        {
+                            "stat": "Sum",
+                            "label": "Retry attempts",
+                        },
+                    ],
+                ],
+            },
+        },
+        {
+            "type": "alarm",
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "AI alarm status",
+                "alarms": [
+                    failure_alarm_arn,
+                    latency_alarm_arn,
+                ],
+            },
+        },
+        {
+            "type": "log",
+            "x": 12,
+            "y": 14,
+            "width": 12,
+            "height": 6,
+            "properties": {
+                "title": "Recent analysis events",
+                "region": region,
+                "view": "table",
+                "query": (
+                    f"SOURCE '{log_group}' "
+                    "| fields @timestamp, @message\n"
+                    "| filter @message like "
+                    "/journal_analysis_/\n"
+                    "| sort @timestamp desc\n"
+                    "| limit 30"
+                ),
+            },
+        },
+    ],
+}
+
+print(json.dumps(dashboard))
+PY
+
+echo "Deploying AI operations dashboard..."
+
+aws cloudwatch put-dashboard \
+  --dashboard-name "$DASHBOARD_NAME" \
+  --dashboard-body \
+    file://.build/analysis-observability/dashboard.json \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+echo
+echo "Analysis observability deployment complete."
+echo "Dashboard: $DASHBOARD_NAME"
+echo "Metric namespace: $AI_METRIC_NAMESPACE"
+echo "Failure alarm: $FAILURE_ALARM_NAME"
+echo "Latency alarm: $LATENCY_ALARM_NAME"

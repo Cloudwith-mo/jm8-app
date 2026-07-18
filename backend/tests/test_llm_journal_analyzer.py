@@ -1,8 +1,11 @@
 import json
 import unittest
 
+from botocore.exceptions import ClientError
+
 from llm_journal_analyzer import (
     AnalyzerInputError,
+    AnalyzerInvocationError,
     AnalyzerResponseError,
     analyze_journal_entry_llm,
 )
@@ -104,7 +107,36 @@ class FakeBedrockClient:
                 "latencyMs": 1_500,
             },
             "stopReason": "end_turn",
+            "ResponseMetadata": {
+                "RetryAttempts": 1,
+            },
         }
+
+
+class ErrorBedrockClient:
+    def __init__(
+        self,
+        error_code: str,
+        retry_attempts: int,
+    ):
+        self.error_code = error_code
+        self.retry_attempts = retry_attempts
+
+    def converse(self, **kwargs):
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": self.error_code,
+                    "Message": "Synthetic AWS error.",
+                },
+                "ResponseMetadata": {
+                    "RetryAttempts": (
+                        self.retry_attempts
+                    ),
+                },
+            },
+            "Converse",
+        )
 
 
 class MissingContentClient:
@@ -151,6 +183,10 @@ class LlmJournalAnalyzerTests(unittest.TestCase):
             result["usage"]["totalTokens"],
             650,
         )
+        self.assertEqual(
+            result["usage"]["sdkRetryAttempts"],
+            1,
+        )
 
     def test_duplicate_themes_are_removed(self):
         client = FakeBedrockClient()
@@ -186,6 +222,54 @@ class LlmJournalAnalyzerTests(unittest.TestCase):
         )
         self.assertEqual(
             result["moodIntensity"],
+            0,
+        )
+
+    def test_throttling_error_is_retryable(self):
+        with self.assertRaises(
+            AnalyzerInvocationError
+        ) as context:
+            analyze_journal_entry_llm(
+                "Synthetic entry.",
+                client=ErrorBedrockClient(
+                    "ThrottlingException",
+                    1,
+                ),
+            )
+
+        error = context.exception
+
+        self.assertEqual(
+            error.error_code,
+            "ThrottlingException",
+        )
+        self.assertTrue(error.retryable)
+        self.assertEqual(
+            error.retry_attempts,
+            1,
+        )
+
+    def test_validation_error_is_not_retryable(self):
+        with self.assertRaises(
+            AnalyzerInvocationError
+        ) as context:
+            analyze_journal_entry_llm(
+                "Synthetic entry.",
+                client=ErrorBedrockClient(
+                    "ValidationException",
+                    0,
+                ),
+            )
+
+        error = context.exception
+
+        self.assertEqual(
+            error.error_code,
+            "ValidationException",
+        )
+        self.assertFalse(error.retryable)
+        self.assertEqual(
+            error.retry_attempts,
             0,
         )
 
