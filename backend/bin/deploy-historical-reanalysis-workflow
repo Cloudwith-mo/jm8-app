@@ -1,0 +1,741 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+: "${BEDROCK_ANALYSIS_MODEL_ID:?BEDROCK_ANALYSIS_MODEL_ID is required.}"
+: "${ANALYSIS_SCHEMA_VERSION:?ANALYSIS_SCHEMA_VERSION is required.}"
+: "${ANALYSIS_PROMPT_VERSION:?ANALYSIS_PROMPT_VERSION is required.}"
+
+WORKER_FUNCTION_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-worker"
+)"
+
+COORDINATOR_FUNCTION_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-coordinator"
+)"
+
+WORKER_ROLE_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-worker-role"
+)"
+
+COORDINATOR_ROLE_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-coordinator-role"
+)"
+
+STATE_ROLE_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-step-role"
+)"
+
+STATE_MACHINE_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
+)"
+
+WORKER_POLICY_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-worker-access"
+)"
+
+COORDINATOR_POLICY_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-historical-reanalysis-coordinator-access"
+)"
+
+STATE_POLICY_NAME="$(
+  printf '%s' \
+    "${APP_NAME}-${STAGE}-invoke-historical-reanalysis"
+)"
+
+ZIP_FILE="dist/function.zip"
+
+DEFINITION_TEMPLATE=\
+"infra/historical-reanalysis-workflow.asl.json"
+
+BUILD_DIR=".build/historical-reanalysis"
+
+RESOLVED_DEFINITION=\
+"${BUILD_DIR}/workflow.resolved.json"
+
+LAMBDA_TRUST_POLICY=\
+"${BUILD_DIR}/lambda-trust.json"
+
+STATE_TRUST_POLICY=\
+"${BUILD_DIR}/step-functions-trust.json"
+
+WORKER_POLICY_FILE=\
+"${BUILD_DIR}/worker-policy.json"
+
+COORDINATOR_POLICY_FILE=\
+"${BUILD_DIR}/coordinator-policy.json"
+
+STATE_POLICY_FILE=\
+"${BUILD_DIR}/state-policy.json"
+
+INFERENCE_PROFILE_FILE=\
+"${BUILD_DIR}/inference-profile.json"
+
+echo "Packaging backend functions..."
+./bin/package
+
+# bin/package rebuilds .build from scratch.
+mkdir -p "$BUILD_DIR"
+
+echo "Checking AWS identity..."
+aws sts get-caller-identity \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+echo "AWS identity verified."
+
+TABLE_ARN="$(
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Table.TableArn" \
+    --output text
+)"
+
+if (
+  [ -z "$TABLE_ARN" ] ||
+  [ "$TABLE_ARN" = "None" ]
+); then
+  echo "DynamoDB table could not be resolved."
+  exit 1
+fi
+
+echo "Resolving Bedrock inference profile..."
+
+aws bedrock get-inference-profile \
+  --inference-profile-identifier \
+    "$BEDROCK_ANALYSIS_MODEL_ID" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$INFERENCE_PROFILE_FILE"
+
+cat > "$LAMBDA_TRUST_POLICY" <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+cat > "$STATE_TRUST_POLICY" <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "states.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+python3 - \
+  "$TABLE_ARN" \
+  "$INFERENCE_PROFILE_FILE" \
+  "$WORKER_POLICY_FILE" \
+  "$COORDINATOR_POLICY_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+table_arn = sys.argv[1]
+profile_path = Path(sys.argv[2])
+worker_policy_path = Path(sys.argv[3])
+coordinator_policy_path = Path(
+    sys.argv[4]
+)
+
+profile = json.loads(
+    profile_path.read_text()
+)
+
+profile_arn = str(
+    profile.get("inferenceProfileArn")
+    or ""
+).strip()
+
+model_arns = sorted({
+    str(
+        model.get("modelArn")
+        or ""
+    ).strip()
+    for model in profile.get(
+        "models",
+        [],
+    )
+    if str(
+        model.get("modelArn")
+        or ""
+    ).strip()
+})
+
+if not profile_arn:
+    raise SystemExit(
+        "Bedrock inference profile ARN "
+        "was not returned."
+    )
+
+if not model_arns:
+    raise SystemExit(
+        "Bedrock inference profile returned "
+        "no destination models."
+    )
+
+worker_policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadJournalEntries",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+            ],
+            "Resource": [
+                table_arn,
+                f"{table_arn}/index/*",
+            ],
+        },
+        {
+            "Sid": "WriteAnalysisResults",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:UpdateItem",
+                "dynamodb:TransactWriteItems",
+            ],
+            "Resource": table_arn,
+        },
+        {
+            "Sid": "ReadAnalysisInferenceProfile",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock:GetInferenceProfile",
+            ],
+            "Resource": profile_arn,
+        },
+        {
+            "Sid": "InvokeAnalysisProfile",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock:InvokeModel",
+            ],
+            "Resource": profile_arn,
+        },
+        {
+            "Sid": "InvokeDestinationModels",
+            "Effect": "Allow",
+            "Action": [
+                "bedrock:InvokeModel",
+            ],
+            "Resource": model_arns,
+            "Condition": {
+                "StringEquals": {
+                    "bedrock:InferenceProfileArn": (
+                        profile_arn
+                    ),
+                },
+            },
+        },
+    ],
+}
+
+coordinator_policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadReanalysisState",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+            ],
+            "Resource": [
+                table_arn,
+                f"{table_arn}/index/*",
+            ],
+        },
+        {
+            "Sid": "WriteReanalysisState",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:UpdateItem",
+                "dynamodb:TransactWriteItems",
+            ],
+            "Resource": table_arn,
+        },
+    ],
+}
+
+worker_policy_path.write_text(
+    json.dumps(
+        worker_policy,
+        indent=2,
+    )
+    + "\n"
+)
+
+coordinator_policy_path.write_text(
+    json.dumps(
+        coordinator_policy,
+        indent=2,
+    )
+    + "\n"
+)
+
+print(
+    "Worker and coordinator policies prepared."
+)
+PY
+
+ensure_lambda_role() {
+  local role_name="$1"
+  local role_description="$2"
+  local policy_name="$3"
+  local policy_file="$4"
+
+  if aws iam get-role \
+    --role-name "$role_name" \
+    --profile "$AWS_PROFILE" \
+    >/dev/null 2>&1
+  then
+    echo "Updating IAM role: $role_name" >&2
+
+    aws iam update-assume-role-policy \
+      --role-name "$role_name" \
+      --policy-document \
+        "file://${LAMBDA_TRUST_POLICY}" \
+      --profile "$AWS_PROFILE" \
+      >/dev/null
+  else
+    echo "Creating IAM role: $role_name" >&2
+
+    aws iam create-role \
+      --role-name "$role_name" \
+      --description "$role_description" \
+      --assume-role-policy-document \
+        "file://${LAMBDA_TRUST_POLICY}" \
+      --profile "$AWS_PROFILE" \
+      >/dev/null
+
+    sleep 10
+  fi
+
+  aws iam attach-role-policy \
+    --role-name "$role_name" \
+    --policy-arn \
+      "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" \
+    --profile "$AWS_PROFILE" \
+    >/dev/null
+
+  aws iam put-role-policy \
+    --role-name "$role_name" \
+    --policy-name "$policy_name" \
+    --policy-document \
+      "file://${policy_file}" \
+    --profile "$AWS_PROFILE" \
+    >/dev/null
+
+  aws iam get-role \
+    --role-name "$role_name" \
+    --profile "$AWS_PROFILE" \
+    --query "Role.Arn" \
+    --output text
+}
+
+WORKER_ROLE_ARN="$(
+  ensure_lambda_role \
+    "$WORKER_ROLE_NAME" \
+    "JournalM8 historical re-analysis worker role" \
+    "$WORKER_POLICY_NAME" \
+    "$WORKER_POLICY_FILE"
+)"
+
+COORDINATOR_ROLE_ARN="$(
+  ensure_lambda_role \
+    "$COORDINATOR_ROLE_NAME" \
+    "JournalM8 historical re-analysis coordinator role" \
+    "$COORDINATOR_POLICY_NAME" \
+    "$COORDINATOR_POLICY_FILE"
+)"
+
+ensure_lambda_function() {
+  local function_name="$1"
+  local role_arn="$2"
+  local handler="$3"
+  local timeout="$4"
+  local memory_size="$5"
+  local environment="$6"
+
+  if aws lambda get-function \
+    --function-name "$function_name" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null 2>&1
+  then
+    echo "Updating Lambda: $function_name"
+
+    aws lambda update-function-code \
+      --function-name "$function_name" \
+      --zip-file "fileb://${ZIP_FILE}" \
+      --architectures arm64 \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+
+    aws lambda wait function-updated \
+      --function-name "$function_name" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION"
+
+    aws lambda update-function-configuration \
+      --function-name "$function_name" \
+      --runtime python3.12 \
+      --role "$role_arn" \
+      --handler "$handler" \
+      --timeout "$timeout" \
+      --memory-size "$memory_size" \
+      --environment "$environment" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+
+    aws lambda wait function-updated \
+      --function-name "$function_name" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION"
+  else
+    echo "Creating Lambda: $function_name"
+
+    aws lambda create-function \
+      --function-name "$function_name" \
+      --runtime python3.12 \
+      --architectures arm64 \
+      --role "$role_arn" \
+      --handler "$handler" \
+      --zip-file "fileb://${ZIP_FILE}" \
+      --timeout "$timeout" \
+      --memory-size "$memory_size" \
+      --environment "$environment" \
+      --tags \
+        "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+
+    aws lambda wait function-active-v2 \
+      --function-name "$function_name" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION"
+  fi
+}
+
+WORKER_ENVIRONMENT="$(
+  printf '%s' \
+    "Variables={APP_NAME=${APP_NAME}," \
+    "STAGE=${STAGE}," \
+    "TABLE_NAME=${TABLE_NAME}," \
+    "RAW_BUCKET=${RAW_BUCKET}," \
+    "BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID}," \
+    "ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION}," \
+    "ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}"
+)"
+
+COORDINATOR_ENVIRONMENT="$(
+  printf '%s' \
+    "Variables={APP_NAME=${APP_NAME}," \
+    "STAGE=${STAGE}," \
+    "TABLE_NAME=${TABLE_NAME}," \
+    "RAW_BUCKET=${RAW_BUCKET}}"
+)"
+
+ensure_lambda_function \
+  "$WORKER_FUNCTION_NAME" \
+  "$WORKER_ROLE_ARN" \
+  "historical_reanalysis_worker.lambda_handler" \
+  90 \
+  512 \
+  "$WORKER_ENVIRONMENT"
+
+ensure_lambda_function \
+  "$COORDINATOR_FUNCTION_NAME" \
+  "$COORDINATOR_ROLE_ARN" \
+  "historical_reanalysis_coordinator.lambda_handler" \
+  30 \
+  256 \
+  "$COORDINATOR_ENVIRONMENT"
+
+echo "Applying worker reserved concurrency when available."
+
+CONCURRENCY_ERROR_FILE="${BUILD_DIR}/worker-concurrency-error.txt"
+
+if aws lambda put-function-concurrency \
+  --function-name "$WORKER_FUNCTION_NAME" \
+  --reserved-concurrent-executions 2 \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null \
+  2>"$CONCURRENCY_ERROR_FILE"
+then
+  WORKER_CONCURRENCY_MODE="reserved"
+
+  echo "Worker reserved concurrency set to 2."
+else
+  if grep -q \
+    "UnreservedConcurrentExecution below its minimum value" \
+    "$CONCURRENCY_ERROR_FILE"
+  then
+    WORKER_CONCURRENCY_MODE="workflow-only"
+
+    echo "Account quota does not allow reserved concurrency."
+    echo "Step Functions MaxConcurrency=2 remains enforced."
+  else
+    cat "$CONCURRENCY_ERROR_FILE" >&2
+    exit 1
+  fi
+fi
+
+rm -f "$CONCURRENCY_ERROR_FILE"
+
+WORKER_ARN="$(
+  aws lambda get-function-configuration \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "FunctionArn" \
+    --output text
+)"
+
+COORDINATOR_ARN="$(
+  aws lambda get-function-configuration \
+    --function-name "$COORDINATOR_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "FunctionArn" \
+    --output text
+)"
+
+python3 - \
+  "$DEFINITION_TEMPLATE" \
+  "$RESOLVED_DEFINITION" \
+  "$WORKER_ARN" \
+  "$COORDINATOR_ARN" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+template_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+worker_arn = sys.argv[3]
+coordinator_arn = sys.argv[4]
+
+definition = template_path.read_text()
+
+worker_placeholder = (
+    "__REANALYSIS_WORKER_ARN__"
+)
+
+coordinator_placeholder = (
+    "__REANALYSIS_COORDINATOR_ARN__"
+)
+
+if worker_placeholder not in definition:
+    raise SystemExit(
+        "Worker ARN placeholder was not found."
+    )
+
+if coordinator_placeholder not in definition:
+    raise SystemExit(
+        "Coordinator ARN placeholder "
+        "was not found."
+    )
+
+definition = definition.replace(
+    worker_placeholder,
+    worker_arn,
+)
+
+definition = definition.replace(
+    coordinator_placeholder,
+    coordinator_arn,
+)
+
+parsed = json.loads(definition)
+
+if (
+    parsed["States"]["ProcessPage"]
+    .get("MaxConcurrency")
+    != 2
+):
+    raise SystemExit(
+        "Workflow MaxConcurrency must be 2."
+    )
+
+output_path.write_text(
+    json.dumps(
+        parsed,
+        indent=2,
+    )
+    + "\n"
+)
+
+print(
+    "Workflow definition resolved."
+)
+PY
+
+python3 - \
+  "$WORKER_ARN" \
+  "$COORDINATOR_ARN" \
+  "$STATE_POLICY_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+worker_arn = sys.argv[1]
+coordinator_arn = sys.argv[2]
+policy_path = Path(sys.argv[3])
+
+policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "InvokeReanalysisFunctions",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:InvokeFunction",
+            ],
+            "Resource": [
+                worker_arn,
+                coordinator_arn,
+            ],
+        },
+    ],
+}
+
+policy_path.write_text(
+    json.dumps(
+        policy,
+        indent=2,
+    )
+    + "\n"
+)
+PY
+
+if aws iam get-role \
+  --role-name "$STATE_ROLE_NAME" \
+  --profile "$AWS_PROFILE" \
+  >/dev/null 2>&1
+then
+  echo "Updating Step Functions IAM role."
+
+  aws iam update-assume-role-policy \
+    --role-name "$STATE_ROLE_NAME" \
+    --policy-document \
+      "file://${STATE_TRUST_POLICY}" \
+    --profile "$AWS_PROFILE" \
+    >/dev/null
+else
+  echo "Creating Step Functions IAM role."
+
+  aws iam create-role \
+    --role-name "$STATE_ROLE_NAME" \
+    --description \
+      "JournalM8 historical re-analysis Step Functions role" \
+    --assume-role-policy-document \
+      "file://${STATE_TRUST_POLICY}" \
+    --profile "$AWS_PROFILE" \
+    >/dev/null
+
+  sleep 10
+fi
+
+aws iam put-role-policy \
+  --role-name "$STATE_ROLE_NAME" \
+  --policy-name "$STATE_POLICY_NAME" \
+  --policy-document \
+    "file://${STATE_POLICY_FILE}" \
+  --profile "$AWS_PROFILE" \
+  >/dev/null
+
+STATE_ROLE_ARN="$(
+  aws iam get-role \
+    --role-name "$STATE_ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --query "Role.Arn" \
+    --output text
+)"
+
+STATE_MACHINE_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "stateMachines[?name=='${STATE_MACHINE_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+
+if (
+  [ -z "$STATE_MACHINE_ARN" ] ||
+  [ "$STATE_MACHINE_ARN" = "None" ]
+); then
+  echo "Creating historical re-analysis state machine."
+
+  aws stepfunctions create-state-machine \
+    --name "$STATE_MACHINE_NAME" \
+    --definition \
+      "file://${RESOLVED_DEFINITION}" \
+    --role-arn "$STATE_ROLE_ARN" \
+    --type STANDARD \
+    --tags \
+      "key=App,value=${APP_NAME}" \
+      "key=Stage,value=${STAGE}" \
+      "key=ManagedBy,value=aws-cli" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+else
+  echo "Updating historical re-analysis state machine."
+
+  aws stepfunctions update-state-machine \
+    --state-machine-arn "$STATE_MACHINE_ARN" \
+    --definition \
+      "file://${RESOLVED_DEFINITION}" \
+    --role-arn "$STATE_ROLE_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+fi
+
+echo
+echo "Historical re-analysis workflow ready."
+echo "Worker Lambda: $WORKER_FUNCTION_NAME"
+echo "Coordinator Lambda: $COORDINATOR_FUNCTION_NAME"
+echo "State machine: $STATE_MACHINE_NAME"
+echo "Worker concurrency mode: $WORKER_CONCURRENCY_MODE"
+echo "Workflow MaxConcurrency: 2"
