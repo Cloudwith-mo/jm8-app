@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -627,6 +629,424 @@ def get_historical_analysis_inventory(
         ] = last_key
 
     return clean_for_json(inventory)
+
+
+def new_historical_reanalysis_job_id() -> str:
+    return (
+        f"reanalysis_{uuid.uuid4().hex[:12]}"
+    )
+
+
+def historical_reanalysis_job_sk(
+    job_id: str,
+) -> str:
+    safe_job_id = str(
+        job_id or ""
+    ).strip()
+
+    allowed_characters = set(
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789_-"
+    )
+
+    if (
+        not safe_job_id
+        or len(safe_job_id) > 80
+        or any(
+            character
+            not in allowed_characters
+            for character in safe_job_id
+        )
+    ):
+        raise ValueError(
+            "Invalid historical re-analysis job ID."
+        )
+
+    return (
+        f"REANALYSIS_JOB#{safe_job_id}"
+    )
+
+
+def non_negative_integer(
+    value,
+    default: int = 0,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return max(int(default), 0)
+
+    return max(parsed, 0)
+
+
+def encode_historical_reanalysis_cursor(
+    last_evaluated_key: dict | None,
+) -> str | None:
+    if not last_evaluated_key:
+        return None
+
+    payload = json.dumps(
+        clean_for_json(
+            last_evaluated_key
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return (
+        base64.urlsafe_b64encode(payload)
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+
+def decode_historical_reanalysis_cursor(
+    cursor: str | None,
+    *,
+    user_id: str,
+) -> dict | None:
+    safe_cursor = str(
+        cursor or ""
+    ).strip()
+
+    if not safe_cursor:
+        return None
+
+    try:
+        padded = safe_cursor + (
+            "=" * (-len(safe_cursor) % 4)
+        )
+
+        decoded = (
+            base64.urlsafe_b64decode(
+                padded.encode("ascii")
+            )
+            .decode("utf-8")
+        )
+
+        key = json.loads(decoded)
+    except (
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError(
+            "Invalid historical re-analysis cursor."
+        ) from exc
+
+    if not isinstance(key, dict):
+        raise ValueError(
+            "Invalid historical re-analysis cursor."
+        )
+
+    pk = key.get("PK")
+    sk = key.get("SK")
+
+    if (
+        pk != user_pk(user_id)
+        or not isinstance(sk, str)
+        or not sk.startswith("ENTRY#")
+    ):
+        raise ValueError(
+            "Historical re-analysis cursor "
+            "does not belong to this user."
+        )
+
+    return {
+        "PK": pk,
+        "SK": sk,
+    }
+
+
+def list_historical_reanalysis_candidates(
+    user_id: str,
+    *,
+    limit: int = 25,
+    cursor: str | None = None,
+) -> dict:
+    safe_limit = max(
+        1,
+        min(
+            non_negative_integer(
+                limit,
+                25,
+            ),
+            100,
+        ),
+    )
+
+    exclusive_start_key = (
+        decode_historical_reanalysis_cursor(
+            cursor,
+            user_id=user_id,
+        )
+    )
+
+    query_arguments = {
+        "KeyConditionExpression": (
+            Key("PK").eq(user_pk(user_id))
+            & Key("SK").begins_with(
+                "ENTRY#"
+            )
+        ),
+        "ProjectionExpression": (
+            "#entryId, #cleanText, #rawText, "
+            "#analysis, #analysisStatus, "
+            "#analysisVersionId, "
+            "#analysisVersionCount"
+        ),
+        "ExpressionAttributeNames": {
+            "#entryId": "entryId",
+            "#cleanText": "cleanText",
+            "#rawText": "rawText",
+            "#analysis": "analysis",
+            "#analysisStatus": (
+                "analysisStatus"
+            ),
+            "#analysisVersionId": (
+                "analysisVersionId"
+            ),
+            "#analysisVersionCount": (
+                "analysisVersionCount"
+            ),
+        },
+        "ScanIndexForward": True,
+        "ConsistentRead": True,
+        "Limit": safe_limit,
+    }
+
+    if exclusive_start_key:
+        query_arguments[
+            "ExclusiveStartKey"
+        ] = exclusive_start_key
+
+    result = table.query(
+        **query_arguments
+    )
+
+    evaluated_entries = (
+        result.get("Items", [])
+    )
+
+    candidates = []
+
+    for entry in evaluated_entries:
+        classification = (
+            classify_historical_analysis_entry(
+                entry
+            )
+        )
+
+        if not classification["eligible"]:
+            continue
+
+        entry_id = str(
+            entry.get("entryId")
+            or ""
+        ).strip()
+
+        if entry_id:
+            candidates.append({
+                "entryId": entry_id,
+            })
+
+    last_evaluated_key = result.get(
+        "LastEvaluatedKey"
+    )
+
+    next_cursor = (
+        encode_historical_reanalysis_cursor(
+            last_evaluated_key
+        )
+    )
+
+    return {
+        "entries": candidates,
+        "count": len(candidates),
+        "evaluatedEntries": len(
+            evaluated_entries
+        ),
+        "pageSize": safe_limit,
+        "hasMore": bool(
+            last_evaluated_key
+        ),
+        "nextCursor": next_cursor,
+    }
+
+
+def public_historical_reanalysis_job(
+    item: dict,
+) -> dict:
+    clean_item = clean_for_json(item)
+
+    public_fields = (
+        "jobId",
+        "status",
+        "totalEntries",
+        "eligibleEntries",
+        "inventorySkippedEntries",
+        "estimatedBedrockRequests",
+        "processedEntries",
+        "completedEntries",
+        "failedEntries",
+        "skippedEntries",
+        "remainingEntries",
+        "pageSize",
+        "inventory",
+        "createdAt",
+        "startedAt",
+        "completedAt",
+        "updatedAt",
+        "failureCode",
+        "failureMessage",
+    )
+
+    return {
+        field: clean_item[field]
+        for field in public_fields
+        if field in clean_item
+    }
+
+
+def create_historical_reanalysis_job(
+    user_id: str,
+    inventory: dict,
+    *,
+    page_size: int = 25,
+) -> dict:
+    if not isinstance(inventory, dict):
+        raise ValueError(
+            "Historical re-analysis inventory "
+            "is required."
+        )
+
+    eligible_entries = (
+        non_negative_integer(
+            inventory.get(
+                "eligibleEntries"
+            )
+        )
+    )
+
+    if eligible_entries < 1:
+        raise ValueError(
+            "No entries are eligible for "
+            "historical re-analysis."
+        )
+
+    safe_page_size = max(
+        1,
+        min(
+            non_negative_integer(
+                page_size,
+                25,
+            ),
+            100,
+        ),
+    )
+
+    job_id = (
+        new_historical_reanalysis_job_id()
+    )
+
+    now = utc_now()
+
+    item = {
+        "PK": user_pk(user_id),
+        "SK": (
+            historical_reanalysis_job_sk(
+                job_id
+            )
+        ),
+        "entityType": (
+            "HISTORICAL_REANALYSIS_JOB"
+        ),
+        "userId": user_id,
+        "jobId": job_id,
+        "status": "QUEUED",
+        "totalEntries": (
+            non_negative_integer(
+                inventory.get(
+                    "totalEntries"
+                )
+            )
+        ),
+        "eligibleEntries": (
+            eligible_entries
+        ),
+        "inventorySkippedEntries": (
+            non_negative_integer(
+                inventory.get(
+                    "skippedEntries"
+                )
+            )
+        ),
+        "estimatedBedrockRequests": (
+            non_negative_integer(
+                inventory.get(
+                    "estimatedBedrockRequests"
+                ),
+                eligible_entries,
+            )
+        ),
+        "processedEntries": 0,
+        "completedEntries": 0,
+        "failedEntries": 0,
+        "skippedEntries": 0,
+        "remainingEntries": (
+            eligible_entries
+        ),
+        "pageSize": safe_page_size,
+        "inventory": clean_for_dynamodb(
+            inventory
+        ),
+        "createdAt": now,
+        "updatedAt": now,
+    }
+
+    table.put_item(
+        Item=item,
+        ConditionExpression=(
+            "attribute_not_exists(PK) "
+            "AND attribute_not_exists(SK)"
+        ),
+    )
+
+    return (
+        public_historical_reanalysis_job(
+            item
+        )
+    )
+
+
+def get_historical_reanalysis_job(
+    user_id: str,
+    job_id: str,
+) -> dict | None:
+    result = table.get_item(
+        Key={
+            "PK": user_pk(user_id),
+            "SK": (
+                historical_reanalysis_job_sk(
+                    job_id
+                )
+            ),
+        },
+        ConsistentRead=True,
+    )
+
+    item = result.get("Item")
+
+    if not item:
+        return None
+
+    return (
+        public_historical_reanalysis_job(
+            item
+        )
+    )
 
 
 def create_text_entry(user_id: str, text: str) -> dict:
