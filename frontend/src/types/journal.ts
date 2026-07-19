@@ -11,6 +11,25 @@ export type Analysis = {
   nextStep?: string;
 };
 
+export type AnalysisHistoryVersion = {
+  analysisVersionId: string;
+  analysisSource?: string;
+  analysisStatus?: string;
+  analysisSchemaVersion?: string;
+  analysisPromptVersion?: string;
+  analysisModelId?: string;
+  analysisCompletedAt?: string;
+  createdAt?: string;
+  analysis?: Analysis;
+};
+
+export type AnalysisHistoryResponse = {
+  entryId: string;
+  count: number;
+  limit: number;
+  versions: AnalysisHistoryVersion[];
+};
+
 export type JournalEntry = {
   PK?: string;
   SK?: string;
@@ -22,6 +41,11 @@ export type JournalEntry = {
   sourceType?: "typed" | "image";
   status?: string;
   analysisStatus?: string;
+  analysisVersionId?: string;
+  analysisVersionCount?: number;
+  analysisSource?: string;
+  analysisSchemaVersion?: string;
+  analysisCompletedAt?: string;
   rawText?: string;
   cleanText?: string;
   wordCount?: number;

@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import type { JournalEntry } from "../../types/journal";
+import AnalysisHistoryCard from "./AnalysisHistoryCard";
 
 type SelectedEntryPanelProps = {
   entry: JournalEntry | null;
@@ -234,6 +235,14 @@ export default function SelectedEntryPanel({
           </div>
         )}
       </section>
+
+      <AnalysisHistoryCard
+        entryId={entry?.entryId}
+        versionCount={
+          entry?.analysisVersionCount
+        }
+        disabled={isBusy}
+      />
 
       <section className="entry-details-card">
         <h3>Entry Details</h3>

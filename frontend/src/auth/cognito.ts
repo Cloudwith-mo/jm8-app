@@ -24,6 +24,9 @@ type CognitoTokenResponse = {
   token_type: string;
 };
 
+let callbackExchangePromise:
+  Promise<AuthUser | null> | null = null;
+
 function getRequiredConfig() {
   if (!COGNITO_ENABLED) {
     throw new Error("Cognito is not enabled.");
@@ -137,16 +140,29 @@ export async function loginWithCognito() {
   window.location.assign(`${domain}/oauth2/authorize?${params.toString()}`);
 }
 
-export async function handleCognitoCallback() {
+async function exchangeCognitoCallback() {
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   const error = url.searchParams.get("error");
 
   if (error) {
+    const errorDescription =
+      url.searchParams.get(
+        "error_description"
+      );
+
     clearAuthTokens();
     url.search = "";
-    window.history.replaceState({}, document.title, url.toString());
-    throw new Error(url.searchParams.get("error_description") || error);
+
+    window.history.replaceState(
+      {},
+      document.title,
+      url.toString()
+    );
+
+    throw new Error(
+      errorDescription || error
+    );
   }
 
   if (!code) return null;
@@ -175,7 +191,21 @@ export async function handleCognitoCallback() {
   });
 
   if (!response.ok) {
-    throw new Error(`Token exchange failed: ${response.status}`);
+    localStorage.removeItem(
+      PKCE_VERIFIER_KEY
+    );
+
+    url.search = "";
+
+    window.history.replaceState(
+      {},
+      document.title,
+      url.toString()
+    );
+
+    throw new Error(
+      `Token exchange failed: ${response.status}`
+    );
   }
 
   const tokens = (await response.json()) as CognitoTokenResponse;
@@ -196,6 +226,21 @@ export async function handleCognitoCallback() {
 
   return getCurrentUser();
 }
+
+export function handleCognitoCallback():
+  Promise<AuthUser | null> {
+  if (!callbackExchangePromise) {
+    callbackExchangePromise =
+      exchangeCognitoCallback().finally(
+        () => {
+          callbackExchangePromise = null;
+        }
+      );
+  }
+
+  return callbackExchangePromise;
+}
+
 
 export function clearAuthTokens() {
   localStorage.removeItem(ACCESS_TOKEN_KEY);

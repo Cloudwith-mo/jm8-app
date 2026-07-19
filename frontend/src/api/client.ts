@@ -1,5 +1,9 @@
 import { getAccessToken } from "../auth/cognito";
-import type { JournalEntry, UploadResponse } from "../types/journal";
+import type {
+  AnalysisHistoryResponse,
+  JournalEntry,
+  UploadResponse,
+} from "../types/journal";
 
 const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
 const DEMO_USER_ID = import.meta.env.VITE_DEMO_USER_ID || "demo-user";
@@ -48,6 +52,19 @@ export async function analyzeEntry(entryId: string): Promise<{ message: string; 
   return apiRequest(`/entries/${entryId}/analyze`, {
     method: "POST",
   });
+}
+
+export async function getAnalysisHistory(
+  entryId: string,
+  limit = 20
+): Promise<AnalysisHistoryResponse> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+  });
+
+  return apiRequest(
+    `/entries/${entryId}/analysis-history?${query.toString()}`
+  );
 }
 
 export async function createUploadUrl(
