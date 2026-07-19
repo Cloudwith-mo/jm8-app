@@ -13,6 +13,7 @@ from storage import (
     create_text_entry,
     list_entries,
     list_ocr_jobs,
+    list_entry_analysis_versions,
     get_entry_by_id,
     update_entry_analysis,
     create_upload_url,
@@ -99,6 +100,72 @@ def lambda_handler(event, context):
             return response(200, {
                 "count": len(entries),
                 "entries": entries
+            })
+
+        if (
+            method == "GET"
+            and path.startswith("/entries/")
+            and path.endswith("/analysis-history")
+        ):
+            entry_id = (
+                path.split("/entries/")[1]
+                .split("/")[0]
+            )
+
+            entry = get_entry_by_id(
+                user_id=user_id,
+                entry_id=entry_id,
+            )
+
+            if not entry:
+                return response(
+                    404,
+                    {"error": "Entry not found."},
+                )
+
+            query = (
+                event.get("queryStringParameters")
+                or {}
+            )
+
+            raw_limit = str(
+                query.get("limit")
+                or "20"
+            )
+
+            try:
+                limit = int(raw_limit)
+            except ValueError:
+                return response(400, {
+                    "error": "Invalid history limit.",
+                    "message": (
+                        "limit must be an integer "
+                        "between 1 and 50."
+                    ),
+                })
+
+            if limit < 1 or limit > 50:
+                return response(400, {
+                    "error": "Invalid history limit.",
+                    "message": (
+                        "limit must be between "
+                        "1 and 50."
+                    ),
+                })
+
+            versions = (
+                list_entry_analysis_versions(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    limit=limit,
+                )
+            )
+
+            return response(200, {
+                "entryId": entry_id,
+                "count": len(versions),
+                "limit": limit,
+                "versions": versions,
             })
 
         if method == "GET" and path.startswith("/entries/"):

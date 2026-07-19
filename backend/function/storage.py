@@ -241,6 +241,30 @@ def build_analysis_history_items(
     return history_items
 
 
+def public_analysis_history_version(
+    item: dict,
+) -> dict:
+    clean_item = clean_for_json(item)
+
+    public_fields = (
+        "analysisVersionId",
+        "analysisSource",
+        "analysisStatus",
+        "analysisSchemaVersion",
+        "analysisPromptVersion",
+        "analysisModelId",
+        "analysisCompletedAt",
+        "createdAt",
+        "analysis",
+    )
+
+    return {
+        field: clean_item[field]
+        for field in public_fields
+        if field in clean_item
+    }
+
+
 def list_entry_analysis_versions(
     user_id: str,
     entry_id: str,
@@ -263,9 +287,10 @@ def list_entry_analysis_versions(
         Limit=safe_limit,
     )
 
-    return clean_for_json(
-        result.get("Items", [])
-    )
+    return [
+        public_analysis_history_version(item)
+        for item in result.get("Items", [])
+    ]
 
 
 def list_entry_analysis_version_keys(

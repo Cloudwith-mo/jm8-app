@@ -30,6 +30,7 @@ from storage import (  # noqa: E402
     analysis_history_prefix,
     build_analysis_history_items,
     build_legacy_analysis_history_item,
+    public_analysis_history_version,
 )
 
 
@@ -160,6 +161,67 @@ class AnalysisVersioningTests(unittest.TestCase):
                 "entry_test"
             ),
             "ANALYSIS#entry_test#",
+        )
+
+
+    def test_public_history_removes_internal_keys(self):
+        item = {
+            "PK": "USER#private",
+            "SK": "ANALYSIS#private",
+            "userId": "private-user",
+            "entryId": "entry_test",
+            "entityType": (
+                "ENTRY_ANALYSIS_VERSION"
+            ),
+            "analysisVersionId": "analysis_1",
+            "analysisSource": "interactive",
+            "analysisStatus": "COMPLETED",
+            "analysisSchemaVersion": "2.0",
+            "analysis": {
+                "mood": "determined",
+            },
+        }
+
+        result = (
+            public_analysis_history_version(
+                item
+            )
+        )
+
+        self.assertNotIn("PK", result)
+        self.assertNotIn("SK", result)
+        self.assertNotIn("userId", result)
+        self.assertNotIn("entityType", result)
+        self.assertNotIn("entryId", result)
+
+    def test_public_history_keeps_analysis(self):
+        item = {
+            "analysisVersionId": "analysis_1",
+            "analysisSource": "interactive",
+            "analysisStatus": "COMPLETED",
+            "analysisSchemaVersion": "2.0",
+            "analysisCompletedAt": (
+                "2026-07-18T10:00:00+00:00"
+            ),
+            "analysis": {
+                "sentiment": "positive",
+                "mood": "focused",
+            },
+        }
+
+        result = (
+            public_analysis_history_version(
+                item
+            )
+        )
+
+        self.assertEqual(
+            result["analysisVersionId"],
+            "analysis_1",
+        )
+        self.assertEqual(
+            result["analysis"]["mood"],
+            "focused",
         )
 
 
