@@ -1,0 +1,189 @@
+{
+  "Comment": "JournalM8 controlled historical re-analysis workflow",
+  "StartAt": "PreparePage",
+  "States": {
+    "PreparePage": {
+      "Type": "Task",
+      "Resource": "__REANALYSIS_COORDINATOR_ARN__",
+      "Parameters": {
+        "action": "PREPARE",
+        "userId.$": "$.userId",
+        "jobId.$": "$.jobId",
+        "cursor.$": "$.cursor"
+      },
+      "ResultPath": "$.pageContext",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 10,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.workflowError",
+          "Next": "RecordWorkflowFailure"
+        }
+      ],
+      "Next": "ProcessPage"
+    },
+    "ProcessPage": {
+      "Type": "Map",
+      "ItemsPath": "$.pageContext.entries",
+      "MaxConcurrency": 2,
+      "ItemSelector": {
+        "userId.$": "$.userId",
+        "jobId.$": "$.jobId",
+        "entryId.$": "$$.Map.Item.Value.entryId"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "AnalyzeHistoricalEntry",
+        "States": {
+          "AnalyzeHistoricalEntry": {
+            "Type": "Task",
+            "Resource": "__REANALYSIS_WORKER_ARN__",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 2,
+                "BackoffRate": 2,
+                "MaxDelaySeconds": 10,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.workerError",
+                "Next": "NormalizeWorkerFailure"
+              }
+            ],
+            "End": true
+          },
+          "NormalizeWorkerFailure": {
+            "Type": "Pass",
+            "Parameters": {
+              "entryId.$": "$.entryId",
+              "jobId.$": "$.jobId",
+              "outcome": "FAILED",
+              "failureCode": "WorkerInfrastructureFailure",
+              "retryable": true,
+              "sdkRetryAttempts": 0
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.pageResults",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.workflowError",
+          "Next": "RecordWorkflowFailure"
+        }
+      ],
+      "Next": "RecordPage"
+    },
+    "RecordPage": {
+      "Type": "Task",
+      "Resource": "__REANALYSIS_COORDINATOR_ARN__",
+      "Parameters": {
+        "action": "RECORD",
+        "userId.$": "$.userId",
+        "jobId.$": "$.jobId",
+        "page.$": "$.pageContext",
+        "results.$": "$.pageResults"
+      },
+      "ResultPath": "$.recordContext",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 10,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.workflowError",
+          "Next": "RecordWorkflowFailure"
+        }
+      ],
+      "Next": "MorePages"
+    },
+    "MorePages": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.recordContext.hasMore",
+          "BooleanEquals": true,
+          "Next": "AdvanceCursor"
+        }
+      ],
+      "Default": "WorkflowComplete"
+    },
+    "AdvanceCursor": {
+      "Type": "Pass",
+      "Parameters": {
+        "userId.$": "$.userId",
+        "jobId.$": "$.jobId",
+        "cursor.$": "$.recordContext.nextCursor"
+      },
+      "Next": "PreparePage"
+    },
+    "RecordWorkflowFailure": {
+      "Type": "Task",
+      "Resource": "__REANALYSIS_COORDINATOR_ARN__",
+      "Parameters": {
+        "action": "FAIL",
+        "userId.$": "$.userId",
+        "jobId.$": "$.jobId",
+        "workflowError.$": "$.workflowError"
+      },
+      "ResultPath": "$.failureContext",
+      "Next": "WorkflowFailed"
+    },
+    "WorkflowComplete": {
+      "Type": "Succeed"
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Error": "JM8.HistoricalReanalysisFailed",
+      "Cause": "Historical re-analysis workflow failed."
+    }
+  }
+}

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import uuid
@@ -1047,6 +1048,415 @@ def get_historical_reanalysis_job(
             item
         )
     )
+
+
+def historical_reanalysis_page_id(
+    job_id: str,
+    cursor: str | None,
+) -> str:
+    value = (
+        f"{historical_reanalysis_job_sk(job_id)}"
+        f"|{str(cursor or 'START')}"
+    )
+
+    return hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def historical_reanalysis_page_sk(
+    job_id: str,
+    page_id: str,
+) -> str:
+    safe_page_id = str(
+        page_id or ""
+    ).strip()
+
+    if (
+        len(safe_page_id) != 32
+        or any(
+            character not in "0123456789abcdef"
+            for character in safe_page_id
+        )
+    ):
+        raise ValueError(
+            "Invalid historical re-analysis "
+            "page ID."
+        )
+
+    return (
+        "REANALYSIS_PAGE#"
+        f"{historical_reanalysis_job_sk(job_id)}"
+        f"#{safe_page_id}"
+    )
+
+
+def begin_historical_reanalysis_job(
+    user_id: str,
+    job_id: str,
+) -> dict:
+    now = utc_now()
+
+    result = table.update_item(
+        Key={
+            "PK": user_pk(user_id),
+            "SK": (
+                historical_reanalysis_job_sk(
+                    job_id
+                )
+            ),
+        },
+        UpdateExpression=(
+            "SET #status = :running, "
+            "startedAt = "
+            "if_not_exists(startedAt, :now), "
+            "updatedAt = :now"
+        ),
+        ConditionExpression=(
+            "attribute_exists(PK) "
+            "AND attribute_exists(SK) "
+            "AND ("
+            "#status = :queued "
+            "OR #status = :running"
+            ")"
+        ),
+        ExpressionAttributeNames={
+            "#status": "status",
+        },
+        ExpressionAttributeValues={
+            ":queued": "QUEUED",
+            ":running": "RUNNING",
+            ":now": now,
+        },
+        ReturnValues="ALL_NEW",
+    )
+
+    return (
+        public_historical_reanalysis_job(
+            result.get("Attributes") or {}
+        )
+    )
+
+
+def summarize_historical_reanalysis_results(
+    results: list[dict],
+) -> dict:
+    summary = {
+        "processedEntries": 0,
+        "completedEntries": 0,
+        "failedEntries": 0,
+        "skippedEntries": 0,
+    }
+
+    for result in results:
+        summary["processedEntries"] += 1
+
+        outcome = str(
+            (
+                result.get("outcome")
+                if isinstance(result, dict)
+                else ""
+            )
+            or ""
+        ).upper()
+
+        if outcome == "COMPLETED":
+            summary[
+                "completedEntries"
+            ] += 1
+        elif outcome == "SKIPPED":
+            summary[
+                "skippedEntries"
+            ] += 1
+        else:
+            summary[
+                "failedEntries"
+            ] += 1
+
+    return summary
+
+
+def record_historical_reanalysis_page(
+    user_id: str,
+    job_id: str,
+    *,
+    page_id: str,
+    results: list[dict],
+    has_more: bool,
+    next_cursor: str | None,
+) -> dict:
+    if not isinstance(results, list):
+        raise ValueError(
+            "Historical re-analysis results "
+            "must be a list."
+        )
+
+    if has_more and not next_cursor:
+        raise ValueError(
+            "A continuation cursor is required "
+            "when more entries remain."
+        )
+
+    summary = (
+        summarize_historical_reanalysis_results(
+            results
+        )
+    )
+
+    now = utc_now()
+    completed = not has_more
+
+    marker_key = {
+        "PK": user_pk(user_id),
+        "SK": historical_reanalysis_page_sk(
+            job_id,
+            page_id,
+        ),
+    }
+
+    marker_item = {
+        **marker_key,
+        "entityType": (
+            "HISTORICAL_REANALYSIS_PAGE"
+        ),
+        "userId": user_id,
+        "jobId": job_id,
+        "pageId": page_id,
+        "processedEntries": summary[
+            "processedEntries"
+        ],
+        "completedEntries": summary[
+            "completedEntries"
+        ],
+        "failedEntries": summary[
+            "failedEntries"
+        ],
+        "skippedEntries": summary[
+            "skippedEntries"
+        ],
+        "createdAt": now,
+    }
+
+    expression_values = {
+        ":running": "RUNNING",
+        ":completed": "COMPLETED",
+        ":now": now,
+        ":processed": summary[
+            "processedEntries"
+        ],
+        ":completedCount": summary[
+            "completedEntries"
+        ],
+        ":failed": summary[
+            "failedEntries"
+        ],
+        ":skipped": summary[
+            "skippedEntries"
+        ],
+        ":negativeProcessed": -summary[
+            "processedEntries"
+        ],
+        ":zero": 0,
+    }
+
+    if completed:
+        update_expression = (
+            "SET #status = :completed, "
+            "updatedAt = :now, "
+            "completedAt = :now, "
+            "remainingEntries = :zero "
+            "REMOVE nextCursor "
+            "ADD processedEntries :processed, "
+            "completedEntries :completedCount, "
+            "failedEntries :failed, "
+            "skippedEntries :skipped"
+        )
+    else:
+        expression_values[
+            ":nextCursor"
+        ] = str(next_cursor)
+
+        update_expression = (
+            "SET #status = :running, "
+            "updatedAt = :now, "
+            "nextCursor = :nextCursor "
+            "ADD processedEntries :processed, "
+            "completedEntries :completedCount, "
+            "failedEntries :failed, "
+            "skippedEntries :skipped, "
+            "remainingEntries "
+            ":negativeProcessed"
+        )
+
+    transaction = [
+        {
+            "Put": {
+                "TableName": TABLE_NAME,
+                "Item": serialize_attribute_map(
+                    marker_item
+                ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "AND attribute_not_exists(SK)"
+                ),
+            },
+        },
+        {
+            "Update": {
+                "TableName": TABLE_NAME,
+                "Key": serialize_attribute_map({
+                    "PK": user_pk(user_id),
+                    "SK": (
+                        historical_reanalysis_job_sk(
+                            job_id
+                        )
+                    ),
+                }),
+                "UpdateExpression": (
+                    update_expression
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(PK) "
+                    "AND attribute_exists(SK) "
+                    "AND #status = :running"
+                ),
+                "ExpressionAttributeNames": {
+                    "#status": "status",
+                },
+                "ExpressionAttributeValues": (
+                    serialize_attribute_map(
+                        expression_values
+                    )
+                ),
+            },
+        },
+    ]
+
+    try:
+        dynamodb_client.transact_write_items(
+            TransactItems=transaction,
+            ClientRequestToken=(
+                f"rp-{page_id}"
+            )[:36],
+        )
+
+    except ClientError as exc:
+        error_code = (
+            exc.response.get("Error", {})
+            .get("Code")
+        )
+
+        if (
+            error_code
+            != "TransactionCanceledException"
+        ):
+            raise
+
+        marker = table.get_item(
+            Key=marker_key,
+            ConsistentRead=True,
+        ).get("Item")
+
+        if not marker:
+            raise
+
+    job = get_historical_reanalysis_job(
+        user_id,
+        job_id,
+    )
+
+    if not job:
+        raise RuntimeError(
+            "Historical re-analysis job "
+            "could not be loaded."
+        )
+
+    return job
+
+
+def fail_historical_reanalysis_job(
+    user_id: str,
+    job_id: str,
+    *,
+    failure_code: str,
+) -> dict:
+    now = utc_now()
+
+    safe_failure_code = " ".join(
+        str(
+            failure_code
+            or "WorkflowFailure"
+        ).split()
+    )[:120]
+
+    try:
+        result = table.update_item(
+            Key={
+                "PK": user_pk(user_id),
+                "SK": (
+                    historical_reanalysis_job_sk(
+                        job_id
+                    )
+                ),
+            },
+            UpdateExpression=(
+                "SET #status = :failed, "
+                "failureCode = :failureCode, "
+                "failureMessage = "
+                ":failureMessage, "
+                "completedAt = :now, "
+                "updatedAt = :now"
+            ),
+            ConditionExpression=(
+                "attribute_exists(PK) "
+                "AND attribute_exists(SK) "
+                "AND #status <> :completed"
+            ),
+            ExpressionAttributeNames={
+                "#status": "status",
+            },
+            ExpressionAttributeValues={
+                ":failed": "FAILED",
+                ":completed": "COMPLETED",
+                ":failureCode": (
+                    safe_failure_code
+                ),
+                ":failureMessage": (
+                    "The historical re-analysis "
+                    "workflow could not complete."
+                ),
+                ":now": now,
+            },
+            ReturnValues="ALL_NEW",
+        )
+
+        return (
+            public_historical_reanalysis_job(
+                result.get("Attributes") or {}
+            )
+        )
+
+    except ClientError as exc:
+        error_code = (
+            exc.response.get("Error", {})
+            .get("Code")
+        )
+
+        if (
+            error_code
+            != "ConditionalCheckFailedException"
+        ):
+            raise
+
+        job = get_historical_reanalysis_job(
+            user_id,
+            job_id,
+        )
+
+        if not job:
+            raise
+
+        return job
 
 
 def create_text_entry(user_id: str, text: str) -> dict:
