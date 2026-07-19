@@ -494,9 +494,42 @@ def lambda_handler(event, context):
             .get("requestId")
         )
 
+        error_response = (
+            getattr(exc, "response", {})
+            or {}
+        )
+
+        aws_error = (
+            error_response.get("Error")
+            or {}
+        )
+
+        aws_error_code = str(
+            aws_error.get("Code")
+            or ""
+        ) or None
+
+        cancellation_codes = [
+            str(reason.get("Code"))
+            for reason in (
+                error_response.get(
+                    "CancellationReasons"
+                )
+                or []
+            )
+            if (
+                isinstance(reason, dict)
+                and reason.get("Code")
+            )
+        ]
+
         print(json.dumps({
             "event": "api_unhandled_error",
             "errorType": type(exc).__name__,
+            "awsErrorCode": aws_error_code,
+            "awsCancellationCodes": (
+                cancellation_codes
+            ),
             "requestId": request_id,
         }))
 

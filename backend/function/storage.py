@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import ClientError
 
 
@@ -12,8 +13,10 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 RAW_BUCKET = os.environ["RAW_BUCKET"]
 
 dynamodb = boto3.resource("dynamodb")
+dynamodb_client = boto3.client("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
 s3 = boto3.client("s3")
+type_serializer = TypeSerializer()
 
 MAX_OCR_ATTEMPTS = 3
 
@@ -32,6 +35,279 @@ def user_pk(user_id: str) -> str:
 
 def entry_sk(created_at: str, entry_id: str) -> str:
     return f"ENTRY#{created_at}#{entry_id}"
+
+
+def analysis_history_prefix(
+    entry_id: str,
+) -> str:
+    return f"ANALYSIS#{entry_id}#"
+
+
+def analysis_history_sk(
+    entry_id: str,
+    completed_at: str,
+    version_id: str,
+) -> str:
+    return (
+        f"{analysis_history_prefix(entry_id)}"
+        f"{completed_at}#{version_id}"
+    )
+
+
+def new_analysis_version_id(
+    prefix: str = "analysis",
+) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def clean_for_dynamodb(value):
+    if isinstance(value, list):
+        return [
+            clean_for_dynamodb(item)
+            for item in value
+        ]
+
+    if isinstance(value, dict):
+        return {
+            key: clean_for_dynamodb(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, float):
+        return Decimal(str(value))
+
+    return value
+
+
+def serialize_attribute_map(
+    values: dict,
+) -> dict:
+    cleaned = clean_for_dynamodb(values)
+
+    return {
+        key: type_serializer.serialize(value)
+        for key, value in cleaned.items()
+    }
+
+
+def build_analysis_history_item(
+    *,
+    user_id: str,
+    entry_id: str,
+    analysis: dict,
+    version_id: str,
+    analysis_source: str,
+    completed_at: str,
+    captured_at: str,
+) -> dict:
+    safe_source = " ".join(
+        str(analysis_source or "interactive").split()
+    )[:60]
+
+    return {
+        "PK": user_pk(user_id),
+        "SK": analysis_history_sk(
+            entry_id,
+            completed_at,
+            version_id,
+        ),
+        "entityType": "ENTRY_ANALYSIS_VERSION",
+        "userId": user_id,
+        "entryId": entry_id,
+        "analysisVersionId": version_id,
+        "analysisSource": (
+            safe_source or "interactive"
+        ),
+        "analysisStatus": "COMPLETED",
+        "analysisSchemaVersion": str(
+            analysis.get("schemaVersion")
+            or "unversioned"
+        ),
+        "analysisPromptVersion": str(
+            analysis.get("promptVersion")
+            or "unversioned"
+        ),
+        "analysisModelId": str(
+            analysis.get("modelId")
+            or "unversioned"
+        ),
+        "analysisCompletedAt": completed_at,
+        "createdAt": captured_at,
+        "analysis": analysis,
+    }
+
+
+def build_legacy_analysis_history_item(
+    *,
+    entry: dict,
+    user_id: str,
+    entry_id: str,
+    captured_at: str,
+    version_id: str,
+) -> dict | None:
+    previous_analysis = entry.get("analysis")
+
+    if not isinstance(previous_analysis, dict):
+        return None
+
+    if not previous_analysis:
+        return None
+
+    if entry.get("analysisVersionId"):
+        return None
+
+    legacy_analysis = dict(previous_analysis)
+
+    legacy_analysis.setdefault(
+        "schemaVersion",
+        entry.get("analysisSchemaVersion")
+        or "unversioned",
+    )
+
+    legacy_analysis.setdefault(
+        "promptVersion",
+        entry.get("analysisPromptVersion")
+        or "unversioned",
+    )
+
+    legacy_analysis.setdefault(
+        "modelId",
+        entry.get("analysisModelId")
+        or "unversioned",
+    )
+
+    completed_at = str(
+        legacy_analysis.get("analyzedAt")
+        or entry.get("analysisCompletedAt")
+        or entry.get("updatedAt")
+        or entry.get("createdAt")
+        or captured_at
+    )
+
+    return build_analysis_history_item(
+        user_id=user_id,
+        entry_id=entry_id,
+        analysis=legacy_analysis,
+        version_id=version_id,
+        analysis_source="legacy_snapshot",
+        completed_at=completed_at,
+        captured_at=captured_at,
+    )
+
+
+def build_analysis_history_items(
+    *,
+    entry: dict,
+    user_id: str,
+    entry_id: str,
+    analysis: dict,
+    analysis_source: str,
+    captured_at: str,
+    new_version_id: str,
+    legacy_version_id: str,
+) -> list[dict]:
+    history_items: list[dict] = []
+
+    legacy_item = (
+        build_legacy_analysis_history_item(
+            entry=entry,
+            user_id=user_id,
+            entry_id=entry_id,
+            captured_at=captured_at,
+            version_id=legacy_version_id,
+        )
+    )
+
+    if legacy_item:
+        history_items.append(legacy_item)
+
+    completed_at = str(
+        analysis.get("analyzedAt")
+        or captured_at
+    )
+
+    history_items.append(
+        build_analysis_history_item(
+            user_id=user_id,
+            entry_id=entry_id,
+            analysis=analysis,
+            version_id=new_version_id,
+            analysis_source=analysis_source,
+            completed_at=completed_at,
+            captured_at=captured_at,
+        )
+    )
+
+    return history_items
+
+
+def list_entry_analysis_versions(
+    user_id: str,
+    entry_id: str,
+    limit: int = 20,
+) -> list[dict]:
+    safe_limit = max(
+        1,
+        min(int(limit or 20), 50),
+    )
+
+    result = table.query(
+        KeyConditionExpression=(
+            Key("PK").eq(user_pk(user_id))
+            & Key("SK").begins_with(
+                analysis_history_prefix(entry_id)
+            )
+        ),
+        ScanIndexForward=False,
+        ConsistentRead=True,
+        Limit=safe_limit,
+    )
+
+    return clean_for_json(
+        result.get("Items", [])
+    )
+
+
+def list_entry_analysis_version_keys(
+    user_id: str,
+    entry_id: str,
+) -> list[dict]:
+    keys: list[dict] = []
+
+    query_arguments = {
+        "KeyConditionExpression": (
+            Key("PK").eq(user_pk(user_id))
+            & Key("SK").begins_with(
+                analysis_history_prefix(entry_id)
+            )
+        ),
+        "ProjectionExpression": "PK, SK",
+        "ConsistentRead": True,
+    }
+
+    while True:
+        result = table.query(**query_arguments)
+
+        keys.extend(
+            {
+                "PK": item["PK"],
+                "SK": item["SK"],
+            }
+            for item in result.get("Items", [])
+        )
+
+        last_key = result.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+        query_arguments[
+            "ExclusiveStartKey"
+        ] = last_key
+
+    return keys
 
 
 def clean_for_json(value):
@@ -126,67 +402,166 @@ def update_entry_analysis(
     user_id: str,
     entry_id: str,
     analysis: dict,
+    *,
+    analysis_source: str = "interactive",
 ) -> dict:
-    entry = get_entry_by_id(user_id, entry_id)
+    entry = get_entry_by_id(
+        user_id,
+        entry_id,
+    )
 
     if not entry:
         return {}
 
     now = utc_now()
-    completed_at = analysis.get("analyzedAt") or now
 
-    result = table.update_item(
+    completed_at = str(
+        analysis.get("analyzedAt")
+        or now
+    )
+
+    new_version_id = (
+        new_analysis_version_id()
+    )
+
+    legacy_version_id = (
+        new_analysis_version_id("legacy")
+    )
+
+    history_items = (
+        build_analysis_history_items(
+            entry=entry,
+            user_id=user_id,
+            entry_id=entry_id,
+            analysis=analysis,
+            analysis_source=analysis_source,
+            captured_at=now,
+            new_version_id=new_version_id,
+            legacy_version_id=legacy_version_id,
+        )
+    )
+
+    transaction_items = [
+        {
+            "Put": {
+                "TableName": TABLE_NAME,
+                "Item": serialize_attribute_map(
+                    history_item
+                ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "AND attribute_not_exists(SK)"
+                ),
+            },
+        }
+        for history_item in history_items
+    ]
+
+    safe_source = " ".join(
+        str(
+            analysis_source
+            or "interactive"
+        ).split()
+    )[:60]
+
+    expression_values = {
+        ":status": "ANALYZED",
+        ":analysisStatus": "COMPLETED",
+        ":lastAttemptStatus": "COMPLETED",
+        ":lastAttemptAt": now,
+        ":completedAt": completed_at,
+        ":schemaVersion": str(
+            analysis.get("schemaVersion")
+            or ""
+        ),
+        ":promptVersion": str(
+            analysis.get("promptVersion")
+            or ""
+        ),
+        ":modelId": str(
+            analysis.get("modelId")
+            or ""
+        ),
+        ":analysis": analysis,
+        ":analysisVersionId": new_version_id,
+        ":analysisSource": (
+            safe_source or "interactive"
+        ),
+        ":zero": 0,
+        ":one": 1,
+        ":historyAdded": len(history_items),
+        ":updatedAt": now,
+    }
+
+    transaction_items.append({
+        "Update": {
+            "TableName": TABLE_NAME,
+            "Key": serialize_attribute_map({
+                "PK": entry["PK"],
+                "SK": entry["SK"],
+            }),
+            "UpdateExpression": (
+                "SET #status = :status, "
+                "analysisStatus = :analysisStatus, "
+                "analysisLastAttemptStatus = "
+                ":lastAttemptStatus, "
+                "analysisLastAttemptAt = "
+                ":lastAttemptAt, "
+                "analysisCompletedAt = :completedAt, "
+                "analysisSchemaVersion = "
+                ":schemaVersion, "
+                "analysisPromptVersion = "
+                ":promptVersion, "
+                "analysisModelId = :modelId, "
+                "analysis = :analysis, "
+                "analysisVersionId = "
+                ":analysisVersionId, "
+                "analysisSource = :analysisSource, "
+                "analysisAttemptCount = "
+                "if_not_exists("
+                "analysisAttemptCount, :zero"
+                ") + :one, "
+                "analysisVersionCount = "
+                "if_not_exists("
+                "analysisVersionCount, :zero"
+                ") + :historyAdded, "
+                "updatedAt = :updatedAt "
+                "REMOVE analysisFailureCode, "
+                "analysisFailureMessage, "
+                "analysisFailedAt"
+            ),
+            "ConditionExpression": (
+                "attribute_exists(PK) "
+                "AND attribute_exists(SK)"
+            ),
+            "ExpressionAttributeNames": {
+                "#status": "status",
+            },
+            "ExpressionAttributeValues": (
+                serialize_attribute_map(
+                    expression_values
+                )
+            ),
+        },
+    })
+
+    dynamodb_client.transact_write_items(
+        TransactItems=transaction_items,
+        ClientRequestToken=new_version_id,
+    )
+
+    result = table.get_item(
         Key={
             "PK": entry["PK"],
             "SK": entry["SK"],
         },
-        UpdateExpression=(
-            "SET #status = :status, "
-            "analysisStatus = :analysisStatus, "
-            "analysisLastAttemptStatus = :lastAttemptStatus, "
-            "analysisLastAttemptAt = :lastAttemptAt, "
-            "analysisCompletedAt = :completedAt, "
-            "analysisSchemaVersion = :schemaVersion, "
-            "analysisPromptVersion = :promptVersion, "
-            "analysisModelId = :modelId, "
-            "analysis = :analysis, "
-            "analysisAttemptCount = "
-            "if_not_exists(analysisAttemptCount, :zero) + :one, "
-            "updatedAt = :updatedAt "
-            "REMOVE analysisFailureCode, "
-            "analysisFailureMessage, "
-            "analysisFailedAt"
-        ),
-        ExpressionAttributeNames={
-            "#status": "status",
-        },
-        ExpressionAttributeValues={
-            ":status": "ANALYZED",
-            ":analysisStatus": "COMPLETED",
-            ":lastAttemptStatus": "COMPLETED",
-            ":lastAttemptAt": now,
-            ":completedAt": completed_at,
-            ":schemaVersion": str(
-                analysis.get("schemaVersion") or ""
-            ),
-            ":promptVersion": str(
-                analysis.get("promptVersion") or ""
-            ),
-            ":modelId": str(
-                analysis.get("modelId") or ""
-            ),
-            ":analysis": analysis,
-            ":zero": 0,
-            ":one": 1,
-            ":updatedAt": now,
-        },
-        ReturnValues="ALL_NEW",
+        ConsistentRead=True,
     )
 
-    attributes = result.get("Attributes") or {}
+    updated_entry = result.get("Item") or {}
 
     return attach_image_preview_url(
-        attributes
+        updated_entry
     )
 
 
@@ -675,8 +1050,15 @@ def update_entry_status(user_id: str, entry_id: str, status: str, error_message:
     return get_entry_by_id(user_id, entry_id)
 
 
-def update_entry_review(user_id: str, entry_id: str, clean_text: str) -> dict:
-    entry = get_entry_by_id(user_id, entry_id)
+def update_entry_review(
+    user_id: str,
+    entry_id: str,
+    clean_text: str,
+) -> dict:
+    entry = get_entry_by_id(
+        user_id,
+        entry_id,
+    )
 
     if not entry:
         return {}
@@ -684,81 +1066,176 @@ def update_entry_review(user_id: str, entry_id: str, clean_text: str) -> dict:
     now = utc_now()
     word_count = len(clean_text.split())
 
-    table.update_item(
-        Key={
-            "PK": entry["PK"],
-            "SK": entry["SK"]
-        },
-        UpdateExpression=(
-            "SET #status = :status, "
-            "cleanText = :cleanText, "
-            "reviewStatus = :reviewStatus, "
-            "reviewedAt = :reviewedAt, "
-            "wordCount = :wordCount, "
-            "analysisStatus = :analysisStatus, "
-            "updatedAt = :updatedAt "
-            "REMOVE analysis"
-        ),
-        ExpressionAttributeNames={
-            "#status": "status"
-        },
-        ExpressionAttributeValues={
-            ":status": "REVIEWED",
-            ":cleanText": clean_text,
-            ":reviewStatus": "COMPLETED",
-            ":reviewedAt": now,
-            ":wordCount": word_count,
-            ":analysisStatus": "NOT_ANALYZED",
-            ":updatedAt": now
-        }
+    legacy_version_id = (
+        new_analysis_version_id("legacy")
     )
 
-    return get_entry_by_id(user_id, entry_id)
-
-
-def delete_entry(user_id: str, entry_id: str) -> dict:
-    """
-    Deletes a journal entry metadata record from DynamoDB and attempts to delete
-    the original S3 image if one exists.
-    """
-    result = table.query(
-        IndexName="GSI1",
-        KeyConditionExpression=Key("GSI1PK").eq(f"ENTRY#{entry_id}")
+    legacy_item = (
+        build_legacy_analysis_history_item(
+            entry=entry,
+            user_id=user_id,
+            entry_id=entry_id,
+            captured_at=now,
+            version_id=legacy_version_id,
+        )
     )
 
-    items = result.get("Items", [])
+    history_added = 1 if legacy_item else 0
+    transaction_items = []
 
-    if not items:
-        raise ValueError("Entry not found")
+    if legacy_item:
+        transaction_items.append({
+            "Put": {
+                "TableName": TABLE_NAME,
+                "Item": serialize_attribute_map(
+                    legacy_item
+                ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "AND attribute_not_exists(SK)"
+                ),
+            },
+        })
 
-    entry = items[0]
+    expression_values = {
+        ":status": "REVIEWED",
+        ":cleanText": clean_text,
+        ":reviewStatus": "COMPLETED",
+        ":reviewedAt": now,
+        ":wordCount": word_count,
+        ":analysisStatus": "NOT_ANALYZED",
+        ":historyAdded": history_added,
+        ":zero": 0,
+        ":updatedAt": now,
+    }
 
-    if entry.get("PK") != f"USER#{user_id}":
-        raise ValueError("Entry not found")
+    transaction_items.append({
+        "Update": {
+            "TableName": TABLE_NAME,
+            "Key": serialize_attribute_map({
+                "PK": entry["PK"],
+                "SK": entry["SK"],
+            }),
+            "UpdateExpression": (
+                "SET #status = :status, "
+                "cleanText = :cleanText, "
+                "reviewStatus = :reviewStatus, "
+                "reviewedAt = :reviewedAt, "
+                "wordCount = :wordCount, "
+                "analysisStatus = :analysisStatus, "
+                "analysisVersionCount = "
+                "if_not_exists("
+                "analysisVersionCount, :zero"
+                ") + :historyAdded, "
+                "updatedAt = :updatedAt "
+                "REMOVE analysis, "
+                "analysisVersionId, "
+                "analysisSource, "
+                "analysisSchemaVersion, "
+                "analysisPromptVersion, "
+                "analysisModelId, "
+                "analysisCompletedAt, "
+                "analysisLastAttemptStatus, "
+                "analysisLastAttemptAt, "
+                "analysisFailureCode, "
+                "analysisFailureMessage, "
+                "analysisFailedAt"
+            ),
+            "ConditionExpression": (
+                "attribute_exists(PK) "
+                "AND attribute_exists(SK)"
+            ),
+            "ExpressionAttributeNames": {
+                "#status": "status",
+            },
+            "ExpressionAttributeValues": (
+                serialize_attribute_map(
+                    expression_values
+                )
+            ),
+        },
+    })
 
-    table.delete_item(
+    request_token = (
+        new_analysis_version_id("review")
+    )
+
+    dynamodb_client.transact_write_items(
+        TransactItems=transaction_items,
+        ClientRequestToken=request_token,
+    )
+
+    result = table.get_item(
         Key={
             "PK": entry["PK"],
             "SK": entry["SK"],
-        }
+        },
+        ConsistentRead=True,
     )
+
+    updated_entry = result.get("Item") or {}
+
+    return attach_image_preview_url(
+        updated_entry
+    )
+
+
+def delete_entry(
+    user_id: str,
+    entry_id: str,
+) -> dict:
+    """
+    Deletes the journal entry, its immutable analysis history,
+    and its original S3 image when present.
+    """
+    entry = get_entry_by_id(
+        user_id,
+        entry_id,
+    )
+
+    if not entry:
+        raise ValueError("Entry not found")
+
+    history_keys = (
+        list_entry_analysis_version_keys(
+            user_id,
+            entry_id,
+        )
+    )
+
+    with table.batch_writer() as batch:
+        for key in history_keys:
+            batch.delete_item(Key=key)
+
+        batch.delete_item(
+            Key={
+                "PK": entry["PK"],
+                "SK": entry["SK"],
+            }
+        )
 
     bucket = entry.get("s3RawBucket")
     key = entry.get("s3RawKey")
 
     if bucket and key:
         try:
-            s3.delete_object(Bucket=bucket, Key=key)
+            s3.delete_object(
+                Bucket=bucket,
+                Key=key,
+            )
         except Exception:
             pass
 
     return {
         "entryId": entry_id,
         "deleted": True,
-        "deletedImage": bool(bucket and key),
+        "deletedImage": bool(
+            bucket and key
+        ),
+        "deletedAnalysisVersions": len(
+            history_keys
+        ),
     }
-
-
 
 def derive_ocr_job_status(entry: dict) -> str:
     """
