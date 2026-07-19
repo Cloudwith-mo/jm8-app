@@ -16,6 +16,7 @@ FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 ZIP_FILE="dist/function.zip"
 OCR_WORKFLOW_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 API_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-ocr-workflow"
+API_BATCH_WRITE_POLICY_NAME="${APP_NAME}-${STAGE}-batch-write-main-table"
 
 ./bin/package
 
@@ -53,6 +54,50 @@ if [ -z "$OCR_WORKFLOW_ARN" ] || [ "$OCR_WORKFLOW_ARN" = "None" ]; then
 fi
 
 mkdir -p .build
+
+TABLE_ARN="$(
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Table.TableArn \
+    --output text
+)"
+
+if [ -z "$TABLE_ARN" ] || [ "$TABLE_ARN" = "None" ]; then
+  echo "DynamoDB table ARN could not be resolved."
+  exit 1
+fi
+
+python3 - "$TABLE_ARN" \
+  > .build/api-batch-write-policy.json <<'PY_POLICY'
+import json
+import sys
+
+table_arn = sys.argv[1]
+
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:BatchWriteItem"
+            ],
+            "Resource": table_arn
+        }
+    ]
+}))
+PY_POLICY
+
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$API_BATCH_WRITE_POLICY_NAME" \
+  --policy-document \
+    file://.build/api-batch-write-policy.json \
+  --profile "$AWS_PROFILE"
+
+echo "API role can batch-delete entry history."
 
 python3 - "$OCR_WORKFLOW_ARN" \
   > .build/api-ocr-workflow-policy.json <<'PY'
