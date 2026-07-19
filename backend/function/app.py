@@ -14,6 +14,7 @@ from storage import (
     list_entries,
     list_ocr_jobs,
     list_entry_analysis_versions,
+    get_historical_analysis_inventory,
     get_entry_by_id,
     update_entry_analysis,
     create_upload_url,
@@ -100,6 +101,25 @@ def lambda_handler(event, context):
             return response(200, {
                 "count": len(entries),
                 "entries": entries
+            })
+
+        if (
+            method == "GET"
+            and path
+            == "/analysis/reanalysis/dry-run"
+        ):
+            inventory = (
+                get_historical_analysis_inventory(
+                    user_id=user_id,
+                )
+            )
+
+            return response(200, {
+                "dryRun": True,
+                "readOnly": True,
+                "mutationsPerformed": 0,
+                "bedrockInvocationsPerformed": 0,
+                "inventory": inventory,
             })
 
         if (

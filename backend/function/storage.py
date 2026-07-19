@@ -374,6 +374,261 @@ def attach_image_preview_urls(entries: list[dict]) -> list[dict]:
     return [attach_image_preview_url(entry) for entry in entries]
 
 
+def has_usable_analysis_text(
+    entry: dict,
+) -> bool:
+    for field in ("cleanText", "rawText"):
+        value = entry.get(field)
+
+        if (
+            isinstance(value, str)
+            and value.strip()
+        ):
+            return True
+
+    return False
+
+
+def has_versioned_analysis(
+    entry: dict,
+) -> bool:
+    if entry.get("analysisVersionId"):
+        return True
+
+    raw_count = (
+        entry.get("analysisVersionCount")
+        or 0
+    )
+
+    try:
+        version_count = int(raw_count)
+    except (TypeError, ValueError):
+        version_count = 0
+
+    return version_count > 0
+
+
+def classify_historical_analysis_entry(
+    entry: dict,
+) -> dict:
+    usable_text = has_usable_analysis_text(
+        entry
+    )
+
+    versioned = has_versioned_analysis(
+        entry
+    )
+
+    analysis = entry.get("analysis")
+
+    legacy_analyzed = (
+        not versioned
+        and isinstance(analysis, dict)
+        and bool(analysis)
+    )
+
+    analysis_status = str(
+        entry.get("analysisStatus")
+        or ""
+    ).upper()
+
+    never_analyzed = (
+        not versioned
+        and not legacy_analyzed
+        and analysis_status
+        in {"", "NOT_ANALYZED"}
+    )
+
+    failed_or_incomplete = (
+        not versioned
+        and not legacy_analyzed
+        and not never_analyzed
+    )
+
+    eligible = (
+        usable_text
+        and not versioned
+    )
+
+    skip_reason = None
+
+    if versioned:
+        skip_reason = "alreadyVersioned"
+    elif not usable_text:
+        skip_reason = "noUsableText"
+
+    return {
+        "usableText": usable_text,
+        "versioned": versioned,
+        "legacyAnalyzed": legacy_analyzed,
+        "neverAnalyzed": never_analyzed,
+        "failedOrIncomplete": (
+            failed_or_incomplete
+        ),
+        "eligible": eligible,
+        "skipReason": skip_reason,
+    }
+
+
+def new_historical_analysis_inventory() -> dict:
+    return {
+        "totalEntries": 0,
+        "entriesWithUsableText": 0,
+        "entriesWithoutUsableText": 0,
+        "alreadyVersionedEntries": 0,
+        "legacyAnalyzedEntries": 0,
+        "neverAnalyzedEntries": 0,
+        "failedOrIncompleteEntries": 0,
+        "eligibleEntries": 0,
+        "skippedEntries": 0,
+        "skipReasons": {
+            "alreadyVersioned": 0,
+            "noUsableText": 0,
+        },
+        "estimatedBedrockRequests": 0,
+    }
+
+
+def update_historical_analysis_inventory(
+    inventory: dict,
+    entries: list[dict],
+) -> dict:
+    for entry in entries:
+        classification = (
+            classify_historical_analysis_entry(
+                entry
+            )
+        )
+
+        inventory["totalEntries"] += 1
+
+        if classification["usableText"]:
+            inventory[
+                "entriesWithUsableText"
+            ] += 1
+        else:
+            inventory[
+                "entriesWithoutUsableText"
+            ] += 1
+
+        if classification["versioned"]:
+            inventory[
+                "alreadyVersionedEntries"
+            ] += 1
+
+        if classification["legacyAnalyzed"]:
+            inventory[
+                "legacyAnalyzedEntries"
+            ] += 1
+
+        if classification["neverAnalyzed"]:
+            inventory[
+                "neverAnalyzedEntries"
+            ] += 1
+
+        if classification[
+            "failedOrIncomplete"
+        ]:
+            inventory[
+                "failedOrIncompleteEntries"
+            ] += 1
+
+        if classification["eligible"]:
+            inventory["eligibleEntries"] += 1
+        else:
+            inventory["skippedEntries"] += 1
+
+            skip_reason = classification[
+                "skipReason"
+            ]
+
+            if skip_reason:
+                inventory["skipReasons"][
+                    skip_reason
+                ] += 1
+
+    inventory[
+        "estimatedBedrockRequests"
+    ] = inventory["eligibleEntries"]
+
+    return inventory
+
+
+def build_historical_analysis_inventory(
+    entries: list[dict],
+) -> dict:
+    inventory = (
+        new_historical_analysis_inventory()
+    )
+
+    return update_historical_analysis_inventory(
+        inventory,
+        entries,
+    )
+
+
+def get_historical_analysis_inventory(
+    user_id: str,
+) -> dict:
+    inventory = (
+        new_historical_analysis_inventory()
+    )
+
+    query_arguments = {
+        "KeyConditionExpression": (
+            Key("PK").eq(user_pk(user_id))
+            & Key("SK").begins_with(
+                "ENTRY#"
+            )
+        ),
+        "ProjectionExpression": (
+            "#entryId, #cleanText, #rawText, "
+            "#analysis, #analysisStatus, "
+            "#analysisVersionId, "
+            "#analysisVersionCount"
+        ),
+        "ExpressionAttributeNames": {
+            "#entryId": "entryId",
+            "#cleanText": "cleanText",
+            "#rawText": "rawText",
+            "#analysis": "analysis",
+            "#analysisStatus": (
+                "analysisStatus"
+            ),
+            "#analysisVersionId": (
+                "analysisVersionId"
+            ),
+            "#analysisVersionCount": (
+                "analysisVersionCount"
+            ),
+        },
+        "ConsistentRead": True,
+    }
+
+    while True:
+        result = table.query(
+            **query_arguments
+        )
+
+        update_historical_analysis_inventory(
+            inventory,
+            result.get("Items", []),
+        )
+
+        last_key = result.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+        query_arguments[
+            "ExclusiveStartKey"
+        ] = last_key
+
+    return clean_for_json(inventory)
+
+
 def create_text_entry(user_id: str, text: str) -> dict:
     now = utc_now()
     entry_id = new_entry_id()

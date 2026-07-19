@@ -109,6 +109,7 @@ create_route_if_missing () {
 
 create_route_if_missing "POST /entries"
 create_route_if_missing "GET /entries"
+create_route_if_missing "GET /analysis/reanalysis/dry-run"
 create_route_if_missing "GET /ocr-jobs"
 create_route_if_missing "GET /entries/{entryId}"
 create_route_if_missing "GET /entries/{entryId}/analysis-history"
