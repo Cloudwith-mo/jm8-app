@@ -32,7 +32,7 @@ if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
     --cors-configuration '{
       "AllowOrigins": ["*"],
       "AllowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      "AllowHeaders": ["content-type", "x-user-id"],
+      "AllowHeaders": ["content-type", "x-user-id", "authorization"],
       "MaxAge": 300
     }' \
     --query "ApiId" \
@@ -44,6 +44,15 @@ if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
 else
   echo "API already exists: $API_ID"
 fi
+
+aws apigatewayv2 update-api   --api-id "$API_ID"   --cors-configuration '{
+    "AllowOrigins": ["*"],
+    "AllowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "AllowHeaders": ["content-type", "x-user-id", "authorization"],
+    "MaxAge": 300
+  }'   --profile "$AWS_PROFILE"   --region "$AWS_REGION"   >/dev/null
+
+echo "API CORS configuration updated."
 
 echo "Checking Lambda integration."
 
@@ -110,6 +119,8 @@ create_route_if_missing () {
 create_route_if_missing "POST /entries"
 create_route_if_missing "GET /entries"
 create_route_if_missing "GET /analysis/reanalysis/dry-run"
+create_route_if_missing "POST /analysis/reanalysis/jobs"
+create_route_if_missing "GET /analysis/reanalysis/jobs/{jobId}"
 create_route_if_missing "GET /ocr-jobs"
 create_route_if_missing "GET /entries/{entryId}"
 create_route_if_missing "GET /entries/{entryId}/analysis-history"

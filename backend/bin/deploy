@@ -15,7 +15,9 @@ ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 ZIP_FILE="dist/function.zip"
 OCR_WORKFLOW_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
+HISTORICAL_REANALYSIS_WORKFLOW_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
 API_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-ocr-workflow"
+API_HISTORICAL_REANALYSIS_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-historical-reanalysis-workflow"
 API_BATCH_WRITE_POLICY_NAME="${APP_NAME}-${STAGE}-batch-write-main-table"
 
 ./bin/package
@@ -50,6 +52,19 @@ OCR_WORKFLOW_ARN="$(
 if [ -z "$OCR_WORKFLOW_ARN" ] || [ "$OCR_WORKFLOW_ARN" = "None" ]; then
   echo "OCR workflow was not found."
   echo "Run: ./bin/deploy-ocr-workflow"
+  exit 1
+fi
+
+echo "Resolving historical re-analysis workflow: $HISTORICAL_REANALYSIS_WORKFLOW_NAME"
+
+HISTORICAL_REANALYSIS_WORKFLOW_ARN="$(
+  aws stepfunctions list-state-machines     --profile "$AWS_PROFILE"     --region "$AWS_REGION"     --query       "stateMachines[?name=='${HISTORICAL_REANALYSIS_WORKFLOW_NAME}'].stateMachineArn | [0]"     --output text
+)"
+
+if [ -z "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" ] \
+  || [ "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" = "None" ]; then
+  echo "Historical re-analysis workflow was not found."
+  echo "Run: ./bin/deploy-historical-reanalysis-workflow"
   exit 1
 fi
 
@@ -128,6 +143,30 @@ aws iam put-role-policy \
 
 echo "API role can start the OCR workflow."
 
+python3 - "$HISTORICAL_REANALYSIS_WORKFLOW_ARN"   > .build/api-historical-reanalysis-workflow-policy.json <<'PY_HISTORICAL'
+import json
+import sys
+
+workflow_arn = sys.argv[1]
+
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "states:StartExecution"
+            ],
+            "Resource": workflow_arn
+        }
+    ]
+}))
+PY_HISTORICAL
+
+aws iam put-role-policy   --role-name "$ROLE_NAME"   --policy-name     "$API_HISTORICAL_REANALYSIS_WORKFLOW_POLICY_NAME"   --policy-document     file://.build/api-historical-reanalysis-workflow-policy.json   --profile "$AWS_PROFILE"
+
+echo "API role can start the historical re-analysis workflow."
+
 echo "Checking Lambda function: $FUNCTION_NAME"
 
 set +e
@@ -151,7 +190,7 @@ if [ "$FUNCTION_EXISTS" -ne 0 ]; then
     --zip-file "fileb://${ZIP_FILE}" \
     --timeout 28 \
     --memory-size 512 \
-    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN},BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID},ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION},ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}" \
+    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN},HISTORICAL_REANALYSIS_WORKFLOW_ARN=${HISTORICAL_REANALYSIS_WORKFLOW_ARN},BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID},ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION},ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}" \
     --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
@@ -184,7 +223,7 @@ else
     --function-name "$FUNCTION_NAME" \
     --timeout 28 \
     --memory-size 512 \
-    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN},BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID},ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION},ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}" \
+    --environment "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET},OCR_WORKFLOW_ARN=${OCR_WORKFLOW_ARN},HISTORICAL_REANALYSIS_WORKFLOW_ARN=${HISTORICAL_REANALYSIS_WORKFLOW_ARN},BEDROCK_ANALYSIS_MODEL_ID=${BEDROCK_ANALYSIS_MODEL_ID},ANALYSIS_SCHEMA_VERSION=${ANALYSIS_SCHEMA_VERSION},ANALYSIS_PROMPT_VERSION=${ANALYSIS_PROMPT_VERSION}}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null
