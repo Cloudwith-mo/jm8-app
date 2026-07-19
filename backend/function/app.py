@@ -4,6 +4,9 @@ from llm_journal_analyzer import (
     AnalyzerResponseError,
     analyze_journal_entry_llm,
 )
+from historical_reanalysis_workflow_client import (
+    start_historical_reanalysis_execution,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -15,6 +18,10 @@ from storage import (
     list_ocr_jobs,
     list_entry_analysis_versions,
     get_historical_analysis_inventory,
+    create_historical_reanalysis_job,
+    get_historical_reanalysis_job,
+    fail_historical_reanalysis_job,
+    historical_reanalysis_job_sk,
     get_entry_by_id,
     update_entry_analysis,
     create_upload_url,
@@ -101,6 +108,217 @@ def lambda_handler(event, context):
             return response(200, {
                 "count": len(entries),
                 "entries": entries
+            })
+
+        if (
+            method == "POST"
+            and path
+            == "/analysis/reanalysis/jobs"
+        ):
+            body = parse_body(event)
+
+            raw_page_size = body.get(
+                "pageSize",
+                25,
+            )
+
+            try:
+                page_size = int(
+                    raw_page_size
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return response(400, {
+                    "error": "InvalidPageSize",
+                    "message": (
+                        "pageSize must be an "
+                        "integer between 1 and 25."
+                    ),
+                })
+
+            if (
+                page_size < 1
+                or page_size > 25
+            ):
+                return response(400, {
+                    "error": "InvalidPageSize",
+                    "message": (
+                        "pageSize must be between "
+                        "1 and 25."
+                    ),
+                })
+
+            inventory = (
+                get_historical_analysis_inventory(
+                    user_id=user_id,
+                )
+            )
+
+            eligible_entries = int(
+                inventory.get(
+                    "eligibleEntries",
+                    0,
+                )
+                or 0
+            )
+
+            if eligible_entries < 1:
+                return response(409, {
+                    "error": "NoEligibleEntries",
+                    "message": (
+                        "No journal entries are "
+                        "currently eligible for "
+                        "historical re-analysis."
+                    ),
+                    "inventory": inventory,
+                })
+
+            job = (
+                create_historical_reanalysis_job(
+                    user_id=user_id,
+                    inventory=inventory,
+                    page_size=page_size,
+                )
+            )
+
+            try:
+                execution = (
+                    start_historical_reanalysis_execution(
+                        user_id=user_id,
+                        job_id=job["jobId"],
+                    )
+                )
+
+            except Exception as exc:
+                failure_code = (
+                    type(exc).__name__
+                )
+
+                try:
+                    failed_job = (
+                        fail_historical_reanalysis_job(
+                            user_id=user_id,
+                            job_id=job["jobId"],
+                            failure_code=(
+                                "WorkflowStartFailed"
+                            ),
+                        )
+                    )
+                except Exception:
+                    failed_job = job
+
+                print(json.dumps({
+                    "event": (
+                        "historical_reanalysis_"
+                        "start_failed"
+                    ),
+                    "jobId": job.get(
+                        "jobId"
+                    ),
+                    "failureCode": (
+                        failure_code
+                    ),
+                }))
+
+                return response(502, {
+                    "error": (
+                        "HistoricalReanalysis"
+                        "StartFailed"
+                    ),
+                    "message": (
+                        "JM8 could not start the "
+                        "historical re-analysis "
+                        "workflow."
+                    ),
+                    "retryable": True,
+                    "job": failed_job,
+                })
+
+            print(json.dumps({
+                "event": (
+                    "historical_reanalysis_"
+                    "accepted"
+                ),
+                "jobId": job.get(
+                    "jobId"
+                ),
+                "eligibleEntries": (
+                    eligible_entries
+                ),
+                "pageSize": page_size,
+                "duplicateExecution": (
+                    execution.get(
+                        "duplicate",
+                        False,
+                    )
+                ),
+            }))
+
+            return response(202, {
+                "message": (
+                    "Historical re-analysis "
+                    "job accepted."
+                ),
+                "job": job,
+            })
+
+        if (
+            method == "GET"
+            and path.startswith(
+                "/analysis/reanalysis/jobs/"
+            )
+        ):
+            job_id = path.removeprefix(
+                "/analysis/reanalysis/jobs/"
+            ).strip("/")
+
+            if (
+                not job_id
+                or "/" in job_id
+            ):
+                return response(400, {
+                    "error": "InvalidJobId",
+                    "message": (
+                        "A valid historical "
+                        "re-analysis job ID "
+                        "is required."
+                    ),
+                })
+
+            try:
+                historical_reanalysis_job_sk(
+                    job_id
+                )
+            except ValueError:
+                return response(400, {
+                    "error": "InvalidJobId",
+                    "message": (
+                        "The historical "
+                        "re-analysis job ID "
+                        "is invalid."
+                    ),
+                })
+
+            job = (
+                get_historical_reanalysis_job(
+                    user_id=user_id,
+                    job_id=job_id,
+                )
+            )
+
+            if not job:
+                return response(404, {
+                    "error": "JobNotFound",
+                    "message": (
+                        "Historical re-analysis "
+                        "job not found."
+                    ),
+                })
+
+            return response(200, {
+                "job": job,
             })
 
         if (
