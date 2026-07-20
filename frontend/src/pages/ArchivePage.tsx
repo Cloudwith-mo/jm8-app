@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, LayoutGrid, List, Menu, Sprout, X } from "lucide-react";
-import ArchiveSidebar from "../components/layout/ArchiveSidebar";
+import ArchiveSidebar, {
+  type ArchiveSection,
+} from "../components/layout/ArchiveSidebar";
 import ArchiveTopbar from "../components/layout/ArchiveTopbar";
 import SelectedEntryPanel from "../components/layout/SelectedEntryPanel";
 import ArchiveChips, { type ArchiveChipFilter } from "../components/archive/ArchiveChips";
 import EntryCard from "../components/archive/EntryCard";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
+import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
 import AuthStatus from "../components/layout/AuthStatus";
 import type { JournalEntry } from "../types/journal";
 import {
@@ -83,6 +86,8 @@ export default function ArchivePage() {
   const [isBusy, setIsBusy] = useState(false);
   const [isSelectedPanelOpen, setIsSelectedPanelOpen] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [activeSection, setActiveSection] =
+    useState<ArchiveSection>("archive");
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -169,6 +174,19 @@ export default function ArchivePage() {
 
     if (kind && toastTitle) {
       showToast(kind, toastTitle, message);
+    }
+  }
+
+  function navigateToSection(
+    section: ArchiveSection
+  ) {
+    setActiveSection(section);
+    setIsMobileNavOpen(false);
+
+    if (
+      section === "analysisJobs"
+    ) {
+      setIsSelectedPanelOpen(false);
     }
   }
 
@@ -450,15 +468,40 @@ export default function ArchivePage() {
   }, []);
 
   return (
-    <main className="jm8-archive-shell">
+    <main
+      className={
+        activeSection === "analysisJobs"
+          ? "jm8-archive-shell jobs-view"
+          : "jm8-archive-shell"
+      }
+    >
       <header className="mobile-app-header">
         <button onClick={() => setIsMobileNavOpen(true)} aria-label="Open navigation">
           <Menu size={20} />
         </button>
         <strong>JOURNALM8</strong>
         <button
-          onClick={() => setIsSelectedPanelOpen(true)}
-          aria-label="Open selected entry"
+          onClick={() => {
+            if (
+              activeSection ===
+              "analysisJobs"
+            ) {
+              navigateToSection(
+                "archive"
+              );
+              return;
+            }
+
+            setIsSelectedPanelOpen(
+              true
+            );
+          }}
+          aria-label={
+            activeSection ===
+            "analysisJobs"
+              ? "Return to archive"
+              : "Open selected entry"
+          }
         >
           <Sprout size={20} />
         </button>
@@ -481,6 +524,8 @@ export default function ArchivePage() {
         <ArchiveSidebar
           user={authUser}
           entries={entries}
+          activeSection={activeSection}
+          onNavigate={navigateToSection}
           onNewEntry={() => {
             setIsMobileNavOpen(false);
             setModalMode("write");
@@ -495,25 +540,13 @@ export default function ArchivePage() {
       <ArchiveSidebar
         user={authUser}
         entries={entries}
+        activeSection={activeSection}
+        onNavigate={navigateToSection}
         onNewEntry={() => setModalMode("write")}
         onUpload={() => setModalMode("upload")}
       />
 
       <section className="archive-main">
-        <ArchiveTopbar
-          searchQuery={searchQuery}
-          sourceFilter={sourceFilter}
-          statusFilter={statusFilter}
-          sortOrder={sortOrder}
-          resultCount={filteredEntries.length}
-          totalCount={entries.length}
-          onSearchChange={setSearchQuery}
-          onSourceFilterChange={setSourceFilter}
-          onStatusFilterChange={setStatusFilter}
-          onSortOrderChange={setSortOrder}
-          onClearFilters={clearFilters}
-        />
-
         <AuthStatus
           user={authUser}
           isAuthReady={isAuthReady}
@@ -523,69 +556,194 @@ export default function ArchivePage() {
 
         {isAuthReady && !authUser && (
           <section className="auth-required-card">
-            <h2>Sign in to access your private journal archive</h2>
+            <h2>
+              Sign in to access your
+              private journal archive
+            </h2>
+
             <p>
-              JM8 now protects entries by Cognito user identity. Log in to upload,
-              review, analyze, search, and manage your personal journal archive.
+              JM8 protects entries and
+              historical analysis jobs
+              with your Cognito identity.
             </p>
-            <button onClick={loginWithCognito}>Login with Cognito</button>
+
+            <button
+              onClick={
+                loginWithCognito
+              }
+            >
+              Login with Cognito
+            </button>
           </section>
         )}
 
-        <ArchiveChips entries={entries} activeFilter={chipFilter} onFilterChange={setChipFilter} />
+        {authUser &&
+          activeSection ===
+            "archive" && (
+            <>
+              <ArchiveTopbar
+                searchQuery={
+                  searchQuery
+                }
+                sourceFilter={
+                  sourceFilter
+                }
+                statusFilter={
+                  statusFilter
+                }
+                sortOrder={
+                  sortOrder
+                }
+                resultCount={
+                  filteredEntries.length
+                }
+                totalCount={
+                  entries.length
+                }
+                onSearchChange={
+                  setSearchQuery
+                }
+                onSourceFilterChange={
+                  setSourceFilter
+                }
+                onStatusFilterChange={
+                  setStatusFilter
+                }
+                onSortOrderChange={
+                  setSortOrder
+                }
+                onClearFilters={
+                  clearFilters
+                }
+              />
 
-        <div className="archive-heading-row">
-          <div>
-            <p className="archive-kicker">
-              <Sprout size={16} />
-              Private journal archive
-            </p>
-            <h1>Your Journal Timeline</h1>
-          </div>
+              <ArchiveChips
+                entries={entries}
+                activeFilter={
+                  chipFilter
+                }
+                onFilterChange={
+                  setChipFilter
+                }
+              />
 
-          <div className="view-toggle">
-            <button className="active">
-              <LayoutGrid size={18} />
-            </button>
-            <button>
-              <List size={18} />
-            </button>
-          </div>
-        </div>
+              <div className="archive-heading-row">
+                <div>
+                  <p className="archive-kicker">
+                    <Sprout size={16} />
+                    Private journal
+                    archive
+                  </p>
 
-        {Object.keys(groupedEntries).length === 0 ? (
-          <section className="empty-archive">
-            <h2>No matching entries found</h2>
-            <p>Try clearing filters or searching for another mood, theme, or keyword.</p>
-          </section>
-        ) : (
-          Object.entries(groupedEntries).map(([group, groupEntries]) => (
-            <section className="month-section" key={group}>
-              <header className="month-heading">
-                <button>
-                  <ChevronDown size={18} />
-                </button>
-                <h2>{group}</h2>
-                <span>{groupEntries.length} entries</span>
-              </header>
+                  <h1>
+                    Your Journal Timeline
+                  </h1>
+                </div>
 
-              <div className="entry-grid">
-                {groupEntries.map((entry) => (
-                  <EntryCard
-                    key={entry.entryId}
-                    entry={entry}
-                    isSelected={selectedEntry?.entryId === entry.entryId}
-                    onClick={() => openEntry(entry.entryId)}
-                  />
-                ))}
+                <div className="view-toggle">
+                  <button className="active">
+                    <LayoutGrid
+                      size={18}
+                    />
+                  </button>
+
+                  <button>
+                    <List size={18} />
+                  </button>
+                </div>
               </div>
-            </section>
-          ))
-        )}
 
-        <div className="archive-status">
-          {isBusy ? `Working: ${statusMessage}` : statusMessage}
-        </div>
+              {Object.keys(
+                groupedEntries
+              ).length === 0 ? (
+                <section className="empty-archive">
+                  <h2>
+                    No matching entries
+                    found
+                  </h2>
+
+                  <p>
+                    Try clearing filters
+                    or searching for
+                    another mood, theme,
+                    or keyword.
+                  </p>
+                </section>
+              ) : (
+                Object.entries(
+                  groupedEntries
+                ).map(
+                  ([
+                    group,
+                    groupEntries,
+                  ]) => (
+                    <section
+                      className="month-section"
+                      key={group}
+                    >
+                      <header className="month-heading">
+                        <button>
+                          <ChevronDown
+                            size={18}
+                          />
+                        </button>
+
+                        <h2>
+                          {group}
+                        </h2>
+
+                        <span>
+                          {
+                            groupEntries.length
+                          }{" "}
+                          entries
+                        </span>
+                      </header>
+
+                      <div className="entry-grid">
+                        {groupEntries.map(
+                          (entry) => (
+                            <EntryCard
+                              key={
+                                entry.entryId
+                              }
+                              entry={
+                                entry
+                              }
+                              isSelected={
+                                selectedEntry
+                                  ?.entryId ===
+                                entry.entryId
+                              }
+                              onClick={() =>
+                                openEntry(
+                                  entry.entryId
+                                )
+                              }
+                            />
+                          )
+                        )}
+                      </div>
+                    </section>
+                  )
+                )
+              )}
+
+              <div className="archive-status">
+                {isBusy
+                  ? `Working: ${statusMessage}`
+                  : statusMessage}
+              </div>
+            </>
+          )}
+
+        {authUser &&
+          activeSection ===
+            "analysisJobs" && (
+            <HistoricalJobsPanel
+              onNotify={showToast}
+            />
+          )}
       </section>
 
       <button

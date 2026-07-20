@@ -3,6 +3,7 @@ import {
   BarChart3,
   CloudUpload,
   FileText,
+  History,
   ImagePlus,
   Moon,
   Search,
@@ -10,25 +11,72 @@ import {
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
+import type {
+  LucideIcon,
+} from "lucide-react";
 import type { JournalEntry } from "../../types/journal";
 import type { AuthUser } from "../../auth/cognito";
+
+export type ArchiveSection =
+  | "archive"
+  | "analysisJobs";
 
 type ArchiveSidebarProps = {
   user: AuthUser | null;
   entries: JournalEntry[];
+  activeSection: ArchiveSection;
+  onNavigate: (
+    section: ArchiveSection
+  ) => void;
   onNewEntry: () => void;
   onUpload: () => void;
 };
 
-const navItems = [
-  { label: "Archive", icon: Archive, active: true },
-  { label: "Upload", icon: CloudUpload },
-  { label: "Timeline", icon: SlidersHorizontal },
-  { label: "Search", icon: Search },
-  { label: "Insights", icon: BarChart3 },
-  { label: "Themes", icon: Sparkles },
-  { label: "OCR Jobs", icon: FileText },
-  { label: "Settings", icon: Settings },
+type SidebarNavItem = {
+  label: string;
+  icon: LucideIcon;
+  section?: ArchiveSection;
+};
+
+const navItems: SidebarNavItem[] = [
+  {
+    label: "Archive",
+    icon: Archive,
+    section: "archive",
+  },
+  {
+    label: "Upload",
+    icon: CloudUpload,
+  },
+  {
+    label: "Timeline",
+    icon: SlidersHorizontal,
+  },
+  {
+    label: "Search",
+    icon: Search,
+  },
+  {
+    label: "Insights",
+    icon: BarChart3,
+  },
+  {
+    label: "Themes",
+    icon: Sparkles,
+  },
+  {
+    label: "OCR Jobs",
+    icon: FileText,
+  },
+  {
+    label: "Analysis Jobs",
+    icon: History,
+    section: "analysisJobs",
+  },
+  {
+    label: "Settings",
+    icon: Settings,
+  },
 ];
 
 function getDisplayName(user: AuthUser | null) {
@@ -95,6 +143,8 @@ function getCurrentStreak(entries: JournalEntry[]) {
 export default function ArchiveSidebar({
   user,
   entries,
+  activeSection,
+  onNavigate,
   onNewEntry,
   onUpload,
 }: ArchiveSidebarProps) {
@@ -139,14 +189,42 @@ export default function ArchiveSidebar({
         {navItems.map((item) => {
           const Icon = item.icon;
 
+          const isActive =
+            item.section ===
+            activeSection;
+
           return (
             <button
               key={item.label}
-              className={item.active ? "archive-nav-item active" : "archive-nav-item"}
+              className={
+                isActive
+                  ? "archive-nav-item active"
+                  : "archive-nav-item"
+              }
+              onClick={() => {
+                if (item.section) {
+                  onNavigate(
+                    item.section
+                  );
+                }
+              }}
+              aria-current={
+                isActive
+                  ? "page"
+                  : undefined
+              }
+              aria-disabled={
+                !item.section
+              }
             >
               <Icon size={19} />
               <span>{item.label}</span>
-              {item.label === "OCR Jobs" && ocrJobs > 0 && <em>{ocrJobs}</em>}
+
+              {item.label ===
+                "OCR Jobs" &&
+                ocrJobs > 0 && (
+                  <em>{ocrJobs}</em>
+                )}
             </button>
           );
         })}

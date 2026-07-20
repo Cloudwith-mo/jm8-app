@@ -4,33 +4,107 @@ import type {
   JournalEntry,
   UploadResponse,
 } from "../types/journal";
+import type {
+  HistoricalReanalysisDryRunResponse,
+  HistoricalReanalysisJobAcceptedResponse,
+  HistoricalReanalysisJobListResponse,
+  HistoricalReanalysisJobStatusFilter,
+} from "../types/reanalysis";
 
 const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
 const DEMO_USER_ID = import.meta.env.VITE_DEMO_USER_ID || "demo-user";
 
-type ApiResponse<T> = T;
+type ApiErrorPayload = Record<string, unknown>;
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly payload: ApiErrorPayload;
+
+  constructor(
+    status: number,
+    message: string,
+    code: string | undefined,
+    payload: ApiErrorPayload
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+    this.payload = payload;
+  }
+}
+
+async function parseApiResponse(
+  response: Response
+): Promise<Record<string, unknown>> {
+  const text = await response.text();
+
+  if (!text) return {};
+
+  try {
+    const parsed: unknown = JSON.parse(text);
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
+    ) {
+      return parsed as Record<string, unknown>;
+    }
+
+    return {};
+  } catch {
+    return {
+      message: text,
+    };
+  }
+}
 
 async function apiRequest<T>(
   path: string,
   options: RequestInit = {}
-): Promise<ApiResponse<T>> {
+): Promise<T> {
+  const accessToken = getAccessToken();
+
   const response = await fetch(`${API_ENDPOINT}${path}`, {
     ...options,
     headers: {
       "content-type": "application/json",
       "x-user-id": DEMO_USER_ID,
-      ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+      ...(accessToken
+        ? {
+            Authorization: `Bearer ${accessToken}`,
+          }
+        : {}),
       ...(options.headers || {}),
     },
   });
 
-  const data = await response.json();
+  const data = await parseApiResponse(response);
 
   if (!response.ok) {
-    throw new Error(data?.message || data?.error || "API request failed");
+    const message =
+      typeof data.message === "string"
+        ? data.message
+        : typeof data.error === "string"
+          ? data.error
+          : "API request failed";
+
+    const code =
+      typeof data.error === "string"
+        ? data.error
+        : undefined;
+
+    throw new ApiRequestError(
+      response.status,
+      message,
+      code,
+      data
+    );
   }
 
-  return data;
+  return data as T;
 }
 
 export async function createEntry(text: string): Promise<{ message: string; entry: JournalEntry }> {
@@ -175,4 +249,55 @@ export async function deleteEntry(entryId: string) {
   }>(`/entries/${entryId}`, {
     method: "DELETE",
   });
+}
+
+
+export async function listHistoricalReanalysisJobs(
+  status: HistoricalReanalysisJobStatusFilter = "ALL",
+  limit = 50
+): Promise<HistoricalReanalysisJobListResponse> {
+  const query = new URLSearchParams({
+    status,
+    limit: String(limit),
+  });
+
+  return apiRequest(
+    `/analysis/reanalysis/jobs?${query.toString()}`
+  );
+}
+
+export async function getHistoricalReanalysisInventory():
+Promise<HistoricalReanalysisDryRunResponse> {
+  return apiRequest(
+    "/analysis/reanalysis/dry-run"
+  );
+}
+
+export async function startHistoricalReanalysisJob(
+  pageSize = 10
+): Promise<HistoricalReanalysisJobAcceptedResponse> {
+  return apiRequest(
+    "/analysis/reanalysis/jobs",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        pageSize,
+      }),
+    }
+  );
+}
+
+export async function retryHistoricalReanalysisJob(
+  jobId: string,
+  pageSize = 10
+): Promise<HistoricalReanalysisJobAcceptedResponse> {
+  return apiRequest(
+    `/analysis/reanalysis/jobs/${jobId}/retry`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        pageSize,
+      }),
+    }
+  );
 }
