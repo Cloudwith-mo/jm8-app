@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 from storage import (
@@ -7,6 +8,24 @@ from storage import (
     list_historical_reanalysis_candidates,
     record_historical_reanalysis_page,
 )
+
+
+def emit_operational_event(
+    event_name: str,
+    **values: Any,
+) -> None:
+    payload: dict[str, Any] = {
+        "event": event_name,
+    }
+
+    payload.update(values)
+
+    print(
+        json.dumps(
+            payload,
+            sort_keys=True,
+        )
+    )
 
 
 def required_value(
@@ -65,7 +84,7 @@ def prepare_page(
         )
     )
 
-    return {
+    result = {
         "jobId": job_id,
         "pageId": (
             historical_reanalysis_page_id(
@@ -82,6 +101,19 @@ def prepare_page(
         "hasMore": page["hasMore"],
         "nextCursor": page["nextCursor"],
     }
+
+    emit_operational_event(
+        "historical_reanalysis_page_prepared",
+        jobId=job_id,
+        candidateEntries=result["count"],
+        evaluatedEntries=result[
+            "evaluatedEntries"
+        ],
+        pageSize=result["pageSize"],
+        hasMore=result["hasMore"],
+    )
+
+    return result
 
 
 def record_page(
@@ -136,7 +168,7 @@ def record_page(
         ),
     )
 
-    return {
+    result = {
         "jobId": job_id,
         "status": job.get("status"),
         "hasMore": has_more,
@@ -166,6 +198,58 @@ def record_page(
             0,
         ),
     }
+
+    emit_operational_event(
+        "historical_reanalysis_page_recorded",
+        jobId=job_id,
+        status=result["status"],
+        pageProcessedEntries=len(results),
+        processedEntries=result[
+            "processedEntries"
+        ],
+        completedEntries=result[
+            "completedEntries"
+        ],
+        failedEntries=result[
+            "failedEntries"
+        ],
+        skippedEntries=result[
+            "skippedEntries"
+        ],
+        remainingEntries=result[
+            "remainingEntries"
+        ],
+        hasMore=result["hasMore"],
+    )
+
+    if (
+        str(
+            result.get("status")
+            or ""
+        ).upper()
+        == "COMPLETED"
+    ):
+        emit_operational_event(
+            "historical_reanalysis_job_completed",
+            jobId=job_id,
+            processedEntries=result[
+                "processedEntries"
+            ],
+            completedEntries=result[
+                "completedEntries"
+            ],
+            failedEntries=result[
+                "failedEntries"
+            ],
+            skippedEntries=result[
+                "skippedEntries"
+            ],
+            remainingEntries=result[
+                "remainingEntries"
+            ],
+        )
+
+    return result
 
 
 def record_workflow_failure(
@@ -202,7 +286,7 @@ def record_workflow_failure(
         failure_code=failure_code,
     )
 
-    return {
+    result = {
         "jobId": job_id,
         "status": job.get(
             "status",
@@ -213,6 +297,20 @@ def record_workflow_failure(
             "WorkflowFailure",
         ),
     }
+
+    emit_operational_event(
+        (
+            "historical_reanalysis_"
+            "workflow_failure_recorded"
+        ),
+        jobId=job_id,
+        status=result["status"],
+        failureCode=result[
+            "failureCode"
+        ],
+    )
+
+    return result
 
 
 def lambda_handler(

@@ -11,11 +11,15 @@ ALERT_EMAIL="${ALERT_EMAIL:-}"
 API_FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-worker"
 FAILURE_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-failure-handler"
+HISTORICAL_WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-worker"
+HISTORICAL_COORDINATOR_FUNCTION_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-coordinator"
 STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 
 API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"
 WORKER_LOG_GROUP="/aws/lambda/${WORKER_FUNCTION_NAME}"
 FAILURE_LOG_GROUP="/aws/lambda/${FAILURE_FUNCTION_NAME}"
+HISTORICAL_WORKER_LOG_GROUP="/aws/lambda/${HISTORICAL_WORKER_FUNCTION_NAME}"
+HISTORICAL_COORDINATOR_LOG_GROUP="/aws/lambda/${HISTORICAL_COORDINATOR_FUNCTION_NAME}"
 
 DASHBOARD_NAME="${APP_NAME}-${STAGE}-operations"
 TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
@@ -183,7 +187,9 @@ echo "Configuring Lambda log groups and retention..."
 for LOG_GROUP in \
   "$API_LOG_GROUP" \
   "$WORKER_LOG_GROUP" \
-  "$FAILURE_LOG_GROUP"
+  "$FAILURE_LOG_GROUP" \
+  "$HISTORICAL_WORKER_LOG_GROUP" \
+  "$HISTORICAL_COORDINATOR_LOG_GROUP"
 do
   LOG_GROUP_EXISTS="$(
     aws logs describe-log-groups \
@@ -210,7 +216,8 @@ do
     --region "$AWS_REGION"
 done
 
-echo "Log retention configured for 30 days."
+echo "Lambda log retention configured for 30 days."
+echo "Historical re-analysis worker and coordinator logs are included."
 
 echo "Creating OCR metric filters..."
 
