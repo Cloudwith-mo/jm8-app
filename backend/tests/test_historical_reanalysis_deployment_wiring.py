@@ -129,6 +129,21 @@ class HistoricalReanalysisDeploymentTests(
             script,
         )
 
+    def test_transaction_roles_can_put_items(
+        self,
+    ):
+        script = read_backend_file(
+            "bin/"
+            "deploy-historical-reanalysis-workflow"
+        )
+
+        self.assertEqual(
+            script.count(
+                '"dynamodb:PutItem"'
+            ),
+            2,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

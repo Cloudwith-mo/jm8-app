@@ -226,6 +226,7 @@ worker_policy = {
             "Sid": "WriteAnalysisResults",
             "Effect": "Allow",
             "Action": [
+                "dynamodb:PutItem",
                 "dynamodb:UpdateItem",
                 "dynamodb:TransactWriteItems",
             ],
@@ -284,6 +285,7 @@ coordinator_policy = {
             "Sid": "WriteReanalysisState",
             "Effect": "Allow",
             "Action": [
+                "dynamodb:PutItem",
                 "dynamodb:UpdateItem",
                 "dynamodb:TransactWriteItems",
             ],
