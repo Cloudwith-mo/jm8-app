@@ -1,4 +1,5 @@
 import os
+import re
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +36,7 @@ from storage import (  # noqa: E402
     historical_reanalysis_job_sk,
     list_historical_reanalysis_candidates,
     public_historical_reanalysis_job,
+    record_historical_reanalysis_page,
     user_pk,
 )
 
@@ -395,6 +397,157 @@ class HistoricalReanalysisJobTests(
         self.assertEqual(
             key["PK"],
             user_pk("user-test"),
+        )
+
+    def assert_page_transaction_uses_all_values(
+        self,
+        transact_write_items,
+    ):
+        transaction = (
+            transact_write_items
+            .call_args
+            .kwargs["TransactItems"]
+        )
+
+        update = transaction[1]["Update"]
+
+        expression = " ".join([
+            update["UpdateExpression"],
+            update["ConditionExpression"],
+        ])
+
+        used_values = set(
+            re.findall(
+                r":[A-Za-z][A-Za-z0-9]*",
+                expression,
+            )
+        )
+
+        provided_values = set(
+            update[
+                "ExpressionAttributeValues"
+            ].keys()
+        )
+
+        self.assertEqual(
+            provided_values,
+            used_values,
+        )
+
+    @patch(
+        "storage."
+        "get_historical_reanalysis_job"
+    )
+    @patch(
+        "storage.dynamodb_client."
+        "transact_write_items"
+    )
+    def test_nonfinal_page_uses_all_values(
+        self,
+        transact_write_items,
+        get_job,
+    ):
+        get_job.return_value = {
+            "jobId": "reanalysis-test",
+            "status": "RUNNING",
+        }
+
+        record_historical_reanalysis_page(
+            "user-test",
+            "reanalysis-test",
+            page_id="a" * 32,
+            results=[
+                {
+                    "outcome": "COMPLETED",
+                },
+            ],
+            has_more=True,
+            next_cursor="cursor-test",
+        )
+
+        self.assert_page_transaction_uses_all_values(
+            transact_write_items
+        )
+
+        update = (
+            transact_write_items
+            .call_args
+            .kwargs["TransactItems"][1]["Update"]
+        )
+
+        values = update[
+            "ExpressionAttributeValues"
+        ]
+
+        self.assertIn(
+            ":negativeProcessed",
+            values,
+        )
+        self.assertNotIn(
+            ":completed",
+            values,
+        )
+        self.assertNotIn(
+            ":zero",
+            values,
+        )
+
+    @patch(
+        "storage."
+        "get_historical_reanalysis_job"
+    )
+    @patch(
+        "storage.dynamodb_client."
+        "transact_write_items"
+    )
+    def test_final_page_uses_all_values(
+        self,
+        transact_write_items,
+        get_job,
+    ):
+        get_job.return_value = {
+            "jobId": "reanalysis-test",
+            "status": "COMPLETED",
+        }
+
+        record_historical_reanalysis_page(
+            "user-test",
+            "reanalysis-test",
+            page_id="b" * 32,
+            results=[
+                {
+                    "outcome": "COMPLETED",
+                },
+            ],
+            has_more=False,
+            next_cursor=None,
+        )
+
+        self.assert_page_transaction_uses_all_values(
+            transact_write_items
+        )
+
+        update = (
+            transact_write_items
+            .call_args
+            .kwargs["TransactItems"][1]["Update"]
+        )
+
+        values = update[
+            "ExpressionAttributeValues"
+        ]
+
+        self.assertIn(
+            ":completed",
+            values,
+        )
+        self.assertIn(
+            ":zero",
+            values,
+        )
+        self.assertNotIn(
+            ":negativeProcessed",
+            values,
         )
 
 

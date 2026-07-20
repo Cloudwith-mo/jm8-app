@@ -1239,7 +1239,6 @@ def record_historical_reanalysis_page(
 
     expression_values = {
         ":running": "RUNNING",
-        ":completed": "COMPLETED",
         ":now": now,
         ":processed": summary[
             "processedEntries"
@@ -1253,13 +1252,17 @@ def record_historical_reanalysis_page(
         ":skipped": summary[
             "skippedEntries"
         ],
-        ":negativeProcessed": -summary[
-            "processedEntries"
-        ],
-        ":zero": 0,
     }
 
     if completed:
+        expression_values[
+            ":completed"
+        ] = "COMPLETED"
+
+        expression_values[
+            ":zero"
+        ] = 0
+
         update_expression = (
             "SET #status = :completed, "
             "updatedAt = :now, "
@@ -1275,6 +1278,12 @@ def record_historical_reanalysis_page(
         expression_values[
             ":nextCursor"
         ] = str(next_cursor)
+
+        expression_values[
+            ":negativeProcessed"
+        ] = -summary[
+            "processedEntries"
+        ]
 
         update_expression = (
             "SET #status = :running, "
