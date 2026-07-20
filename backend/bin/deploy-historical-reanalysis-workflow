@@ -285,6 +285,7 @@ coordinator_policy = {
             "Sid": "WriteReanalysisState",
             "Effect": "Allow",
             "Action": [
+                "dynamodb:DeleteItem",
                 "dynamodb:PutItem",
                 "dynamodb:UpdateItem",
                 "dynamodb:TransactWriteItems",

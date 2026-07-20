@@ -33,6 +33,7 @@ from storage import (  # noqa: E402
     decode_historical_reanalysis_cursor,
     encode_historical_reanalysis_cursor,
     get_historical_reanalysis_job,
+    historical_reanalysis_active_sk,
     historical_reanalysis_job_sk,
     list_historical_reanalysis_candidates,
     public_historical_reanalysis_job,
@@ -280,7 +281,10 @@ class HistoricalReanalysisJobTests(
             public_job,
         )
 
-    @patch("storage.table.put_item")
+    @patch(
+        "storage.dynamodb_client."
+        "transact_write_items"
+    )
     @patch(
         "storage."
         "new_historical_reanalysis_job_id"
@@ -290,7 +294,7 @@ class HistoricalReanalysisJobTests(
         self,
         now,
         new_job_id,
-        put_item,
+        transact_write_items,
     ):
         now.return_value = (
             "2026-07-19T00:00:00+00:00"
@@ -332,23 +336,60 @@ class HistoricalReanalysisJobTests(
             20,
         )
 
-        stored_item = (
-            put_item.call_args.kwargs["Item"]
+        transaction = (
+            transact_write_items
+            .call_args
+            .kwargs["TransactItems"]
         )
 
         self.assertEqual(
-            stored_item["PK"],
+            len(transaction),
+            2,
+        )
+
+        job_item = (
+            transaction[0]["Put"]["Item"]
+        )
+
+        lock_item = (
+            transaction[1]["Put"]["Item"]
+        )
+
+        self.assertEqual(
+            job_item["PK"]["S"],
             user_pk("user-test"),
         )
         self.assertEqual(
-            stored_item["processedEntries"],
-            0,
+            job_item["status"]["S"],
+            "QUEUED",
+        )
+        self.assertEqual(
+            job_item[
+                "processedEntries"
+            ]["N"],
+            "0",
         )
 
-    @patch("storage.table.put_item")
+        self.assertEqual(
+            lock_item["PK"]["S"],
+            user_pk("user-test"),
+        )
+        self.assertEqual(
+            lock_item["SK"]["S"],
+            historical_reanalysis_active_sk(),
+        )
+        self.assertEqual(
+            lock_item["jobId"]["S"],
+            "reanalysis-test",
+        )
+
+    @patch(
+        "storage.dynamodb_client."
+        "transact_write_items"
+    )
     def test_empty_job_is_rejected(
         self,
-        put_item,
+        transact_write_items,
     ):
         with self.assertRaises(ValueError):
             create_historical_reanalysis_job(
@@ -359,7 +400,7 @@ class HistoricalReanalysisJobTests(
                 },
             )
 
-        put_item.assert_not_called()
+        transact_write_items.assert_not_called()
 
     @patch("storage.table.get_item")
     def test_job_lookup_is_user_scoped(

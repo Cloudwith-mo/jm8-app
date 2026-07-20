@@ -13,6 +13,7 @@ import json
 import os
 from typing import Any
 from storage import (
+    ActiveHistoricalReanalysisJobError,
     create_text_entry,
     list_entries,
     list_ocr_jobs,
@@ -175,13 +176,37 @@ def lambda_handler(event, context):
                     "inventory": inventory,
                 })
 
-            job = (
-                create_historical_reanalysis_job(
-                    user_id=user_id,
-                    inventory=inventory,
-                    page_size=page_size,
+            try:
+                job = (
+                    create_historical_reanalysis_job(
+                        user_id=user_id,
+                        inventory=inventory,
+                        page_size=page_size,
+                    )
                 )
-            )
+
+            except (
+                ActiveHistoricalReanalysisJobError
+            ) as exc:
+                conflict = {
+                    "error": (
+                        "HistoricalReanalysis"
+                        "JobActive"
+                    ),
+                    "message": (
+                        "A historical re-analysis "
+                        "job is already queued or "
+                        "running."
+                    ),
+                }
+
+                if exc.job:
+                    conflict["job"] = exc.job
+
+                return response(
+                    409,
+                    conflict,
+                )
 
             try:
                 execution = (

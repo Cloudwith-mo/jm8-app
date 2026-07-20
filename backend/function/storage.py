@@ -23,6 +23,25 @@ type_serializer = TypeSerializer()
 
 MAX_OCR_ATTEMPTS = 3
 
+HISTORICAL_REANALYSIS_ACTIVE_SK = (
+    "REANALYSIS_ACTIVE"
+)
+
+
+class ActiveHistoricalReanalysisJobError(
+    RuntimeError
+):
+    def __init__(
+        self,
+        job: dict | None = None,
+    ):
+        super().__init__(
+            "A historical re-analysis job "
+            "is already active."
+        )
+
+        self.job = job or {}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -669,6 +688,10 @@ def historical_reanalysis_job_sk(
     )
 
 
+def historical_reanalysis_active_sk() -> str:
+    return HISTORICAL_REANALYSIS_ACTIVE_SK
+
+
 def non_negative_integer(
     value,
     default: int = 0,
@@ -954,7 +977,7 @@ def create_historical_reanalysis_job(
 
     now = utc_now()
 
-    item = {
+    job_item = {
         "PK": user_pk(user_id),
         "SK": (
             historical_reanalysis_job_sk(
@@ -1007,17 +1030,117 @@ def create_historical_reanalysis_job(
         "updatedAt": now,
     }
 
-    table.put_item(
-        Item=item,
-        ConditionExpression=(
-            "attribute_not_exists(PK) "
-            "AND attribute_not_exists(SK)"
+    active_lock_item = {
+        "PK": user_pk(user_id),
+        "SK": (
+            historical_reanalysis_active_sk()
         ),
-    )
+        "entityType": (
+            "HISTORICAL_REANALYSIS_ACTIVE_LOCK"
+        ),
+        "userId": user_id,
+        "jobId": job_id,
+        "status": "QUEUED",
+        "createdAt": now,
+        "updatedAt": now,
+    }
+
+    transaction = [
+        {
+            "Put": {
+                "TableName": TABLE_NAME,
+                "Item": serialize_attribute_map(
+                    job_item
+                ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "AND attribute_not_exists(SK)"
+                ),
+            },
+        },
+        {
+            "Put": {
+                "TableName": TABLE_NAME,
+                "Item": serialize_attribute_map(
+                    active_lock_item
+                ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "AND attribute_not_exists(SK)"
+                ),
+            },
+        },
+    ]
+
+    try:
+        dynamodb_client.transact_write_items(
+            TransactItems=transaction,
+            ClientRequestToken=(
+                f"create-{job_id}"
+            )[:36],
+        )
+
+    except ClientError as exc:
+        error_code = (
+            exc.response.get("Error", {})
+            .get("Code")
+        )
+
+        if (
+            error_code
+            != "TransactionCanceledException"
+        ):
+            raise
+
+        active_lock = (
+            table.get_item(
+                Key={
+                    "PK": user_pk(user_id),
+                    "SK": (
+                        historical_reanalysis_active_sk()
+                    ),
+                },
+                ConsistentRead=True,
+            ).get("Item")
+        )
+
+        if not active_lock:
+            raise
+
+        active_job_id = str(
+            active_lock.get("jobId")
+            or ""
+        ).strip()
+
+        active_job = None
+
+        if active_job_id:
+            try:
+                active_job = (
+                    get_historical_reanalysis_job(
+                        user_id,
+                        active_job_id,
+                    )
+                )
+            except ValueError:
+                active_job = None
+
+        if not active_job:
+            active_job = (
+                public_historical_reanalysis_job(
+                    active_lock
+                )
+            )
+
+        raise (
+            ActiveHistoricalReanalysisJobError(
+                active_job
+            )
+        ) from exc
 
     return (
         public_historical_reanalysis_job(
-            item
+            job_item
         )
     )
 
@@ -1341,6 +1464,28 @@ def record_historical_reanalysis_page(
         },
     ]
 
+    if completed:
+        transaction.append({
+            "Delete": {
+                "TableName": TABLE_NAME,
+                "Key": serialize_attribute_map({
+                    "PK": user_pk(user_id),
+                    "SK": (
+                        historical_reanalysis_active_sk()
+                    ),
+                }),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "OR jobId = :jobId"
+                ),
+                "ExpressionAttributeValues": (
+                    serialize_attribute_map({
+                        ":jobId": job_id,
+                    })
+                ),
+            },
+        })
+
     try:
         dynamodb_client.transact_write_items(
             TransactItems=transaction,
@@ -1398,51 +1543,84 @@ def fail_historical_reanalysis_job(
         ).split()
     )[:120]
 
-    try:
-        result = table.update_item(
-            Key={
-                "PK": user_pk(user_id),
-                "SK": (
-                    historical_reanalysis_job_sk(
-                        job_id
-                    )
-                ),
-            },
-            UpdateExpression=(
-                "SET #status = :failed, "
-                "failureCode = :failureCode, "
-                "failureMessage = "
-                ":failureMessage, "
-                "completedAt = :now, "
-                "updatedAt = :now"
-            ),
-            ConditionExpression=(
-                "attribute_exists(PK) "
-                "AND attribute_exists(SK) "
-                "AND #status <> :completed"
-            ),
-            ExpressionAttributeNames={
-                "#status": "status",
-            },
-            ExpressionAttributeValues={
-                ":failed": "FAILED",
-                ":completed": "COMPLETED",
-                ":failureCode": (
-                    safe_failure_code
-                ),
-                ":failureMessage": (
-                    "The historical re-analysis "
-                    "workflow could not complete."
-                ),
-                ":now": now,
-            },
-            ReturnValues="ALL_NEW",
-        )
-
-        return (
-            public_historical_reanalysis_job(
-                result.get("Attributes") or {}
+    job_key = {
+        "PK": user_pk(user_id),
+        "SK": (
+            historical_reanalysis_job_sk(
+                job_id
             )
+        ),
+    }
+
+    active_lock_key = {
+        "PK": user_pk(user_id),
+        "SK": (
+            historical_reanalysis_active_sk()
+        ),
+    }
+
+    transaction = [
+        {
+            "Update": {
+                "TableName": TABLE_NAME,
+                "Key": serialize_attribute_map(
+                    job_key
+                ),
+                "UpdateExpression": (
+                    "SET #status = :failed, "
+                    "failureCode = :failureCode, "
+                    "failureMessage = "
+                    ":failureMessage, "
+                    "completedAt = :now, "
+                    "updatedAt = :now"
+                ),
+                "ConditionExpression": (
+                    "attribute_exists(PK) "
+                    "AND attribute_exists(SK) "
+                    "AND #status <> :completed"
+                ),
+                "ExpressionAttributeNames": {
+                    "#status": "status",
+                },
+                "ExpressionAttributeValues": (
+                    serialize_attribute_map({
+                        ":failed": "FAILED",
+                        ":completed": "COMPLETED",
+                        ":failureCode": (
+                            safe_failure_code
+                        ),
+                        ":failureMessage": (
+                            "The historical "
+                            "re-analysis workflow "
+                            "could not complete."
+                        ),
+                        ":now": now,
+                    })
+                ),
+            },
+        },
+        {
+            "Delete": {
+                "TableName": TABLE_NAME,
+                "Key": serialize_attribute_map(
+                    active_lock_key
+                ),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) "
+                    "OR jobId = :jobId"
+                ),
+                "ExpressionAttributeValues": (
+                    serialize_attribute_map({
+                        ":jobId": job_id,
+                    })
+                ),
+            },
+        },
+    ]
+
+    try:
+        dynamodb_client.transact_write_items(
+            TransactItems=transaction
         )
 
     except ClientError as exc:
@@ -1453,7 +1631,7 @@ def fail_historical_reanalysis_job(
 
         if (
             error_code
-            != "ConditionalCheckFailedException"
+            != "TransactionCanceledException"
         ):
             raise
 
@@ -1465,7 +1643,28 @@ def fail_historical_reanalysis_job(
         if not job:
             raise
 
+        if str(
+            job.get("status") or ""
+        ).upper() not in {
+            "FAILED",
+            "COMPLETED",
+        }:
+            raise
+
         return job
+
+    job = get_historical_reanalysis_job(
+        user_id,
+        job_id,
+    )
+
+    if not job:
+        raise RuntimeError(
+            "Historical re-analysis job "
+            "could not be loaded."
+        )
+
+    return job
 
 
 def create_text_entry(user_id: str, text: str) -> dict:
