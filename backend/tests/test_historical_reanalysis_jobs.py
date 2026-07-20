@@ -36,6 +36,7 @@ from storage import (  # noqa: E402
     historical_reanalysis_active_sk,
     historical_reanalysis_job_sk,
     list_historical_reanalysis_candidates,
+    list_historical_reanalysis_jobs,
     public_historical_reanalysis_job,
     record_historical_reanalysis_page,
     user_pk,
@@ -439,6 +440,218 @@ class HistoricalReanalysisJobTests(
             key["PK"],
             user_pk("user-test"),
         )
+
+    @patch("storage.table.query")
+    def test_job_list_is_sorted_and_sanitized(
+        self,
+        query,
+    ):
+        query.return_value = {
+            "Items": [
+                {
+                    "PK": "USER#private",
+                    "SK": "REANALYSIS_JOB#older",
+                    "userId": "private-user",
+                    "executionArn": "private-arn",
+                    "inventory": {
+                        "private": True,
+                    },
+                    "jobId": "reanalysis_older",
+                    "status": "FAILED",
+                    "eligibleEntries": 4,
+                    "remainingEntries": 2,
+                    "createdAt": (
+                        "2026-07-18T00:00:00+00:00"
+                    ),
+                },
+                {
+                    "PK": "USER#private",
+                    "SK": "REANALYSIS_JOB#newer",
+                    "userId": "private-user",
+                    "executionArn": "private-arn",
+                    "jobId": "reanalysis_newer",
+                    "status": "COMPLETED",
+                    "eligibleEntries": 2,
+                    "remainingEntries": 0,
+                    "createdAt": (
+                        "2026-07-20T00:00:00+00:00"
+                    ),
+                },
+            ],
+        }
+
+        jobs = list_historical_reanalysis_jobs(
+            "user-test",
+            limit=20,
+        )
+
+        self.assertEqual(
+            [
+                job["jobId"]
+                for job in jobs
+            ],
+            [
+                "reanalysis_newer",
+                "reanalysis_older",
+            ],
+        )
+
+        serialized = str(jobs)
+
+        self.assertNotIn(
+            "USER#",
+            serialized,
+        )
+        self.assertNotIn(
+            "private-user",
+            serialized,
+        )
+        self.assertNotIn(
+            "private-arn",
+            serialized,
+        )
+        self.assertNotIn(
+            "inventory",
+            serialized,
+        )
+        self.assertNotIn(
+            "'PK'",
+            serialized,
+        )
+        self.assertNotIn(
+            "'SK'",
+            serialized,
+        )
+
+        arguments = query.call_args.kwargs
+
+        self.assertTrue(
+            arguments["ConsistentRead"]
+        )
+
+        condition = (
+            arguments[
+                "KeyConditionExpression"
+            ].get_expression()
+        )
+
+        self.assertEqual(
+            condition["operator"],
+            "AND",
+        )
+
+        (
+            partition_condition,
+            sort_condition,
+        ) = condition["values"]
+
+        partition_expression = (
+            partition_condition.get_expression()
+        )
+
+        sort_expression = (
+            sort_condition.get_expression()
+        )
+
+        self.assertEqual(
+            partition_expression["operator"],
+            "=",
+        )
+        self.assertEqual(
+            partition_expression[
+                "values"
+            ][0].name,
+            "PK",
+        )
+        self.assertEqual(
+            partition_expression[
+                "values"
+            ][1],
+            user_pk("user-test"),
+        )
+
+        self.assertEqual(
+            sort_expression["operator"],
+            "begins_with",
+        )
+        self.assertEqual(
+            sort_expression[
+                "values"
+            ][0].name,
+            "SK",
+        )
+        self.assertEqual(
+            sort_expression[
+                "values"
+            ][1],
+            "REANALYSIS_JOB#",
+        )
+
+    @patch("storage.table.query")
+    def test_job_list_filters_status(
+        self,
+        query,
+    ):
+        query.return_value = {
+            "Items": [
+                {
+                    "jobId": "reanalysis_failed",
+                    "status": "FAILED",
+                    "createdAt": (
+                        "2026-07-20T00:00:00+00:00"
+                    ),
+                },
+                {
+                    "jobId": "reanalysis_completed",
+                    "status": "COMPLETED",
+                    "createdAt": (
+                        "2026-07-19T00:00:00+00:00"
+                    ),
+                },
+            ],
+        }
+
+        jobs = list_historical_reanalysis_jobs(
+            "user-test",
+            status_filter="FAILED",
+            limit=20,
+        )
+
+        self.assertEqual(
+            len(jobs),
+            1,
+        )
+        self.assertEqual(
+            jobs[0]["status"],
+            "FAILED",
+        )
+
+    def test_job_list_validation(
+        self,
+    ):
+        with self.assertRaises(
+            ValueError
+        ):
+            list_historical_reanalysis_jobs(
+                "user-test",
+                status_filter="INVALID",
+            )
+
+        with self.assertRaises(
+            ValueError
+        ):
+            list_historical_reanalysis_jobs(
+                "user-test",
+                limit=0,
+            )
+
+        with self.assertRaises(
+            ValueError
+        ):
+            list_historical_reanalysis_jobs(
+                "user-test",
+                limit=51,
+            )
 
     def assert_page_transaction_uses_all_values(
         self,

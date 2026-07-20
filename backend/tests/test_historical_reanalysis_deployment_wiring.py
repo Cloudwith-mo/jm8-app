@@ -93,6 +93,14 @@ class HistoricalReanalysisDeploymentTests(
             (
                 'create_route_if_missing '
                 '"GET /analysis/'
+                'reanalysis/jobs"'
+            ),
+            script,
+        )
+        self.assertIn(
+            (
+                'create_route_if_missing '
+                '"GET /analysis/'
                 'reanalysis/jobs/{jobId}"'
             ),
             script,
@@ -116,6 +124,13 @@ class HistoricalReanalysisDeploymentTests(
         self.assertIn(
             (
                 'secure_route "POST '
+                '/analysis/reanalysis/jobs"'
+            ),
+            script,
+        )
+        self.assertIn(
+            (
+                'secure_route "GET '
                 '/analysis/reanalysis/jobs"'
             ),
             script,

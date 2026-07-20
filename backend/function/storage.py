@@ -934,6 +934,160 @@ def public_historical_reanalysis_job(
     }
 
 
+def public_historical_reanalysis_job_summary(
+    item: dict,
+) -> dict:
+    clean_item = clean_for_json(item)
+
+    public_fields = (
+        "jobId",
+        "status",
+        "totalEntries",
+        "eligibleEntries",
+        "estimatedBedrockRequests",
+        "processedEntries",
+        "completedEntries",
+        "failedEntries",
+        "skippedEntries",
+        "remainingEntries",
+        "createdAt",
+        "startedAt",
+        "completedAt",
+        "updatedAt",
+        "failureCode",
+        "failureMessage",
+    )
+
+    return {
+        field: clean_item[field]
+        for field in public_fields
+        if field in clean_item
+    }
+
+
+def list_historical_reanalysis_jobs(
+    user_id: str,
+    *,
+    status_filter: str = "ALL",
+    limit: int = 20,
+) -> list[dict]:
+    allowed_statuses = {
+        "ALL",
+        "QUEUED",
+        "RUNNING",
+        "COMPLETED",
+        "FAILED",
+    }
+
+    safe_status = str(
+        status_filter or "ALL"
+    ).strip().upper()
+
+    if safe_status not in allowed_statuses:
+        raise ValueError(
+            "Invalid historical re-analysis "
+            "job status."
+        )
+
+    try:
+        safe_limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Historical re-analysis job limit "
+            "must be an integer."
+        ) from exc
+
+    if safe_limit < 1 or safe_limit > 50:
+        raise ValueError(
+            "Historical re-analysis job limit "
+            "must be between 1 and 50."
+        )
+
+    query_arguments = {
+        "KeyConditionExpression": (
+            Key("PK").eq(user_pk(user_id))
+            & Key("SK").begins_with(
+                "REANALYSIS_JOB#"
+            )
+        ),
+        "ProjectionExpression": (
+            "jobId, #status, totalEntries, "
+            "eligibleEntries, "
+            "estimatedBedrockRequests, "
+            "processedEntries, "
+            "completedEntries, "
+            "failedEntries, "
+            "skippedEntries, "
+            "remainingEntries, "
+            "createdAt, startedAt, "
+            "completedAt, updatedAt, "
+            "failureCode, failureMessage"
+        ),
+        "ExpressionAttributeNames": {
+            "#status": "status",
+        },
+        "ConsistentRead": True,
+    }
+
+    jobs = []
+
+    while True:
+        result = table.query(
+            **query_arguments
+        )
+
+        for item in result.get(
+            "Items",
+            [],
+        ):
+            item_status = str(
+                item.get("status") or ""
+            ).strip().upper()
+
+            if (
+                safe_status != "ALL"
+                and item_status != safe_status
+            ):
+                continue
+
+            jobs.append(
+                public_historical_reanalysis_job_summary(
+                    item
+                )
+            )
+
+        last_key = result.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+        query_arguments[
+            "ExclusiveStartKey"
+        ] = last_key
+
+    jobs.sort(
+        key=lambda job: (
+            str(
+                job.get("createdAt")
+                or ""
+            ),
+            str(
+                job.get("updatedAt")
+                or ""
+            ),
+            str(
+                job.get("jobId")
+                or ""
+            ),
+        ),
+        reverse=True,
+    )
+
+    return jobs[:safe_limit]
+
+
 def create_historical_reanalysis_job(
     user_id: str,
     inventory: dict,

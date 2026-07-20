@@ -18,6 +18,7 @@ from storage import (
     list_entries,
     list_ocr_jobs,
     list_entry_analysis_versions,
+    list_historical_reanalysis_jobs,
     get_historical_analysis_inventory,
     create_historical_reanalysis_job,
     get_historical_reanalysis_job,
@@ -109,6 +110,97 @@ def lambda_handler(event, context):
             return response(200, {
                 "count": len(entries),
                 "entries": entries
+            })
+
+        if (
+            method == "GET"
+            and path
+            == "/analysis/reanalysis/jobs"
+        ):
+            query = (
+                event.get(
+                    "queryStringParameters"
+                )
+                or {}
+            )
+
+            status_filter = str(
+                query.get("status")
+                or "ALL"
+            ).strip().upper()
+
+            allowed_statuses = {
+                "ALL",
+                "QUEUED",
+                "RUNNING",
+                "COMPLETED",
+                "FAILED",
+            }
+
+            if (
+                status_filter
+                not in allowed_statuses
+            ):
+                return response(400, {
+                    "error": (
+                        "InvalidReanalysis"
+                        "JobStatus"
+                    ),
+                    "message": (
+                        "status must be one of "
+                        "ALL, QUEUED, RUNNING, "
+                        "COMPLETED, or FAILED."
+                    ),
+                    "allowedStatuses": sorted(
+                        allowed_statuses
+                    ),
+                })
+
+            raw_limit = query.get(
+                "limit",
+                20,
+            )
+
+            try:
+                limit = int(raw_limit)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return response(400, {
+                    "error": "InvalidLimit",
+                    "message": (
+                        "limit must be an "
+                        "integer between 1 and 50."
+                    ),
+                })
+
+            if limit < 1 or limit > 50:
+                return response(400, {
+                    "error": "InvalidLimit",
+                    "message": (
+                        "limit must be between "
+                        "1 and 50."
+                    ),
+                })
+
+            jobs = (
+                list_historical_reanalysis_jobs(
+                    user_id=user_id,
+                    status_filter=(
+                        status_filter
+                    ),
+                    limit=limit,
+                )
+            )
+
+            return response(200, {
+                "jobs": jobs,
+                "count": len(jobs),
+                "statusFilter": (
+                    status_filter
+                ),
+                "limit": limit,
             })
 
         if (

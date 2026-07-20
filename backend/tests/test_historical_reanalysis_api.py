@@ -44,6 +44,7 @@ def api_event(
     method: str,
     path: str,
     body: dict | None = None,
+    query: dict | None = None,
 ) -> dict:
     event = {
         "requestContext": {
@@ -70,6 +71,11 @@ def api_event(
         event["body"] = json.dumps(
             body
         )
+
+    if query is not None:
+        event[
+            "queryStringParameters"
+        ] = query
 
     return event
 
@@ -389,6 +395,133 @@ class HistoricalReanalysisApiTests(
             result["statusCode"],
             400,
         )
+
+
+    @patch.object(
+        app,
+        "list_historical_reanalysis_jobs",
+    )
+    def test_job_list_returns_200(
+        self,
+        list_jobs,
+    ):
+        list_jobs.return_value = [
+            {
+                "jobId": "reanalysis_test123",
+                "status": "FAILED",
+                "remainingEntries": 2,
+            },
+        ]
+
+        result = app.lambda_handler(
+            api_event(
+                "GET",
+                "/analysis/reanalysis/jobs",
+                query={
+                    "status": "failed",
+                    "limit": "10",
+                },
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            200,
+        )
+        self.assertEqual(
+            body["count"],
+            1,
+        )
+        self.assertEqual(
+            body["statusFilter"],
+            "FAILED",
+        )
+        self.assertEqual(
+            body["limit"],
+            10,
+        )
+
+        list_jobs.assert_called_once_with(
+            user_id="user-test",
+            status_filter="FAILED",
+            limit=10,
+        )
+
+        self.assertNotIn(
+            "userId",
+            json.dumps(body),
+        )
+        self.assertNotIn(
+            "executionArn",
+            json.dumps(body),
+        )
+
+    @patch.object(
+        app,
+        "list_historical_reanalysis_jobs",
+    )
+    def test_job_list_invalid_status(
+        self,
+        list_jobs,
+    ):
+        result = app.lambda_handler(
+            api_event(
+                "GET",
+                "/analysis/reanalysis/jobs",
+                query={
+                    "status": "BROKEN",
+                },
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            400,
+        )
+        self.assertEqual(
+            body["error"],
+            "InvalidReanalysisJobStatus",
+        )
+
+        list_jobs.assert_not_called()
+
+    @patch.object(
+        app,
+        "list_historical_reanalysis_jobs",
+    )
+    def test_job_list_invalid_limit(
+        self,
+        list_jobs,
+    ):
+        result = app.lambda_handler(
+            api_event(
+                "GET",
+                "/analysis/reanalysis/jobs",
+                query={
+                    "limit": "51",
+                },
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            400,
+        )
+        self.assertEqual(
+            body["error"],
+            "InvalidLimit",
+        )
+
+        list_jobs.assert_not_called()
 
 
 class HistoricalWorkflowClientTests(
