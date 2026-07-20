@@ -907,6 +907,7 @@ def public_historical_reanalysis_job(
 
     public_fields = (
         "jobId",
+        "retryOfJobId",
         "status",
         "totalEntries",
         "eligibleEntries",
@@ -941,6 +942,7 @@ def public_historical_reanalysis_job_summary(
 
     public_fields = (
         "jobId",
+        "retryOfJobId",
         "status",
         "totalEntries",
         "eligibleEntries",
@@ -1011,7 +1013,8 @@ def list_historical_reanalysis_jobs(
             )
         ),
         "ProjectionExpression": (
-            "jobId, #status, totalEntries, "
+            "jobId, retryOfJobId, "
+            "#status, totalEntries, "
             "eligibleEntries, "
             "estimatedBedrockRequests, "
             "processedEntries, "
@@ -1093,6 +1096,7 @@ def create_historical_reanalysis_job(
     inventory: dict,
     *,
     page_size: int = 25,
+    retry_of_job_id: str | None = None,
 ) -> dict:
     if not isinstance(inventory, dict):
         raise ValueError(
@@ -1112,6 +1116,21 @@ def create_historical_reanalysis_job(
         raise ValueError(
             "No entries are eligible for "
             "historical re-analysis."
+        )
+
+    safe_retry_of_job_id = str(
+        retry_of_job_id or ""
+    ).strip()
+
+    if retry_of_job_id is not None:
+        if not safe_retry_of_job_id:
+            raise ValueError(
+                "A retry source job ID "
+                "is required."
+            )
+
+        historical_reanalysis_job_sk(
+            safe_retry_of_job_id
         )
 
     safe_page_size = max(
@@ -1183,6 +1202,11 @@ def create_historical_reanalysis_job(
         "createdAt": now,
         "updatedAt": now,
     }
+
+    if safe_retry_of_job_id:
+        job_item["retryOfJobId"] = (
+            safe_retry_of_job_id
+        )
 
     active_lock_item = {
         "PK": user_pk(user_id),

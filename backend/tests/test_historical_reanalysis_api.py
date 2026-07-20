@@ -524,6 +524,441 @@ class HistoricalReanalysisApiTests(
         list_jobs.assert_not_called()
 
 
+    @patch.object(
+        app,
+        "start_historical_reanalysis_execution",
+    )
+    @patch.object(
+        app,
+        "create_historical_reanalysis_job",
+    )
+    @patch.object(
+        app,
+        "get_historical_analysis_inventory",
+    )
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_failed_job_returns_202(
+        self,
+        get_job,
+        inventory,
+        create_job,
+        start_execution,
+    ):
+        source_job = sample_job(
+            status="FAILED",
+        )
+        source_job["pageSize"] = 10
+
+        get_job.return_value = source_job
+        inventory.return_value = (
+            sample_inventory()
+        )
+
+        retry_job = {
+            **sample_job(),
+            "jobId": "reanalysis_retry456",
+            "retryOfJobId": (
+                "reanalysis_test123"
+            ),
+            "pageSize": 10,
+        }
+
+        create_job.return_value = retry_job
+
+        start_execution.return_value = {
+            "executionName": (
+                "reanalysis_retry456"
+            ),
+            "duplicate": False,
+        }
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_test123/retry"
+                ),
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            202,
+        )
+        self.assertEqual(
+            body["job"]["retryOfJobId"],
+            "reanalysis_test123",
+        )
+
+        create_job.assert_called_once_with(
+            user_id="user-test",
+            inventory=sample_inventory(),
+            page_size=10,
+            retry_of_job_id=(
+                "reanalysis_test123"
+            ),
+        )
+
+        start_execution.assert_called_once_with(
+            user_id="user-test",
+            job_id="reanalysis_retry456",
+        )
+
+        self.assertNotIn(
+            "executionArn",
+            json.dumps(body),
+        )
+        self.assertNotIn(
+            "userId",
+            json.dumps(body),
+        )
+
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_missing_job_returns_404(
+        self,
+        get_job,
+    ):
+        get_job.return_value = None
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_missing/retry"
+                ),
+            ),
+            None,
+        )
+
+        self.assertEqual(
+            result["statusCode"],
+            404,
+        )
+
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_nonfailed_job_returns_409(
+        self,
+        get_job,
+    ):
+        get_job.return_value = (
+            sample_job(
+                status="COMPLETED",
+            )
+        )
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_test123/retry"
+                ),
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            409,
+        )
+        self.assertEqual(
+            body["error"],
+            (
+                "HistoricalReanalysis"
+                "JobNotRetryable"
+            ),
+        )
+
+    @patch.object(
+        app,
+        "get_historical_analysis_inventory",
+    )
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_invalid_page_size(
+        self,
+        get_job,
+        inventory,
+    ):
+        get_job.return_value = (
+            sample_job(
+                status="FAILED",
+            )
+        )
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_test123/retry"
+                ),
+                {
+                    "pageSize": 26,
+                },
+            ),
+            None,
+        )
+
+        self.assertEqual(
+            result["statusCode"],
+            400,
+        )
+
+        inventory.assert_not_called()
+
+    @patch.object(
+        app,
+        "create_historical_reanalysis_job",
+    )
+    @patch.object(
+        app,
+        "get_historical_analysis_inventory",
+    )
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_no_eligible_entries(
+        self,
+        get_job,
+        inventory,
+        create_job,
+    ):
+        get_job.return_value = (
+            sample_job(
+                status="FAILED",
+            )
+        )
+
+        inventory.return_value = (
+            sample_inventory(
+                eligible=0,
+            )
+        )
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_test123/retry"
+                ),
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            409,
+        )
+        self.assertEqual(
+            body["error"],
+            "NoEligibleEntries",
+        )
+
+        create_job.assert_not_called()
+
+    @patch.object(
+        app,
+        "start_historical_reanalysis_execution",
+    )
+    @patch.object(
+        app,
+        "create_historical_reanalysis_job",
+    )
+    @patch.object(
+        app,
+        "get_historical_analysis_inventory",
+    )
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_active_job_is_blocked(
+        self,
+        get_job,
+        inventory,
+        create_job,
+        start_execution,
+    ):
+        get_job.return_value = (
+            sample_job(
+                status="FAILED",
+            )
+        )
+
+        inventory.return_value = (
+            sample_inventory()
+        )
+
+        create_job.side_effect = (
+            app.ActiveHistoricalReanalysisJobError(
+                sample_job(
+                    status="RUNNING",
+                )
+            )
+        )
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_test123/retry"
+                ),
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            409,
+        )
+        self.assertEqual(
+            body["error"],
+            (
+                "HistoricalReanalysis"
+                "JobActive"
+            ),
+        )
+
+        start_execution.assert_not_called()
+
+    @patch.object(
+        app,
+        "fail_historical_reanalysis_job",
+    )
+    @patch.object(
+        app,
+        "start_historical_reanalysis_execution",
+    )
+    @patch.object(
+        app,
+        "create_historical_reanalysis_job",
+    )
+    @patch.object(
+        app,
+        "get_historical_analysis_inventory",
+    )
+    @patch.object(
+        app,
+        "get_historical_reanalysis_job",
+    )
+    def test_retry_start_failure_is_sanitized(
+        self,
+        get_job,
+        inventory,
+        create_job,
+        start_execution,
+        fail_job,
+    ):
+        get_job.return_value = (
+            sample_job(
+                status="FAILED",
+            )
+        )
+
+        inventory.return_value = (
+            sample_inventory()
+        )
+
+        retry_job = {
+            **sample_job(),
+            "jobId": "reanalysis_retry456",
+            "retryOfJobId": (
+                "reanalysis_test123"
+            ),
+        }
+
+        create_job.return_value = retry_job
+
+        start_execution.side_effect = (
+            RuntimeError(
+                "private provider detail"
+            )
+        )
+
+        fail_job.return_value = {
+            **retry_job,
+            "status": "FAILED",
+        }
+
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "reanalysis_test123/retry"
+                ),
+            ),
+            None,
+        )
+
+        body = response_body(result)
+
+        self.assertEqual(
+            result["statusCode"],
+            502,
+        )
+        self.assertEqual(
+            body["error"],
+            (
+                "HistoricalReanalysis"
+                "RetryStartFailed"
+            ),
+        )
+        self.assertNotIn(
+            "private provider detail",
+            json.dumps(body),
+        )
+        self.assertEqual(
+            body["job"]["status"],
+            "FAILED",
+        )
+
+    def test_retry_invalid_job_id_returns_400(
+        self,
+    ):
+        result = app.lambda_handler(
+            api_event(
+                "POST",
+                (
+                    "/analysis/reanalysis/jobs/"
+                    "not%20valid/retry"
+                ),
+            ),
+            None,
+        )
+
+        self.assertEqual(
+            result["statusCode"],
+            400,
+        )
+
+
 class HistoricalWorkflowClientTests(
     unittest.TestCase
 ):

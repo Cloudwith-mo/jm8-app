@@ -403,6 +403,134 @@ class HistoricalReanalysisJobTests(
 
         transact_write_items.assert_not_called()
 
+    @patch(
+        "storage.dynamodb_client."
+        "transact_write_items"
+    )
+    @patch(
+        "storage."
+        "new_historical_reanalysis_job_id"
+    )
+    @patch("storage.utc_now")
+    def test_retry_job_creation_records_source(
+        self,
+        now,
+        new_job_id,
+        transact_write_items,
+    ):
+        now.return_value = (
+            "2026-07-20T00:00:00+00:00"
+        )
+
+        new_job_id.return_value = (
+            "reanalysis_retry456"
+        )
+
+        job = (
+            create_historical_reanalysis_job(
+                "user-test",
+                {
+                    "totalEntries": 4,
+                    "eligibleEntries": 2,
+                    "skippedEntries": 2,
+                    "estimatedBedrockRequests": 2,
+                },
+                page_size=10,
+                retry_of_job_id=(
+                    "reanalysis_failed123"
+                ),
+            )
+        )
+
+        self.assertEqual(
+            job["retryOfJobId"],
+            "reanalysis_failed123",
+        )
+
+        transaction = (
+            transact_write_items
+            .call_args
+            .kwargs["TransactItems"]
+        )
+
+        job_item = (
+            transaction[0]["Put"]["Item"]
+        )
+
+        self.assertEqual(
+            job_item[
+                "retryOfJobId"
+            ]["S"],
+            "reanalysis_failed123",
+        )
+
+        self.assertEqual(
+            job_item["status"]["S"],
+            "QUEUED",
+        )
+
+    @patch(
+        "storage.dynamodb_client."
+        "transact_write_items"
+    )
+    def test_retry_source_job_id_is_validated(
+        self,
+        transact_write_items,
+    ):
+        with self.assertRaises(ValueError):
+            create_historical_reanalysis_job(
+                "user-test",
+                {
+                    "totalEntries": 1,
+                    "eligibleEntries": 1,
+                },
+                retry_of_job_id="../invalid",
+            )
+
+        transact_write_items.assert_not_called()
+
+    @patch("storage.table.query")
+    def test_job_list_keeps_retry_link(
+        self,
+        query,
+    ):
+        query.return_value = {
+            "Items": [
+                {
+                    "jobId": (
+                        "reanalysis_retry456"
+                    ),
+                    "retryOfJobId": (
+                        "reanalysis_failed123"
+                    ),
+                    "status": "QUEUED",
+                    "createdAt": (
+                        "2026-07-20T00:00:00+00:00"
+                    ),
+                },
+            ],
+        }
+
+        jobs = list_historical_reanalysis_jobs(
+            "user-test",
+        )
+
+        self.assertEqual(
+            jobs[0]["retryOfJobId"],
+            "reanalysis_failed123",
+        )
+
+        projection = (
+            query.call_args.kwargs[
+                "ProjectionExpression"
+            ]
+        )
+
+        self.assertIn(
+            "retryOfJobId",
+            projection,
+        )
+
     @patch("storage.table.get_item")
     def test_job_lookup_is_user_scoped(
         self,

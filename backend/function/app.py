@@ -382,6 +382,270 @@ def lambda_handler(event, context):
             })
 
         if (
+            method == "POST"
+            and path.startswith(
+                "/analysis/reanalysis/jobs/"
+            )
+            and path.endswith("/retry")
+        ):
+            retry_prefix = (
+                "/analysis/reanalysis/jobs/"
+            )
+
+            job_id = (
+                path.removeprefix(
+                    retry_prefix
+                )
+                .removesuffix("/retry")
+                .strip("/")
+            )
+
+            if (
+                not job_id
+                or "/" in job_id
+            ):
+                return response(400, {
+                    "error": "InvalidJobId",
+                    "message": (
+                        "A valid historical "
+                        "re-analysis job ID "
+                        "is required."
+                    ),
+                })
+
+            try:
+                historical_reanalysis_job_sk(
+                    job_id
+                )
+            except ValueError:
+                return response(400, {
+                    "error": "InvalidJobId",
+                    "message": (
+                        "The historical "
+                        "re-analysis job ID "
+                        "is invalid."
+                    ),
+                })
+
+            source_job = (
+                get_historical_reanalysis_job(
+                    user_id=user_id,
+                    job_id=job_id,
+                )
+            )
+
+            if not source_job:
+                return response(404, {
+                    "error": "JobNotFound",
+                    "message": (
+                        "Historical re-analysis "
+                        "job not found."
+                    ),
+                })
+
+            source_status = str(
+                source_job.get("status")
+                or ""
+            ).strip().upper()
+
+            if source_status != "FAILED":
+                return response(409, {
+                    "error": (
+                        "HistoricalReanalysis"
+                        "JobNotRetryable"
+                    ),
+                    "message": (
+                        "Only failed historical "
+                        "re-analysis jobs can "
+                        "be retried."
+                    ),
+                    "job": source_job,
+                })
+
+            body = parse_body(event)
+
+            default_page_size = (
+                source_job.get("pageSize")
+                or 25
+            )
+
+            raw_page_size = body.get(
+                "pageSize",
+                default_page_size,
+            )
+
+            try:
+                page_size = int(
+                    raw_page_size
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                return response(400, {
+                    "error": "InvalidPageSize",
+                    "message": (
+                        "pageSize must be an "
+                        "integer between 1 and 25."
+                    ),
+                })
+
+            if (
+                page_size < 1
+                or page_size > 25
+            ):
+                return response(400, {
+                    "error": "InvalidPageSize",
+                    "message": (
+                        "pageSize must be between "
+                        "1 and 25."
+                    ),
+                })
+
+            inventory = (
+                get_historical_analysis_inventory(
+                    user_id=user_id,
+                )
+            )
+
+            eligible_entries = int(
+                inventory.get(
+                    "eligibleEntries",
+                    0,
+                )
+                or 0
+            )
+
+            if eligible_entries < 1:
+                return response(409, {
+                    "error": "NoEligibleEntries",
+                    "message": (
+                        "No journal entries remain "
+                        "eligible for historical "
+                        "re-analysis."
+                    ),
+                    "inventory": inventory,
+                })
+
+            try:
+                retry_job = (
+                    create_historical_reanalysis_job(
+                        user_id=user_id,
+                        inventory=inventory,
+                        page_size=page_size,
+                        retry_of_job_id=job_id,
+                    )
+                )
+
+            except (
+                ActiveHistoricalReanalysisJobError
+            ) as exc:
+                conflict = {
+                    "error": (
+                        "HistoricalReanalysis"
+                        "JobActive"
+                    ),
+                    "message": (
+                        "A historical re-analysis "
+                        "job is already queued or "
+                        "running."
+                    ),
+                }
+
+                if exc.job:
+                    conflict["job"] = exc.job
+
+                return response(
+                    409,
+                    conflict,
+                )
+
+            try:
+                execution = (
+                    start_historical_reanalysis_execution(
+                        user_id=user_id,
+                        job_id=retry_job["jobId"],
+                    )
+                )
+
+            except Exception as exc:
+                failure_code = (
+                    type(exc).__name__
+                )
+
+                try:
+                    failed_job = (
+                        fail_historical_reanalysis_job(
+                            user_id=user_id,
+                            job_id=(
+                                retry_job["jobId"]
+                            ),
+                            failure_code=(
+                                "WorkflowStartFailed"
+                            ),
+                        )
+                    )
+                except Exception:
+                    failed_job = retry_job
+
+                print(json.dumps({
+                    "event": (
+                        "historical_reanalysis_"
+                        "retry_start_failed"
+                    ),
+                    "jobId": retry_job.get(
+                        "jobId"
+                    ),
+                    "retryOfJobId": job_id,
+                    "failureCode": (
+                        failure_code
+                    ),
+                }))
+
+                return response(502, {
+                    "error": (
+                        "HistoricalReanalysis"
+                        "RetryStartFailed"
+                    ),
+                    "message": (
+                        "JM8 could not start the "
+                        "historical re-analysis "
+                        "retry workflow."
+                    ),
+                    "retryable": True,
+                    "job": failed_job,
+                })
+
+            print(json.dumps({
+                "event": (
+                    "historical_reanalysis_"
+                    "retry_accepted"
+                ),
+                "jobId": retry_job.get(
+                    "jobId"
+                ),
+                "retryOfJobId": job_id,
+                "eligibleEntries": (
+                    eligible_entries
+                ),
+                "pageSize": page_size,
+                "duplicateExecution": (
+                    execution.get(
+                        "duplicate",
+                        False,
+                    )
+                ),
+            }))
+
+            return response(202, {
+                "message": (
+                    "Historical re-analysis "
+                    "retry accepted."
+                ),
+                "job": retry_job,
+            })
+
+        if (
             method == "GET"
             and path.startswith(
                 "/analysis/reanalysis/jobs/"
