@@ -56,11 +56,13 @@ def prepare_entries(
             )
 
     analyzed_entries.sort(
-        key=lambda item: (
-            get_entry_sort_value(
+        key=lambda item: clean_text(
+            item[0].get("createdAt")
+            or get_entry_sort_value(
                 item[0],
                 item[1],
-            )
+            ),
+            max_characters=80,
         )
     )
 

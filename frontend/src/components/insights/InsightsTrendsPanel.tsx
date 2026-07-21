@@ -564,22 +564,68 @@ export default function InsightsTrendsPanel({
   const coverage =
     themes.coverage;
 
-  const moodShiftText =
-    moods.moodShift.changed
-      ? (
-          `${formatLabel(
-            moods.moodShift.from
-          )} → ${formatLabel(
-            moods.moodShift.to
-          )}`
-        )
-      : moods.moodShift.to
-        ? (
-            `Stable: ${formatLabel(
-              moods.moodShift.to
-            )}`
-          )
-        : "Not enough data";
+  const previousMoodValue =
+    moods.previousDominantMood
+      ?.value
+    || null;
+
+  const recentMoodValue =
+    moods.recentDominantMood
+      ?.value
+    || null;
+
+  let moodShiftText =
+    "Not enough data";
+
+  let moodShiftState =
+    "new";
+
+  let moodShiftHeading =
+    "More journal history is needed";
+
+  if (
+    recentMoodValue
+    && !previousMoodValue
+  ) {
+    moodShiftText =
+      `New signal: ${formatLabel(
+        recentMoodValue
+      )}`;
+
+    moodShiftHeading =
+      "A recent mood signal is emerging";
+  } else if (
+    recentMoodValue
+    && previousMoodValue
+    && moods.moodShift.changed
+  ) {
+    moodShiftText =
+      `${formatLabel(
+        previousMoodValue
+      )} → ${formatLabel(
+        recentMoodValue
+      )}`;
+
+    moodShiftState =
+      "changed";
+
+    moodShiftHeading =
+      "Your recent dominant mood has changed";
+  } else if (
+    recentMoodValue
+    && previousMoodValue
+  ) {
+    moodShiftText =
+      `Stable: ${formatLabel(
+        recentMoodValue
+      )}`;
+
+    moodShiftState =
+      "steady";
+
+    moodShiftHeading =
+      "Your dominant mood is holding steady";
+  }
 
   return (
     <section className="insights-trends-page">
@@ -1086,19 +1132,19 @@ export default function InsightsTrendsPanel({
           <section
             className={
               "insights-mood-shift-card "
-              + (
-                moods.moodShift.changed
-                  ? "changed"
-                  : "steady"
-              )
+              + moodShiftState
             }
           >
             <div className="insights-mood-shift-icon">
-              {moods.moodShift.changed ? (
+              {moodShiftState
+                === "changed" ? (
                 <ArrowRight size={24} />
-              ) : (
-                <CircleMinus size={24} />
-              )}
+              ) : moodShiftState
+                === "steady" ? (
+                  <CircleMinus size={24} />
+                ) : (
+                  <Sparkles size={24} />
+                )}
             </div>
 
             <div>
@@ -1107,35 +1153,21 @@ export default function InsightsTrendsPanel({
               </p>
 
               <h2>
-                {moods.moodShift.changed
-                  ? (
-                      "Your recent dominant "
-                      + "mood has changed"
-                    )
-                  : (
-                      "Your dominant mood "
-                      + "is holding steady"
-                    )}
+                {moodShiftHeading}
               </h2>
 
               <span>
                 Previous:{" "}
                 <strong>
                   {formatLabel(
-                    moods
-                      .previousDominantMood
-                      ?.value
-                      || null
+                    previousMoodValue
                   )}
                 </strong>
                 {" · "}
                 Recent:{" "}
                 <strong>
                   {formatLabel(
-                    moods
-                      .recentDominantMood
-                      ?.value
-                      || null
+                    recentMoodValue
                   )}
                 </strong>
               </span>

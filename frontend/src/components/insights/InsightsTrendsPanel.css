@@ -977,3 +977,9 @@ dl
     grid-template-columns: 1fr;
   }
 }
+
+
+.insights-mood-shift-card.new {
+  border: 1px solid #d9c9ff;
+  background: #f7f2ff;
+}

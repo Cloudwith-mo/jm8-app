@@ -210,6 +210,64 @@ class InsightsTrendTests(
             "Resilience",
         )
 
+    def test_theme_dates_follow_entry_chronology(
+        self,
+    ):
+        older_entry = analyzed_entry(
+            number=1,
+            created_at=(
+                "2026-01-01T10:00:00"
+                "+00:00"
+            ),
+            themes=["Discipline"],
+        )
+
+        newer_entry = analyzed_entry(
+            number=2,
+            created_at=(
+                "2026-01-02T10:00:00"
+                "+00:00"
+            ),
+            themes=["Discipline"],
+        )
+
+        older_entry[
+            "analysisCompletedAt"
+        ] = (
+            "2026-02-10T10:00:00"
+            "+00:00"
+        )
+
+        newer_entry[
+            "analysisCompletedAt"
+        ] = (
+            "2026-01-01T08:00:00"
+            "+00:00"
+        )
+
+        result = build_theme_insights([
+            newer_entry,
+            older_entry,
+        ])
+
+        theme = result["themes"][0]
+
+        self.assertEqual(
+            theme["firstSeenAt"],
+            (
+                "2026-01-01T10:00:00"
+                "+00:00"
+            ),
+        )
+
+        self.assertEqual(
+            theme["lastSeenAt"],
+            (
+                "2026-01-02T10:00:00"
+                "+00:00"
+            ),
+        )
+
     def test_duplicate_theme_counts_once(
         self,
     ):
