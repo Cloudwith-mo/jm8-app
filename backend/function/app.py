@@ -14,6 +14,11 @@ from insights_trends import (
     build_mood_insights,
     build_theme_insights,
 )
+from insights_reports import (
+    ReportPeriodError,
+    build_monthly_report,
+    build_weekly_report,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -170,6 +175,70 @@ def lambda_handler(event, context):
 
             return response(200, {
                 "moods": moods,
+            })
+
+        if (
+            method == "GET"
+            and path in {
+                "/reports/weekly",
+                "/reports/monthly",
+            }
+        ):
+            query = (
+                event.get(
+                    "queryStringParameters"
+                )
+                or {}
+            )
+
+            period = query.get(
+                "period"
+            )
+
+            entries = (
+                list_insights_overview_entries(
+                    user_id=user_id,
+                )
+            )
+
+            report_type = (
+                "WEEKLY"
+                if path
+                == "/reports/weekly"
+                else "MONTHLY"
+            )
+
+            try:
+                if (
+                    report_type
+                    == "WEEKLY"
+                ):
+                    report = (
+                        build_weekly_report(
+                            entries,
+                            period=period,
+                        )
+                    )
+                else:
+                    report = (
+                        build_monthly_report(
+                            entries,
+                            period=period,
+                        )
+                    )
+            except ReportPeriodError as exc:
+                return response(400, {
+                    "error": (
+                        "InvalidReportPeriod"
+                    ),
+                    "message": str(exc),
+                    "reportType": (
+                        report_type
+                    ),
+                })
+
+            return response(200, {
+                "report": report,
             })
 
         if method == "GET" and path == "/entries":
