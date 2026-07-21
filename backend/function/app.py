@@ -7,6 +7,9 @@ from llm_journal_analyzer import (
 from historical_reanalysis_workflow_client import (
     start_historical_reanalysis_execution,
 )
+from insights_overview import (
+    build_insights_overview,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -16,6 +19,7 @@ from storage import (
     ActiveHistoricalReanalysisJobError,
     create_text_entry,
     list_entries,
+    list_insights_overview_entries,
     list_ocr_jobs,
     list_entry_analysis_versions,
     list_historical_reanalysis_jobs,
@@ -100,6 +104,27 @@ def lambda_handler(event, context):
 
             })
 
+
+        if (
+            method == "GET"
+            and path
+            == "/insights/overview"
+        ):
+            entries = (
+                list_insights_overview_entries(
+                    user_id=user_id,
+                )
+            )
+
+            overview = (
+                build_insights_overview(
+                    entries
+                )
+            )
+
+            return response(200, {
+                "overview": overview,
+            })
 
         if method == "GET" and path == "/entries":
             query = event.get("queryStringParameters") or {}

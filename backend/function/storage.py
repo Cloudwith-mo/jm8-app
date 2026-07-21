@@ -1845,6 +1845,67 @@ def fail_historical_reanalysis_job(
     return job
 
 
+
+def list_insights_overview_entries(
+    user_id: str,
+) -> list[dict]:
+    entries: list[dict] = []
+
+    query_arguments = {
+        "KeyConditionExpression": (
+            Key("PK").eq(
+                user_pk(user_id)
+            )
+            & Key("SK").begins_with(
+                "ENTRY#"
+            )
+        ),
+        "ProjectionExpression": (
+            "#entryId, #createdAt, "
+            "#analysisStatus, "
+            "#analysisCompletedAt, "
+            "#analysis"
+        ),
+        "ExpressionAttributeNames": {
+            "#entryId": "entryId",
+            "#createdAt": "createdAt",
+            "#analysisStatus": (
+                "analysisStatus"
+            ),
+            "#analysisCompletedAt": (
+                "analysisCompletedAt"
+            ),
+            "#analysis": "analysis",
+        },
+        "ScanIndexForward": True,
+        "ConsistentRead": True,
+    }
+
+    while True:
+        result = table.query(
+            **query_arguments
+        )
+
+        entries.extend(
+            result.get(
+                "Items",
+                [],
+            )
+        )
+
+        last_key = result.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+        query_arguments[
+            "ExclusiveStartKey"
+        ] = last_key
+
+    return clean_for_json(entries)
+
 def create_text_entry(user_id: str, text: str) -> dict:
     now = utc_now()
     entry_id = new_entry_id()
