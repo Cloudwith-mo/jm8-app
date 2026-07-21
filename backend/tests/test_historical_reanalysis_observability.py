@@ -517,6 +517,169 @@ class HistoricalReanalysisObservabilityTests(
             helper,
         )
 
+    def test_deploy_script_defines_historical_dashboard(
+        self,
+    ):
+        script = Path(
+            "bin/deploy-observability"
+        ).read_text()
+
+        argument_values = [
+            (
+                '"$HISTORICAL_WORKER_'
+                'FUNCTION_NAME"'
+            ),
+            (
+                '"$HISTORICAL_COORDINATOR_'
+                'FUNCTION_NAME"'
+            ),
+            (
+                '"$HISTORICAL_STATE_'
+                'MACHINE_ARN"'
+            ),
+            (
+                '"$HISTORICAL_WORKER_'
+                'LOG_GROUP"'
+            ),
+            (
+                '"$HISTORICAL_COORDINATOR_'
+                'LOG_GROUP"'
+            ),
+            (
+                '"$REANALYSIS_METRIC_'
+                'NAMESPACE"'
+            ),
+        ]
+
+        for value in argument_values:
+            self.assertIn(
+                value,
+                script,
+            )
+
+        assignments = [
+            (
+                "historical_worker_function "
+                "= sys.argv[13]"
+            ),
+            (
+                "historical_coordinator_function "
+                "= sys.argv[14]"
+            ),
+            (
+                "historical_state_machine_arn "
+                "= sys.argv[15]"
+            ),
+            (
+                "historical_worker_log_group "
+                "= sys.argv[16]"
+            ),
+            (
+                "historical_coordinator_log_group "
+                "= sys.argv[17]"
+            ),
+            (
+                "reanalysis_metric_namespace "
+                "= sys.argv[18]"
+            ),
+        ]
+
+        for assignment in assignments:
+            self.assertIn(
+                assignment,
+                script,
+            )
+
+        titles = [
+            (
+                "Historical re-analysis "
+                "operations"
+            ),
+            "Historical Lambda health",
+            "Historical Lambda duration",
+            (
+                "Historical workflow "
+                "executions"
+            ),
+            "Historical job metrics",
+            "Historical entry outcomes",
+            "Historical alarm status",
+            (
+                "Recent historical "
+                "worker events"
+            ),
+            (
+                "Recent historical "
+                "coordinator events"
+            ),
+        ]
+
+        for title in titles:
+            self.assertIn(
+                title,
+                script,
+            )
+
+        metric_names = [
+            "JobsAccepted",
+            "RetriesAccepted",
+            "StartFailures",
+            "JobsCompleted",
+            "WorkflowFailures",
+            "EntriesProcessed",
+            "EntriesCompleted",
+            "EntriesFailed",
+            "EntriesSkipped",
+        ]
+
+        dashboard_section = script.split(
+            "historical_alarm_names = [",
+            1,
+        )[1].split(
+            "print(json.dumps(dashboard))",
+            1,
+        )[0]
+
+        for metric_name in metric_names:
+            self.assertIn(
+                metric_name,
+                dashboard_section,
+            )
+
+        self.assertIn(
+            (
+                'dashboard["widgets"].'
+                "extend(["
+            ),
+            script,
+        )
+
+        self.assertIn(
+            "historical_alarm_arns",
+            dashboard_section,
+        )
+
+        self.assertGreaterEqual(
+            dashboard_section.count(
+                "| fields @timestamp, event"
+            ),
+            2,
+        )
+
+        private_fields = [
+            "@message",
+            "userId",
+            "jobId",
+            "entryId",
+            "rawText",
+        ]
+
+        for private_field in private_fields:
+            self.assertNotIn(
+                private_field,
+                dashboard_section,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

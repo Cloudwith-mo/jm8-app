@@ -548,6 +548,12 @@ python3 - \
   "$WORKER_LOG_GROUP" \
   "$FAILURE_LOG_GROUP" \
   "$METRIC_NAMESPACE" \
+  "$HISTORICAL_WORKER_FUNCTION_NAME" \
+  "$HISTORICAL_COORDINATOR_FUNCTION_NAME" \
+  "$HISTORICAL_STATE_MACHINE_ARN" \
+  "$HISTORICAL_WORKER_LOG_GROUP" \
+  "$HISTORICAL_COORDINATOR_LOG_GROUP" \
+  "$REANALYSIS_METRIC_NAMESPACE" \
   > .build/operations-dashboard.json <<'PY'
 import json
 import sys
@@ -564,6 +570,12 @@ api_log_group = sys.argv[9]
 worker_log_group = sys.argv[10]
 failure_log_group = sys.argv[11]
 metric_namespace = sys.argv[12]
+historical_worker_function = sys.argv[13]
+historical_coordinator_function = sys.argv[14]
+historical_state_machine_arn = sys.argv[15]
+historical_worker_log_group = sys.argv[16]
+historical_coordinator_log_group = sys.argv[17]
+reanalysis_metric_namespace = sys.argv[18]
 
 alarm_names = [
     f"{app_name}-{stage}-api-errors",
@@ -843,6 +855,442 @@ dashboard = {
         },
     ],
 }
+
+historical_alarm_names = [
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-start-failures"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-entry-failures"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-worker-errors"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-worker-throttles"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-coordinator-errors"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-coordinator-throttles"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-workflow-failed"
+    ),
+    (
+        f"{app_name}-{stage}-"
+        "reanalysis-workflow-timed-out"
+    ),
+]
+
+historical_alarm_arns = [
+    (
+        f"arn:aws:cloudwatch:{region}:"
+        f"{account_id}:alarm:{alarm_name}"
+    )
+    for alarm_name
+    in historical_alarm_names
+]
+
+dashboard["widgets"].extend([
+    {
+        "type": "text",
+        "x": 0,
+        "y": 26,
+        "width": 24,
+        "height": 2,
+        "properties": {
+            "markdown": (
+                "## Historical re-analysis operations\n"
+                "Jobs, entries, workflow health, "
+                "alarms, and safe structured events."
+            ),
+            "background": "solid",
+        },
+    },
+    {
+        "type": "metric",
+        "x": 0,
+        "y": 28,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Historical Lambda health"
+            ),
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    "AWS/Lambda",
+                    "Invocations",
+                    "FunctionName",
+                    historical_worker_function,
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Worker invocations"
+                        ),
+                    },
+                ],
+                [
+                    "AWS/Lambda",
+                    "Errors",
+                    "FunctionName",
+                    historical_worker_function,
+                    {
+                        "stat": "Sum",
+                        "label": "Worker errors",
+                    },
+                ],
+                [
+                    "AWS/Lambda",
+                    "Throttles",
+                    "FunctionName",
+                    historical_worker_function,
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Worker throttles"
+                        ),
+                    },
+                ],
+                [
+                    "AWS/Lambda",
+                    "Invocations",
+                    "FunctionName",
+                    historical_coordinator_function,
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Coordinator invocations"
+                        ),
+                    },
+                ],
+                [
+                    "AWS/Lambda",
+                    "Errors",
+                    "FunctionName",
+                    historical_coordinator_function,
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Coordinator errors"
+                        ),
+                    },
+                ],
+                [
+                    "AWS/Lambda",
+                    "Throttles",
+                    "FunctionName",
+                    historical_coordinator_function,
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Coordinator throttles"
+                        ),
+                    },
+                ],
+            ],
+        },
+    },
+    {
+        "type": "metric",
+        "x": 12,
+        "y": 28,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Historical Lambda duration"
+            ),
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    "AWS/Lambda",
+                    "Duration",
+                    "FunctionName",
+                    historical_worker_function,
+                    {
+                        "stat": "p95",
+                        "label": "Worker p95",
+                    },
+                ],
+                [
+                    "AWS/Lambda",
+                    "Duration",
+                    "FunctionName",
+                    historical_coordinator_function,
+                    {
+                        "stat": "p95",
+                        "label": (
+                            "Coordinator p95"
+                        ),
+                    },
+                ],
+            ],
+        },
+    },
+    {
+        "type": "metric",
+        "x": 0,
+        "y": 34,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Historical workflow executions"
+            ),
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    "AWS/States",
+                    "ExecutionsStarted",
+                    "StateMachineArn",
+                    historical_state_machine_arn,
+                    {
+                        "stat": "Sum",
+                        "label": "Started",
+                    },
+                ],
+                [
+                    "AWS/States",
+                    "ExecutionsSucceeded",
+                    "StateMachineArn",
+                    historical_state_machine_arn,
+                    {
+                        "stat": "Sum",
+                        "label": "Succeeded",
+                    },
+                ],
+                [
+                    "AWS/States",
+                    "ExecutionsFailed",
+                    "StateMachineArn",
+                    historical_state_machine_arn,
+                    {
+                        "stat": "Sum",
+                        "label": "Failed",
+                    },
+                ],
+                [
+                    "AWS/States",
+                    "ExecutionsTimedOut",
+                    "StateMachineArn",
+                    historical_state_machine_arn,
+                    {
+                        "stat": "Sum",
+                        "label": "Timed out",
+                    },
+                ],
+            ],
+        },
+    },
+    {
+        "type": "metric",
+        "x": 12,
+        "y": 34,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Historical job metrics"
+            ),
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    reanalysis_metric_namespace,
+                    "JobsAccepted",
+                    {
+                        "stat": "Sum",
+                        "label": "Jobs accepted",
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "RetriesAccepted",
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Retries accepted"
+                        ),
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "StartFailures",
+                    {
+                        "stat": "Sum",
+                        "label": "Start failures",
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "JobsCompleted",
+                    {
+                        "stat": "Sum",
+                        "label": "Jobs completed",
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "WorkflowFailures",
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Workflow failures"
+                        ),
+                    },
+                ],
+            ],
+        },
+    },
+    {
+        "type": "metric",
+        "x": 0,
+        "y": 40,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Historical entry outcomes"
+            ),
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    reanalysis_metric_namespace,
+                    "EntriesProcessed",
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Entries processed"
+                        ),
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "EntriesCompleted",
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Entries completed"
+                        ),
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "EntriesFailed",
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Entries failed"
+                        ),
+                    },
+                ],
+                [
+                    reanalysis_metric_namespace,
+                    "EntriesSkipped",
+                    {
+                        "stat": "Sum",
+                        "label": (
+                            "Entries skipped"
+                        ),
+                    },
+                ],
+            ],
+        },
+    },
+    {
+        "type": "alarm",
+        "x": 12,
+        "y": 40,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Historical alarm status"
+            ),
+            "alarms": (
+                historical_alarm_arns
+            ),
+            "sortBy": (
+                "stateUpdatedTimestamp"
+            ),
+        },
+    },
+    {
+        "type": "log",
+        "x": 0,
+        "y": 46,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Recent historical worker events"
+            ),
+            "region": region,
+            "view": "table",
+            "query": (
+                f"SOURCE "
+                f"'{historical_worker_log_group}' "
+                "| fields @timestamp, event, "
+                "analysisSource, totalTokens, "
+                "failureCode, retryable, "
+                "sdkRetryAttempts, skipReason\n"
+                "| filter event like "
+                "/historical_reanalysis_/\n"
+                "| sort @timestamp desc\n"
+                "| limit 20"
+            ),
+        },
+    },
+    {
+        "type": "log",
+        "x": 12,
+        "y": 46,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": (
+                "Recent historical coordinator events"
+            ),
+            "region": region,
+            "view": "table",
+            "query": (
+                f"SOURCE "
+                f"'{historical_coordinator_log_group}' "
+                "| fields @timestamp, event, status, "
+                "candidateEntries, evaluatedEntries, "
+                "pageProcessedEntries, "
+                "processedEntries, completedEntries, "
+                "failedEntries, skippedEntries, "
+                "remainingEntries, hasMore, "
+                "failureCode\n"
+                "| filter event like "
+                "/historical_reanalysis_/\n"
+                "| sort @timestamp desc\n"
+                "| limit 20"
+            ),
+        },
+    },
+])
 
 print(json.dumps(dashboard))
 PY
