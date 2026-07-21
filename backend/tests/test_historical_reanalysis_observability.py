@@ -325,6 +325,109 @@ class HistoricalReanalysisObservabilityTests(
             script,
         )
 
+    def test_deploy_script_defines_historical_metrics(
+        self,
+    ):
+        script = Path(
+            "bin/deploy-observability"
+        ).read_text()
+
+        self.assertIn(
+            (
+                'REANALYSIS_METRIC_NAMESPACE='
+                '"JM8/HistoricalReanalysis"'
+            ),
+            script,
+        )
+
+        event_names = [
+            (
+                "historical_reanalysis_"
+                "accepted"
+            ),
+            (
+                "historical_reanalysis_"
+                "retry_accepted"
+            ),
+            (
+                "historical_reanalysis_"
+                "start_failed"
+            ),
+            (
+                "historical_reanalysis_"
+                "retry_start_failed"
+            ),
+            (
+                "historical_reanalysis_"
+                "job_completed"
+            ),
+            (
+                "historical_reanalysis_"
+                "workflow_failure_recorded"
+            ),
+            (
+                "historical_reanalysis_"
+                "page_recorded"
+            ),
+            (
+                "historical_reanalysis_"
+                "completed"
+            ),
+            (
+                "historical_reanalysis_"
+                "failed"
+            ),
+            (
+                "historical_reanalysis_"
+                "skipped"
+            ),
+        ]
+
+        metric_names = [
+            "JobsAccepted",
+            "RetriesAccepted",
+            "StartFailures",
+            "JobsCompleted",
+            "WorkflowFailures",
+            "EntriesProcessed",
+            "EntriesCompleted",
+            "EntriesFailed",
+            "EntriesSkipped",
+        ]
+
+        for event_name in event_names:
+            self.assertIn(
+                event_name,
+                script,
+            )
+
+        for metric_name in metric_names:
+            self.assertIn(
+                metric_name,
+                script,
+            )
+
+        self.assertIn(
+            "$.pageProcessedEntries",
+            script,
+        )
+
+        self.assertIn(
+            (
+                '"$HISTORICAL_'
+                'WORKER_LOG_GROUP"'
+            ),
+            script,
+        )
+
+        self.assertIn(
+            (
+                '"$HISTORICAL_'
+                'COORDINATOR_LOG_GROUP"'
+            ),
+            script,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@ HISTORICAL_COORDINATOR_LOG_GROUP="/aws/lambda/${HISTORICAL_COORDINATOR_FUNCTION_
 DASHBOARD_NAME="${APP_NAME}-${STAGE}-operations"
 TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
 METRIC_NAMESPACE="JM8/OCR"
+REANALYSIS_METRIC_NAMESPACE="JM8/HistoricalReanalysis"
 
 API_ERRORS_ALARM="${APP_NAME}-${STAGE}-api-errors"
 API_THROTTLES_ALARM="${APP_NAME}-${STAGE}-api-throttles"
@@ -240,6 +241,108 @@ aws logs put-metric-filter \
   --region "$AWS_REGION"
 
 echo "OCR metric filters created."
+
+put_log_metric() {
+  local log_group="$1"
+  local filter_name="$2"
+  local filter_pattern="$3"
+  local namespace="$4"
+  local metric_name="$5"
+  local metric_value="$6"
+
+  aws logs put-metric-filter \
+    --log-group-name "$log_group" \
+    --filter-name "$filter_name" \
+    --filter-pattern "$filter_pattern" \
+    --metric-transformations \
+      "metricName=${metric_name},metricNamespace=${namespace},metricValue=${metric_value},defaultValue=0" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+}
+
+echo "Creating historical re-analysis metric filters..."
+
+put_log_metric \
+  "$API_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-jobs-accepted" \
+  '{ $.event = "historical_reanalysis_accepted" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "JobsAccepted" \
+  "1"
+
+put_log_metric \
+  "$API_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-retries-accepted" \
+  '{ $.event = "historical_reanalysis_retry_accepted" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "RetriesAccepted" \
+  "1"
+
+put_log_metric \
+  "$API_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-start-failed" \
+  '{ $.event = "historical_reanalysis_start_failed" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "StartFailures" \
+  "1"
+
+put_log_metric \
+  "$API_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-retry-start-failed" \
+  '{ $.event = "historical_reanalysis_retry_start_failed" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "StartFailures" \
+  "1"
+
+put_log_metric \
+  "$HISTORICAL_COORDINATOR_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-jobs-completed" \
+  '{ $.event = "historical_reanalysis_job_completed" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "JobsCompleted" \
+  "1"
+
+put_log_metric \
+  "$HISTORICAL_COORDINATOR_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-workflow-failures" \
+  '{ $.event = "historical_reanalysis_workflow_failure_recorded" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "WorkflowFailures" \
+  "1"
+
+put_log_metric \
+  "$HISTORICAL_COORDINATOR_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-entries-processed" \
+  '{ $.event = "historical_reanalysis_page_recorded" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "EntriesProcessed" \
+  "$.pageProcessedEntries"
+
+put_log_metric \
+  "$HISTORICAL_WORKER_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-entries-completed" \
+  '{ $.event = "historical_reanalysis_completed" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "EntriesCompleted" \
+  "1"
+
+put_log_metric \
+  "$HISTORICAL_WORKER_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-entries-failed" \
+  '{ $.event = "historical_reanalysis_failed" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "EntriesFailed" \
+  "1"
+
+put_log_metric \
+  "$HISTORICAL_WORKER_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-reanalysis-entries-skipped" \
+  '{ $.event = "historical_reanalysis_skipped" }' \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "EntriesSkipped" \
+  "1"
+
+echo "Historical re-analysis metric filters created."
 
 put_count_alarm() {
   local alarm_name="$1"
