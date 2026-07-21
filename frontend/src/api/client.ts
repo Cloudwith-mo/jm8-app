@@ -5,7 +5,9 @@ import type {
   UploadResponse,
 } from "../types/journal";
 import type {
+  InsightsMoodsResponse,
   InsightsOverviewResponse,
+  InsightsThemesResponse,
 } from "../types/insights";
 import type {
   HistoricalReanalysisDryRunResponse,
@@ -259,6 +261,22 @@ export async function getInsightsOverview():
 Promise<InsightsOverviewResponse> {
   return apiRequest(
     "/insights/overview"
+  );
+}
+
+
+export async function getInsightsThemes():
+Promise<InsightsThemesResponse> {
+  return apiRequest(
+    "/insights/themes"
+  );
+}
+
+
+export async function getInsightsMoods():
+Promise<InsightsMoodsResponse> {
+  return apiRequest(
+    "/insights/moods"
   );
 }
 
