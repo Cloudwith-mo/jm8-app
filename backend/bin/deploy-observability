@@ -14,6 +14,7 @@ FAILURE_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-failure-handler"
 HISTORICAL_WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-worker"
 HISTORICAL_COORDINATOR_FUNCTION_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-coordinator"
 STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
+HISTORICAL_STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
 
 API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"
 WORKER_LOG_GROUP="/aws/lambda/${WORKER_FUNCTION_NAME}"
@@ -32,6 +33,14 @@ WORKER_THROTTLES_ALARM="${APP_NAME}-${STAGE}-ocr-worker-throttles"
 FAILURE_HANDLER_ERRORS_ALARM="${APP_NAME}-${STAGE}-failure-handler-errors"
 WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-workflow-failed"
 WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-workflow-timed-out"
+REANALYSIS_START_FAILURES_ALARM="${APP_NAME}-${STAGE}-reanalysis-start-failures"
+REANALYSIS_ENTRY_FAILURES_ALARM="${APP_NAME}-${STAGE}-reanalysis-entry-failures"
+REANALYSIS_WORKER_ERRORS_ALARM="${APP_NAME}-${STAGE}-reanalysis-worker-errors"
+REANALYSIS_WORKER_THROTTLES_ALARM="${APP_NAME}-${STAGE}-reanalysis-worker-throttles"
+REANALYSIS_COORDINATOR_ERRORS_ALARM="${APP_NAME}-${STAGE}-reanalysis-coordinator-errors"
+REANALYSIS_COORDINATOR_THROTTLES_ALARM="${APP_NAME}-${STAGE}-reanalysis-coordinator-throttles"
+REANALYSIS_WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-reanalysis-workflow-failed"
+REANALYSIS_WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-reanalysis-workflow-timed-out"
 
 mkdir -p .build
 
@@ -57,6 +66,21 @@ STATE_MACHINE_ARN="$(
 if [ -z "$STATE_MACHINE_ARN" ] ||
    [ "$STATE_MACHINE_ARN" = "None" ]; then
   echo "OCR state machine was not found: $STATE_MACHINE_NAME"
+  exit 1
+fi
+
+HISTORICAL_STATE_MACHINE_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "stateMachines[?name=='${HISTORICAL_STATE_MACHINE_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+
+if [ -z "$HISTORICAL_STATE_MACHINE_ARN" ] ||
+   [ "$HISTORICAL_STATE_MACHINE_ARN" = "None" ]; then
+  echo "Historical re-analysis state machine was not found: $HISTORICAL_STATE_MACHINE_NAME"
   exit 1
 fi
 
@@ -372,6 +396,29 @@ put_count_alarm() {
     --region "$AWS_REGION"
 }
 
+put_undimensioned_count_alarm() {
+  local alarm_name="$1"
+  local description="$2"
+  local namespace="$3"
+  local metric_name="$4"
+
+  aws cloudwatch put-metric-alarm \
+    --alarm-name "$alarm_name" \
+    --alarm-description "$description" \
+    --namespace "$namespace" \
+    --metric-name "$metric_name" \
+    --statistic Sum \
+    --period 300 \
+    --evaluation-periods 1 \
+    --datapoints-to-alarm 1 \
+    --threshold 1 \
+    --comparison-operator GreaterThanOrEqualToThreshold \
+    --treat-missing-data notBreaching \
+    --alarm-actions "$TOPIC_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+}
+
 echo "Creating CloudWatch alarms..."
 
 put_count_alarm \
@@ -421,6 +468,70 @@ put_count_alarm \
   "ExecutionsTimedOut" \
   "StateMachineArn" \
   "$STATE_MACHINE_ARN"
+
+echo "Creating historical re-analysis alarms..."
+
+put_undimensioned_count_alarm \
+  "$REANALYSIS_START_FAILURES_ALARM" \
+  "JM8 historical re-analysis could not start one or more jobs in five minutes." \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "StartFailures"
+
+put_undimensioned_count_alarm \
+  "$REANALYSIS_ENTRY_FAILURES_ALARM" \
+  "JM8 historical re-analysis reported one or more entry failures in five minutes." \
+  "$REANALYSIS_METRIC_NAMESPACE" \
+  "EntriesFailed"
+
+put_count_alarm \
+  "$REANALYSIS_WORKER_ERRORS_ALARM" \
+  "JM8 historical re-analysis worker reported one or more Lambda errors in five minutes." \
+  "AWS/Lambda" \
+  "Errors" \
+  "FunctionName" \
+  "$HISTORICAL_WORKER_FUNCTION_NAME"
+
+put_count_alarm \
+  "$REANALYSIS_WORKER_THROTTLES_ALARM" \
+  "JM8 historical re-analysis worker was throttled." \
+  "AWS/Lambda" \
+  "Throttles" \
+  "FunctionName" \
+  "$HISTORICAL_WORKER_FUNCTION_NAME"
+
+put_count_alarm \
+  "$REANALYSIS_COORDINATOR_ERRORS_ALARM" \
+  "JM8 historical re-analysis coordinator reported one or more Lambda errors in five minutes." \
+  "AWS/Lambda" \
+  "Errors" \
+  "FunctionName" \
+  "$HISTORICAL_COORDINATOR_FUNCTION_NAME"
+
+put_count_alarm \
+  "$REANALYSIS_COORDINATOR_THROTTLES_ALARM" \
+  "JM8 historical re-analysis coordinator was throttled." \
+  "AWS/Lambda" \
+  "Throttles" \
+  "FunctionName" \
+  "$HISTORICAL_COORDINATOR_FUNCTION_NAME"
+
+put_count_alarm \
+  "$REANALYSIS_WORKFLOW_FAILED_ALARM" \
+  "JM8 historical re-analysis Step Functions execution failed." \
+  "AWS/States" \
+  "ExecutionsFailed" \
+  "StateMachineArn" \
+  "$HISTORICAL_STATE_MACHINE_ARN"
+
+put_count_alarm \
+  "$REANALYSIS_WORKFLOW_TIMEOUT_ALARM" \
+  "JM8 historical re-analysis Step Functions execution timed out." \
+  "AWS/States" \
+  "ExecutionsTimedOut" \
+  "StateMachineArn" \
+  "$HISTORICAL_STATE_MACHINE_ARN"
+
+echo "Historical re-analysis alarms created."
 
 echo "CloudWatch alarms created."
 

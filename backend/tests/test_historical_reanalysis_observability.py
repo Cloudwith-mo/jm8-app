@@ -428,6 +428,95 @@ class HistoricalReanalysisObservabilityTests(
             script,
         )
 
+    def test_deploy_script_defines_historical_alarms(
+        self,
+    ):
+        script = Path(
+            "bin/deploy-observability"
+        ).read_text()
+
+        self.assertIn(
+            (
+                'HISTORICAL_STATE_MACHINE_NAME='
+                '"${APP_NAME}-${STAGE}-'
+                'historical-reanalysis-workflow"'
+            ),
+            script,
+        )
+
+        self.assertIn(
+            "HISTORICAL_STATE_MACHINE_ARN",
+            script,
+        )
+
+        alarm_variables = [
+            "REANALYSIS_START_FAILURES_ALARM",
+            "REANALYSIS_ENTRY_FAILURES_ALARM",
+            "REANALYSIS_WORKER_ERRORS_ALARM",
+            "REANALYSIS_WORKER_THROTTLES_ALARM",
+            "REANALYSIS_COORDINATOR_ERRORS_ALARM",
+            (
+                "REANALYSIS_COORDINATOR_"
+                "THROTTLES_ALARM"
+            ),
+            "REANALYSIS_WORKFLOW_FAILED_ALARM",
+            "REANALYSIS_WORKFLOW_TIMEOUT_ALARM",
+        ]
+
+        for alarm_variable in alarm_variables:
+            self.assertIn(
+                alarm_variable,
+                script,
+            )
+
+        metric_names = [
+            "StartFailures",
+            "EntriesFailed",
+            "Errors",
+            "Throttles",
+            "ExecutionsFailed",
+            "ExecutionsTimedOut",
+        ]
+
+        for metric_name in metric_names:
+            self.assertIn(
+                f'"{metric_name}"',
+                script,
+            )
+
+        self.assertIn(
+            "put_undimensioned_count_alarm",
+            script,
+        )
+
+        helper = script.split(
+            "put_undimensioned_count_alarm() {",
+            1,
+        )[1].split(
+            'echo "Creating CloudWatch alarms..."',
+            1,
+        )[0]
+
+        self.assertNotIn(
+            "--dimensions",
+            helper,
+        )
+
+        self.assertNotIn(
+            "--unit",
+            helper,
+        )
+
+        self.assertIn(
+            "--treat-missing-data",
+            helper,
+        )
+
+        self.assertIn(
+            "--alarm-actions",
+            helper,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
