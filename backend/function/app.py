@@ -10,6 +10,10 @@ from historical_reanalysis_workflow_client import (
 from insights_overview import (
     build_insights_overview,
 )
+from insights_trends import (
+    build_mood_insights,
+    build_theme_insights,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -124,6 +128,48 @@ def lambda_handler(event, context):
 
             return response(200, {
                 "overview": overview,
+            })
+
+        if (
+            method == "GET"
+            and path
+            == "/insights/themes"
+        ):
+            entries = (
+                list_insights_overview_entries(
+                    user_id=user_id,
+                )
+            )
+
+            themes = (
+                build_theme_insights(
+                    entries
+                )
+            )
+
+            return response(200, {
+                "themes": themes,
+            })
+
+        if (
+            method == "GET"
+            and path
+            == "/insights/moods"
+        ):
+            entries = (
+                list_insights_overview_entries(
+                    user_id=user_id,
+                )
+            )
+
+            moods = (
+                build_mood_insights(
+                    entries
+                )
+            )
+
+            return response(200, {
+                "moods": moods,
             })
 
         if method == "GET" and path == "/entries":
