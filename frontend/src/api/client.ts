@@ -5,6 +5,9 @@ import type {
   UploadResponse,
 } from "../types/journal";
 import type {
+  InsightsOverviewResponse,
+} from "../types/insights";
+import type {
   HistoricalReanalysisDryRunResponse,
   HistoricalReanalysisJobAcceptedResponse,
   HistoricalReanalysisJobListResponse,
@@ -249,6 +252,14 @@ export async function deleteEntry(entryId: string) {
   }>(`/entries/${entryId}`, {
     method: "DELETE",
   });
+}
+
+
+export async function getInsightsOverview():
+Promise<InsightsOverviewResponse> {
+  return apiRequest(
+    "/insights/overview"
+  );
 }
 
 
