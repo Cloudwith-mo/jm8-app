@@ -531,3 +531,29 @@
     padding-left: 32px;
   }
 }
+
+
+/* Improve Insights text contrast on light surfaces */
+
+.insights-overview-page h1,
+.insights-overview-page h2 {
+  color: #211d29;
+}
+
+.insights-overview-header h1 {
+  color: #17131f;
+}
+
+.insights-ranked-card h2 {
+  color: #302b38;
+}
+
+.insights-reflection-card h2 {
+  color: #30263d;
+}
+
+/* Preserve white text inside dark highlight cards. */
+
+.insights-highlight-card strong {
+  color: white;
+}
