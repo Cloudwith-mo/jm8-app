@@ -10,6 +10,7 @@ import EntryCard from "../components/archive/EntryCard";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
 import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
+import InsightsOverviewPanel from "../components/insights/InsightsOverviewPanel";
 import AuthStatus from "../components/layout/AuthStatus";
 import type { JournalEntry } from "../types/journal";
 import {
@@ -184,7 +185,7 @@ export default function ArchivePage() {
     setIsMobileNavOpen(false);
 
     if (
-      section === "analysisJobs"
+      section !== "archive"
     ) {
       setIsSelectedPanelOpen(false);
     }
@@ -470,9 +471,9 @@ export default function ArchivePage() {
   return (
     <main
       className={
-        activeSection === "analysisJobs"
-          ? "jm8-archive-shell jobs-view"
-          : "jm8-archive-shell"
+        activeSection === "archive"
+          ? "jm8-archive-shell"
+          : "jm8-archive-shell jobs-view"
       }
     >
       <header className="mobile-app-header">
@@ -483,8 +484,8 @@ export default function ArchivePage() {
         <button
           onClick={() => {
             if (
-              activeSection ===
-              "analysisJobs"
+              activeSection !==
+              "archive"
             ) {
               navigateToSection(
                 "archive"
@@ -497,8 +498,8 @@ export default function ArchivePage() {
             );
           }}
           aria-label={
-            activeSection ===
-            "analysisJobs"
+            activeSection !==
+            "archive"
               ? "Return to archive"
               : "Open selected entry"
           }
@@ -735,6 +736,14 @@ export default function ArchivePage() {
                   : statusMessage}
               </div>
             </>
+          )}
+
+        {authUser &&
+          activeSection ===
+            "insights" && (
+            <InsightsOverviewPanel
+              onNotify={showToast}
+            />
           )}
 
         {authUser &&

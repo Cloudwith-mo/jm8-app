@@ -19,6 +19,7 @@ import type { AuthUser } from "../../auth/cognito";
 
 export type ArchiveSection =
   | "archive"
+  | "insights"
   | "analysisJobs";
 
 type ArchiveSidebarProps = {
@@ -59,6 +60,7 @@ const navItems: SidebarNavItem[] = [
   {
     label: "Insights",
     icon: BarChart3,
+    section: "insights",
   },
   {
     label: "Themes",
