@@ -6,6 +6,7 @@ import {
   FileText,
   History,
   ImagePlus,
+  MessageCircle,
   Moon,
   Search,
   Settings,
@@ -23,6 +24,7 @@ export type ArchiveSection =
   | "insights"
   | "insightsTrends"
   | "reports"
+  | "askJm8"
   | "analysisJobs";
 
 type ArchiveSidebarProps = {
@@ -74,6 +76,11 @@ const navItems: SidebarNavItem[] = [
     label: "Reports",
     icon: CalendarDays,
     section: "reports",
+  },
+  {
+    label: "Ask JM8",
+    icon: MessageCircle,
+    section: "askJm8",
   },
   {
     label: "OCR Jobs",

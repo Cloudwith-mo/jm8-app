@@ -13,6 +13,7 @@ import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
 import InsightsOverviewPanel from "../components/insights/InsightsOverviewPanel";
 import InsightsTrendsPanel from "../components/insights/InsightsTrendsPanel";
 import ReportsPanel from "../components/insights/ReportsPanel";
+import AskJm8Panel from "../components/insights/AskJm8Panel";
 import AuthStatus from "../components/layout/AuthStatus";
 import type { JournalEntry } from "../types/journal";
 import {
@@ -760,6 +761,14 @@ export default function ArchivePage() {
           activeSection ===
             "reports" && (
             <ReportsPanel
+              onNotify={showToast}
+            />
+          )}
+
+        {authUser &&
+          activeSection ===
+            "askJm8" && (
+            <AskJm8Panel
               onNotify={showToast}
             />
           )}
