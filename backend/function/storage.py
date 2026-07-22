@@ -1862,6 +1862,7 @@ def list_insights_overview_entries(
         ),
         "ProjectionExpression": (
             "#entryId, #createdAt, "
+            "#sourceType, "
             "#analysisStatus, "
             "#analysisCompletedAt, "
             "#analysis"
@@ -1869,6 +1870,7 @@ def list_insights_overview_entries(
         "ExpressionAttributeNames": {
             "#entryId": "entryId",
             "#createdAt": "createdAt",
+            "#sourceType": "sourceType",
             "#analysisStatus": (
                 "analysisStatus"
             ),
