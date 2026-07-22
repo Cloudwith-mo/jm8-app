@@ -13,6 +13,10 @@ import type {
   InsightsReportResponse,
 } from "../types/reports";
 import type {
+  AskJm8Request,
+  AskJm8Response,
+} from "../types/askJm8";
+import type {
   HistoricalReanalysisDryRunResponse,
   HistoricalReanalysisJobAcceptedResponse,
   HistoricalReanalysisJobListResponse,
@@ -323,6 +327,44 @@ export async function getMonthlyReport(
       "/reports/monthly",
       period
     )
+  );
+}
+
+
+export async function askJm8(
+  request: AskJm8Request
+): Promise<AskJm8Response> {
+  const question =
+    request.question.trim();
+
+  const startDate =
+    request.startDate?.trim();
+
+  const endDate =
+    request.endDate?.trim();
+
+  const payload: AskJm8Request = {
+    question,
+    ...(startDate
+      ? {
+          startDate,
+        }
+      : {}),
+    ...(endDate
+      ? {
+          endDate,
+        }
+      : {}),
+  };
+
+  return apiRequest<AskJm8Response>(
+    "/insights/ask",
+    {
+      method: "POST",
+      body: JSON.stringify(
+        payload
+      ),
+    }
   );
 }
 
