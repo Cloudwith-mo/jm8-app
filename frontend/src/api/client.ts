@@ -10,6 +10,9 @@ import type {
   InsightsThemesResponse,
 } from "../types/insights";
 import type {
+  InsightsReportResponse,
+} from "../types/reports";
+import type {
   HistoricalReanalysisDryRunResponse,
   HistoricalReanalysisJobAcceptedResponse,
   HistoricalReanalysisJobListResponse,
@@ -277,6 +280,49 @@ export async function getInsightsMoods():
 Promise<InsightsMoodsResponse> {
   return apiRequest(
     "/insights/moods"
+  );
+}
+
+
+function getReportPath(
+  path: string,
+  period?: string
+): string {
+  const normalizedPeriod =
+    period?.trim();
+
+  if (!normalizedPeriod) {
+    return path;
+  }
+
+  const query = new URLSearchParams({
+    period: normalizedPeriod,
+  });
+
+  return `${path}?${query.toString()}`;
+}
+
+
+export async function getWeeklyReport(
+  period?: string
+): Promise<InsightsReportResponse> {
+  return apiRequest(
+    getReportPath(
+      "/reports/weekly",
+      period
+    )
+  );
+}
+
+
+export async function getMonthlyReport(
+  period?: string
+): Promise<InsightsReportResponse> {
+  return apiRequest(
+    getReportPath(
+      "/reports/monthly",
+      period
+    )
   );
 }
 
