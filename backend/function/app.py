@@ -19,6 +19,16 @@ from insights_reports import (
     build_monthly_report,
     build_weekly_report,
 )
+from insights_ask_context import (
+    AskContextInputError,
+    build_ask_context,
+)
+from insights_ask_answer import (
+    AskAnswerInputError,
+    AskAnswerInvocationError,
+    AskAnswerResponseError,
+    answer_journal_history,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -175,6 +185,172 @@ def lambda_handler(event, context):
 
             return response(200, {
                 "moods": moods,
+            })
+
+        if (
+            method == "POST"
+            and path
+            == "/insights/ask"
+        ):
+            try:
+                body = parse_body(
+                    event
+                )
+            except (
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                ValueError,
+            ):
+                return response(400, {
+                    "error": (
+                        "InvalidRequestBody"
+                    ),
+                    "message": (
+                        "Request body must "
+                        "contain valid JSON."
+                    ),
+                })
+
+            if not isinstance(
+                body,
+                dict,
+            ):
+                return response(400, {
+                    "error": (
+                        "InvalidRequestBody"
+                    ),
+                    "message": (
+                        "Request body must "
+                        "be a JSON object."
+                    ),
+                })
+
+            entries = (
+                list_insights_overview_entries(
+                    user_id=user_id,
+                )
+            )
+
+            try:
+                ask_context = (
+                    build_ask_context(
+                        entries,
+                        question=body.get(
+                            "question"
+                        ),
+                        start_date=body.get(
+                            "startDate"
+                        ),
+                        end_date=body.get(
+                            "endDate"
+                        ),
+                    )
+                )
+
+            except AskContextInputError as exc:
+                return response(400, {
+                    "error": exc.code,
+                    "message": exc.message,
+                })
+
+            try:
+                answer = (
+                    answer_journal_history(
+                        ask_context
+                    )
+                )
+
+            except AskAnswerInputError as exc:
+                print(json.dumps({
+                    "event": (
+                        "ask_jm8_input_"
+                        "rejected"
+                    ),
+                    "failureCode": (
+                        exc.code
+                    ),
+                }))
+
+                return response(400, {
+                    "error": exc.code,
+                    "message": exc.message,
+                })
+
+            except AskAnswerInvocationError as exc:
+                print(json.dumps({
+                    "event": (
+                        "ask_jm8_answer_"
+                        "failed"
+                    ),
+                    "failureCode": (
+                        "AskAnswerInvocationError"
+                    ),
+                    "providerErrorCode": (
+                        exc.error_code
+                    ),
+                    "retryable": (
+                        exc.retryable
+                    ),
+                    "sdkRetryAttempts": (
+                        exc.retry_attempts
+                    ),
+                }))
+
+                status_code = (
+                    503
+                    if exc.retryable
+                    else 502
+                )
+
+                response_body = {
+                    "error": (
+                        "AskJM8Unavailable"
+                    ),
+                    "message": (
+                        "JM8 could not answer "
+                        "this question right now."
+                    ),
+                    "retryable": (
+                        exc.retryable
+                    ),
+                }
+
+                if exc.retryable:
+                    response_body[
+                        "retryAfterSeconds"
+                    ] = 2
+
+                return response(
+                    status_code,
+                    response_body,
+                )
+
+            except AskAnswerResponseError as exc:
+                print(json.dumps({
+                    "event": (
+                        "ask_jm8_answer_"
+                        "failed"
+                    ),
+                    "failureCode": (
+                        type(exc).__name__
+                    ),
+                    "retryable": False,
+                    "sdkRetryAttempts": 0,
+                }))
+
+                return response(502, {
+                    "error": (
+                        "AskJM8InvalidResponse"
+                    ),
+                    "message": (
+                        "JM8 could not validate "
+                        "the generated answer."
+                    ),
+                    "retryable": False,
+                })
+
+            return response(200, {
+                "answer": answer,
             })
 
         if (
