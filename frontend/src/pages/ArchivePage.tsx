@@ -12,6 +12,7 @@ import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/
 import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
 import InsightsOverviewPanel from "../components/insights/InsightsOverviewPanel";
 import InsightsTrendsPanel from "../components/insights/InsightsTrendsPanel";
+import ReportsPanel from "../components/insights/ReportsPanel";
 import AuthStatus from "../components/layout/AuthStatus";
 import type { JournalEntry } from "../types/journal";
 import {
@@ -751,6 +752,14 @@ export default function ArchivePage() {
           activeSection ===
             "insightsTrends" && (
             <InsightsTrendsPanel
+              onNotify={showToast}
+            />
+          )}
+
+        {authUser &&
+          activeSection ===
+            "reports" && (
+            <ReportsPanel
               onNotify={showToast}
             />
           )}

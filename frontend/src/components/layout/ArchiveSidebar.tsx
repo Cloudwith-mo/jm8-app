@@ -1,6 +1,7 @@
 import {
   Archive,
   BarChart3,
+  CalendarDays,
   CloudUpload,
   FileText,
   History,
@@ -21,6 +22,7 @@ export type ArchiveSection =
   | "archive"
   | "insights"
   | "insightsTrends"
+  | "reports"
   | "analysisJobs";
 
 type ArchiveSidebarProps = {
@@ -67,6 +69,11 @@ const navItems: SidebarNavItem[] = [
     label: "Themes",
     icon: Sparkles,
     section: "insightsTrends",
+  },
+  {
+    label: "Reports",
+    icon: CalendarDays,
+    section: "reports",
   },
   {
     label: "OCR Jobs",
