@@ -29,6 +29,13 @@ from insights_ask_answer import (
     AskAnswerResponseError,
     answer_journal_history,
 )
+from ask_usage import (
+    AskUsageLimitError,
+    AskUsageUnavailableError,
+    complete_ask_usage,
+    fail_ask_usage,
+    reserve_ask_usage,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -254,6 +261,26 @@ def lambda_handler(event, context):
                 })
 
             try:
+                usage_reservation = (
+                    reserve_ask_usage(
+                        user_id,
+                        ask_context,
+                    )
+                )
+
+            except AskUsageLimitError as exc:
+                return response(
+                    429,
+                    exc.payload,
+                )
+
+            except AskUsageUnavailableError as exc:
+                return response(
+                    503,
+                    exc.payload,
+                )
+
+            try:
                 answer = (
                     answer_journal_history(
                         ask_context
@@ -261,6 +288,11 @@ def lambda_handler(event, context):
                 )
 
             except AskAnswerInputError as exc:
+                fail_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
                 print(json.dumps({
                     "event": (
                         "ask_jm8_input_"
@@ -277,6 +309,11 @@ def lambda_handler(event, context):
                 })
 
             except AskAnswerInvocationError as exc:
+                fail_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
                 print(json.dumps({
                     "event": (
                         "ask_jm8_answer_"
@@ -326,6 +363,11 @@ def lambda_handler(event, context):
                 )
 
             except AskAnswerResponseError as exc:
+                fail_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
                 print(json.dumps({
                     "event": (
                         "ask_jm8_answer_"
@@ -348,6 +390,18 @@ def lambda_handler(event, context):
                     ),
                     "retryable": False,
                 })
+
+            try:
+                complete_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
+            except AskUsageUnavailableError as exc:
+                return response(
+                    503,
+                    exc.payload,
+                )
 
             return response(200, {
                 "answer": answer,

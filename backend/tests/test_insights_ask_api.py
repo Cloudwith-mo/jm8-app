@@ -126,6 +126,12 @@ class AskJm8ApiTests(
     unittest.TestCase
 ):
     @patch(
+        "app.complete_ask_usage"
+    )
+    @patch(
+        "app.reserve_ask_usage"
+    )
+    @patch(
         "app.answer_journal_history"
     )
     @patch(
@@ -136,6 +142,8 @@ class AskJm8ApiTests(
         self,
         list_entries,
         answer_history,
+        reserve_usage,
+        complete_usage,
     ):
         list_entries.return_value = [
             analyzed_entry()
@@ -231,6 +239,10 @@ class AskJm8ApiTests(
             ],
             "ANSWERED",
         )
+
+        reserve_usage.assert_called_once()
+
+        complete_usage.assert_called_once()
 
     @patch(
         "app."
