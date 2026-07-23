@@ -36,6 +36,13 @@ from ask_usage import (
     fail_ask_usage,
     reserve_ask_usage,
 )
+from entry_analysis_usage import (
+    EntryAnalysisUsageLimitError,
+    EntryAnalysisUsageUnavailableError,
+    complete_entry_analysis_usage,
+    fail_entry_analysis_usage,
+    reserve_entry_analysis_usage,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -1194,11 +1201,35 @@ def lambda_handler(event, context):
                 })
 
             try:
+                analysis_usage_reservation = (
+                    reserve_entry_analysis_usage(
+                        user_id
+                    )
+                )
+
+            except EntryAnalysisUsageLimitError as exc:
+                return response(
+                    429,
+                    exc.payload,
+                )
+
+            except EntryAnalysisUsageUnavailableError as exc:
+                return response(
+                    503,
+                    exc.payload,
+                )
+
+            try:
                 analysis = analyze_journal_entry_llm(
                     journal_text
                 )
 
             except AnalyzerInputError as exc:
+                fail_entry_analysis_usage(
+                    user_id,
+                    analysis_usage_reservation,
+                )
+
                 failure_code = type(exc).__name__
 
                 failed_entry = mark_entry_analysis_failed(
@@ -1224,6 +1255,11 @@ def lambda_handler(event, context):
                 })
 
             except AnalyzerInvocationError as exc:
+                fail_entry_analysis_usage(
+                    user_id,
+                    analysis_usage_reservation,
+                )
+
                 failure_code = exc.error_code
 
                 failed_entry = mark_entry_analysis_failed(
@@ -1275,6 +1311,11 @@ def lambda_handler(event, context):
                 )
 
             except AnalyzerResponseError as exc:
+                fail_entry_analysis_usage(
+                    user_id,
+                    analysis_usage_reservation,
+                )
+
                 failure_code = type(exc).__name__
 
                 failed_entry = mark_entry_analysis_failed(
@@ -1306,11 +1347,32 @@ def lambda_handler(event, context):
                     "entry": failed_entry,
                 })
 
-            updated_entry = update_entry_analysis(
-                user_id=user_id,
-                entry_id=entry_id,
-                analysis=analysis,
-            )
+            try:
+                updated_entry = update_entry_analysis(
+                    user_id=user_id,
+                    entry_id=entry_id,
+                    analysis=analysis,
+                )
+
+            except Exception:
+                fail_entry_analysis_usage(
+                    user_id,
+                    analysis_usage_reservation,
+                )
+
+                raise
+
+            try:
+                complete_entry_analysis_usage(
+                    user_id,
+                    analysis_usage_reservation,
+                )
+
+            except EntryAnalysisUsageUnavailableError as exc:
+                return response(
+                    503,
+                    exc.payload,
+                )
 
             usage = analysis.get("usage") or {}
 
