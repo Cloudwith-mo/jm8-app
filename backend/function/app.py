@@ -43,6 +43,10 @@ from entry_analysis_usage import (
     fail_entry_analysis_usage,
     reserve_entry_analysis_usage,
 )
+from usage_read import (
+    UsageReadUnavailableError,
+    get_usage_snapshot,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -137,6 +141,27 @@ def lambda_handler(event, context):
 
             })
 
+
+        if (
+            method == "GET"
+            and path == "/usage"
+        ):
+            try:
+                usage_snapshot = (
+                    get_usage_snapshot(
+                        user_id
+                    )
+                )
+
+            except UsageReadUnavailableError as exc:
+                return response(
+                    503,
+                    exc.payload,
+                )
+
+            return response(200, {
+                "usage": usage_snapshot,
+            })
 
         if (
             method == "GET"
