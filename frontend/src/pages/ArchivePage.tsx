@@ -15,7 +15,11 @@ import InsightsTrendsPanel from "../components/insights/InsightsTrendsPanel";
 import ReportsPanel from "../components/insights/ReportsPanel";
 import AskJm8Panel from "../components/insights/AskJm8Panel";
 import AuthStatus from "../components/layout/AuthStatus";
+import UsageMeter from "../components/usage/UsageMeter";
 import type { JournalEntry } from "../types/journal";
+import type {
+  UsageSnapshot,
+} from "../types/usage";
 import {
   getCurrentUser,
   handleCognitoCallback,
@@ -24,11 +28,13 @@ import {
   type AuthUser,
 } from "../auth/cognito";
 import {
+  ApiRequestError,
   analyzeEntry,
   createEntry,
   createUploadUrl,
   deleteEntry,
   getEntry,
+  getUsage,
   listEntries,
   reviewEntry,
   runOcr,
@@ -101,6 +107,20 @@ export default function ArchivePage() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [authUser, setAuthUser] = useState<AuthUser | null>(getCurrentUser());
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [
+    usage,
+    setUsage,
+  ] = useState<UsageSnapshot | null>(
+    null
+  );
+  const [
+    isUsageLoading,
+    setIsUsageLoading,
+  ] = useState(false);
+  const [
+    usageError,
+    setUsageError,
+  ] = useState("");
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -191,6 +211,42 @@ export default function ArchivePage() {
       section !== "archive"
     ) {
       setIsSelectedPanelOpen(false);
+    }
+  }
+
+  async function refreshUsage({
+    silent = false,
+  }: {
+    silent?: boolean;
+  } = {}) {
+    setIsUsageLoading(true);
+
+    if (!silent) {
+      setUsageError("");
+    }
+
+    try {
+      const result = await getUsage();
+
+      setUsage(result.usage);
+      setUsageError("");
+    } catch (error) {
+      const message = getErrorMessage(
+        error,
+        "Monthly usage could not be loaded."
+      );
+
+      setUsageError(message);
+
+      if (!silent) {
+        showToast(
+          "error",
+          "Usage unavailable",
+          message
+        );
+      }
+    } finally {
+      setIsUsageLoading(false);
     }
   }
 
@@ -300,14 +356,48 @@ export default function ArchivePage() {
   async function handleAnalyzeSelected() {
     if (!selectedEntry) return;
 
+    if (
+      usage
+      && !usage.operations
+        .entryAnalysis.allowed
+    ) {
+      updateStatus(
+        (
+          "Your monthly entry-analysis "
+          + "allowance has been reached."
+        ),
+        "error",
+        "Analysis limit reached"
+      );
+      return;
+    }
+
     setIsBusy(true);
     updateStatus("Analyzing selected entry...", "loading", "Analysis running");
 
     try {
       const result = await analyzeEntry(selectedEntry.entryId);
-      await refreshEntries(result.entry.entryId);
+
+      await Promise.all([
+        refreshEntries(
+          result.entry.entryId
+        ),
+        refreshUsage({
+          silent: true,
+        }),
+      ]);
+
       updateStatus("Analysis completed.", "success", "Analysis complete");
     } catch (error) {
+      if (
+        error instanceof ApiRequestError
+        && error.status === 429
+      ) {
+        await refreshUsage({
+          silent: true,
+        });
+      }
+
       updateStatus(getErrorMessage(error, "Analysis failed."), "error", "Analysis failed");
     } finally {
       setIsBusy(false);
@@ -455,12 +545,20 @@ export default function ArchivePage() {
       if (!currentUser) {
         setEntries([]);
         setSelectedEntry(null);
+        setUsage(null);
+        setUsageError("");
         updateStatus("Sign in to load your private archive.", "info", "Login required");
         return;
       }
 
       try {
-        await refreshEntries();
+        await Promise.all([
+          refreshEntries(),
+          refreshUsage({
+            silent: true,
+          }),
+        ]);
+
         updateStatus("Archive loaded.");
       } catch (error) {
         updateStatus(getErrorMessage(error, "Failed to load archive."), "error", "Archive failed");
@@ -557,6 +655,21 @@ export default function ArchivePage() {
           onLogin={loginWithCognito}
           onLogout={logoutFromCognito}
         />
+
+        {authUser && (
+          <UsageMeter
+            usage={usage}
+            isLoading={
+              isUsageLoading
+            }
+            errorMessage={
+              usageError
+            }
+            onRetry={() => {
+              void refreshUsage();
+            }}
+          />
+        )}
 
         {isAuthReady && !authUser && (
           <section className="auth-required-card">
@@ -770,6 +883,14 @@ export default function ArchivePage() {
             "askJm8" && (
             <AskJm8Panel
               onNotify={showToast}
+              usage={
+                usage?.operations.askJm8
+              }
+              onUsageChanged={() =>
+                refreshUsage({
+                  silent: true,
+                })
+              }
             />
           )}
 
@@ -792,6 +913,16 @@ export default function ArchivePage() {
         entry={selectedEntry}
         isBusy={isBusy}
         isOpen={isSelectedPanelOpen}
+        analysisAllowed={
+          usage?.operations
+            .entryAnalysis.allowed
+          ?? true
+        }
+        analysisRemaining={
+          usage?.operations
+            .entryAnalysis.remaining
+          ?? null
+        }
         onClose={() => setIsSelectedPanelOpen(false)}
         onReview={() => setModalMode("review")}
         onAnalyze={handleAnalyzeSelected}

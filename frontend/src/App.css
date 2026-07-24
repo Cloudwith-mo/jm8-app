@@ -3915,3 +3915,20 @@ body,
       repeat(2, minmax(0, 1fr));
   }
 }
+
+.analysis-usage-note {
+  margin: 10px 0 0;
+  color: #68766f;
+  font-size: 0.74rem;
+  font-weight: 650;
+}
+
+.analysis-usage-note.exhausted {
+  color: #994d42;
+}
+
+.selected-actions button:disabled,
+.no-analysis-state button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

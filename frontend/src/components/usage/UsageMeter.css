@@ -1,0 +1,289 @@
+.usage-meter {
+  display: grid;
+  gap: 16px;
+  margin: 0 0 22px;
+  padding: 18px;
+  border: 1px solid rgba(23, 37, 31, 0.12);
+  border-radius: 20px;
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.98),
+      rgba(245, 248, 245, 0.98)
+    );
+  box-shadow:
+    0 14px 36px rgba(23, 37, 31, 0.07);
+}
+
+.usage-meter.loading,
+.usage-meter.error {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.usage-meter.loading div,
+.usage-meter.error div {
+  display: grid;
+  gap: 3px;
+}
+
+.usage-meter.loading span,
+.usage-meter.error span {
+  color: #68736d;
+  font-size: 0.86rem;
+}
+
+.usage-meter.error {
+  border-color: rgba(161, 70, 56, 0.24);
+  background: #fff9f7;
+}
+
+.usage-meter.error button,
+.usage-meter-meta button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(23, 37, 31, 0.14);
+  border-radius: 999px;
+  background: #ffffff;
+  color: #1c2b24;
+  cursor: pointer;
+}
+
+.usage-meter.error button {
+  padding: 8px 12px;
+}
+
+.usage-meter-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.usage-meter-header p {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 5px;
+  color: #66736c;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.usage-meter-header h2 {
+  margin: 0;
+  color: #17251f;
+  font-size: 1.08rem;
+}
+
+.usage-meter-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.usage-meter-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #67736d;
+  font-size: 0.8rem;
+}
+
+.usage-plan-badge {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #1c2b24;
+  color: #ffffff !important;
+  font-size: 0.72rem !important;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.usage-meter-meta button {
+  width: 31px;
+  height: 31px;
+}
+
+.usage-meter-meta button:disabled,
+.usage-meter.error button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.usage-operation-grid {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.usage-operation-card {
+  display: grid;
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid rgba(23, 37, 31, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.usage-operation-card.warning {
+  border-color: rgba(173, 116, 35, 0.32);
+  background: #fffbf3;
+}
+
+.usage-operation-card.exhausted {
+  border-color: rgba(161, 70, 56, 0.3);
+  background: #fff8f6;
+}
+
+.usage-operation-card header {
+  display: grid;
+  grid-template-columns:
+    auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.usage-operation-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: #eef3ef;
+  color: #365448;
+}
+
+.usage-operation-card.warning
+.usage-operation-icon {
+  background: #f7ead2;
+  color: #8b611d;
+}
+
+.usage-operation-card.exhausted
+.usage-operation-icon {
+  background: #f7e2de;
+  color: #994d42;
+}
+
+.usage-operation-card h3 {
+  margin: 0;
+  color: #17251f;
+  font-size: 0.95rem;
+}
+
+.usage-operation-card header p {
+  margin: 3px 0 0;
+  color: #748079;
+  font-size: 0.75rem;
+}
+
+.usage-operation-card header strong {
+  color: #17251f;
+  font-size: 1.18rem;
+}
+
+.usage-operation-card header strong span {
+  color: #758079;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.usage-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6ebe7;
+}
+
+.usage-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #456b5a;
+  transition: width 180ms ease;
+}
+
+.usage-operation-card.warning
+.usage-progress-track span {
+  background: #a9792f;
+}
+
+.usage-operation-card.exhausted
+.usage-progress-track span {
+  background: #a65449;
+}
+
+.usage-operation-card footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  color: #718078;
+  font-size: 0.72rem;
+}
+
+.usage-state-message,
+.usage-inline-error {
+  margin: 0;
+  font-size: 0.77rem;
+  font-weight: 650;
+}
+
+.usage-operation-card.warning
+.usage-state-message {
+  color: #8b611d;
+}
+
+.usage-operation-card.exhausted
+.usage-state-message,
+.usage-inline-error {
+  color: #994d42;
+}
+
+.usage-spin {
+  animation: usage-meter-spin 0.8s linear infinite;
+}
+
+@keyframes usage-meter-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 760px) {
+  .usage-meter {
+    padding: 15px;
+    border-radius: 17px;
+  }
+
+  .usage-meter-header {
+    display: grid;
+  }
+
+  .usage-meter-meta {
+    justify-content: flex-start;
+  }
+
+  .usage-operation-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .usage-meter.loading,
+  .usage-meter.error {
+    grid-template-columns: auto 1fr;
+  }
+
+  .usage-meter.error button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}

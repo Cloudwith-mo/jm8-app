@@ -33,6 +33,9 @@ import type {
   AskJm8Evidence,
 } from "../../types/askJm8";
 import type {
+  UsageOperation,
+} from "../../types/usage";
+import type {
   ToastKind,
 } from "../ui/ToastStack";
 import "./AskJm8Panel.css";
@@ -44,6 +47,8 @@ type AskJm8PanelProps = {
     title: string,
     message?: string
   ) => void;
+  usage?: UsageOperation;
+  onUsageChanged: () => Promise<void>;
 };
 
 
@@ -213,6 +218,17 @@ function getErrorMessage(
     error instanceof ApiRequestError
   ) {
     if (
+      error.status === 429
+      || error.code
+        === "UsageLimitExceeded"
+    ) {
+      return (
+        "Your monthly Ask JM8 "
+        + "allowance has been reached."
+      );
+    }
+
+    if (
       error.status === 503
     ) {
       return (
@@ -292,6 +308,8 @@ function EmptyListMessage({
 
 export default function AskJm8Panel({
   onNotify,
+  usage,
+  onUsageChanged,
 }: AskJm8PanelProps) {
   const [
     question,
@@ -348,9 +366,13 @@ export default function AskJm8Panel({
   const normalizedQuestion =
     question.trim();
 
+  const isUsageExhausted =
+    usage?.allowed === false;
+
   const canSubmit =
     normalizedQuestion.length >= 3
-    && !isLoading;
+    && !isLoading
+    && !isUsageExhausted;
 
   async function submitQuestion(
     questionOverride?: string
@@ -365,6 +387,16 @@ export default function AskJm8Panel({
         "Enter a question with at least three characters."
       );
 
+      return;
+    }
+
+    if (isUsageExhausted) {
+      setErrorMessage(
+        (
+          "Your monthly Ask JM8 "
+          + "allowance has been reached."
+        )
+      );
       return;
     }
 
@@ -402,6 +434,8 @@ export default function AskJm8Panel({
 
       setAnswer(result.answer);
 
+      await onUsageChanged();
+
       setHistory(
         (currentHistory) => [
           {
@@ -426,6 +460,13 @@ export default function AskJm8Panel({
         )
       );
     } catch (error) {
+      if (
+        error instanceof ApiRequestError
+        && error.status === 429
+      ) {
+        await onUsageChanged();
+      }
+
       const message =
         getErrorMessage(error);
 
@@ -525,6 +566,33 @@ export default function AskJm8Panel({
         </div>
       </header>
 
+      {usage && (
+        <div
+          className={
+            isUsageExhausted
+              ? (
+                  "ask-jm8-usage-state "
+                  + "exhausted"
+                )
+              : "ask-jm8-usage-state"
+          }
+        >
+          <span>
+            Ask JM8 monthly allowance
+          </span>
+
+          <strong>
+            {usage.remaining}
+            {" "}
+            of
+            {" "}
+            {usage.limit}
+            {" "}
+            remaining
+          </strong>
+        </div>
+      )}
+
       <form
         className="ask-jm8-composer"
         onSubmit={(event) => {
@@ -552,6 +620,9 @@ export default function AskJm8Panel({
             }
             maxLength={500}
             rows={2}
+            disabled={
+              isUsageExhausted
+            }
             aria-label={
               "Ask a question about "
               + "your journal history"
@@ -779,6 +850,9 @@ export default function AskJm8Panel({
                 <button
                   type="button"
                   key={suggestion}
+                  disabled={
+                    isUsageExhausted
+                  }
                   onClick={() =>
                     askSuggestedQuestion(
                       suggestion

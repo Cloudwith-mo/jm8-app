@@ -1393,3 +1393,49 @@ button svg {
       minmax(0, 1fr);
   }
 }
+
+.ask-jm8-usage-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 13px;
+  border: 1px solid rgba(54, 84, 72, 0.16);
+  border-radius: 13px;
+  background: #f5f8f6;
+  color: #53645b;
+  font-size: 0.78rem;
+}
+
+.ask-jm8-usage-state strong {
+  color: #20342b;
+}
+
+.ask-jm8-usage-state.exhausted {
+  border-color: rgba(161, 70, 56, 0.28);
+  background: #fff8f6;
+  color: #994d42;
+}
+
+.ask-jm8-usage-state.exhausted strong {
+  color: #994d42;
+}
+
+.ask-jm8-suggestions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.ask-jm8-input-shell textarea:disabled {
+  cursor: not-allowed;
+  background: #f3f4f3;
+}
+
+@media (max-width: 640px) {
+  .ask-jm8-usage-state {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+}

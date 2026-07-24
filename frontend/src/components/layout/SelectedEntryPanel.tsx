@@ -21,6 +21,8 @@ type SelectedEntryPanelProps = {
   entry: JournalEntry | null;
   isBusy: boolean;
   isOpen: boolean;
+  analysisAllowed: boolean;
+  analysisRemaining: number | null;
   onClose: () => void;
   onReview: () => void;
   onAnalyze: () => void;
@@ -72,6 +74,8 @@ export default function SelectedEntryPanel({
   entry,
   isBusy,
   isOpen,
+  analysisAllowed,
+  analysisRemaining,
   onClose,
   onReview,
   onAnalyze,
@@ -85,6 +89,10 @@ export default function SelectedEntryPanel({
   const hasAnalysis = Boolean(entry?.analysis);
   const wordCount = getWordCount(entry);
   const hasImage = Boolean(entry?.imagePreviewUrl);
+  const analyzeDisabled =
+    !entry
+    || isBusy
+    || !analysisAllowed;
 
   return (
     <aside className={isOpen ? "selected-panel open" : "selected-panel"}>
@@ -138,7 +146,19 @@ export default function SelectedEntryPanel({
             Review Text
           </button>
 
-          <button className="dark-action" onClick={onAnalyze} disabled={!entry || isBusy}>
+          <button
+            className="dark-action"
+            onClick={onAnalyze}
+            disabled={analyzeDisabled}
+            title={
+              analysisAllowed
+                ? "Analyze this entry"
+                : (
+                    "Monthly analysis "
+                    + "allowance reached"
+                  )
+            }
+          >
             Analyze
           </button>
 
@@ -146,6 +166,28 @@ export default function SelectedEntryPanel({
             <MoreHorizontal size={16} />
           </button>
         </div>
+
+        <p
+          className={
+            analysisAllowed
+              ? "analysis-usage-note"
+              : (
+                  "analysis-usage-note "
+                  + "exhausted"
+                )
+          }
+        >
+          {analysisRemaining === null
+            ? "Monthly analysis allowance is loading."
+            : analysisAllowed
+              ? (
+                  `${analysisRemaining} `
+                  + "monthly analyses remaining."
+                )
+              : (
+                  "Monthly analysis allowance reached."
+                )}
+        </p>
       </section>
 
       <section className="lifecycle-card">
@@ -229,7 +271,10 @@ export default function SelectedEntryPanel({
             <p>
               Analyze this entry to generate mood, sentiment, themes, summary, and a next step.
             </p>
-            <button onClick={onAnalyze} disabled={!entry || isBusy}>
+            <button
+              onClick={onAnalyze}
+              disabled={analyzeDisabled}
+            >
               Run Analysis
             </button>
           </div>
