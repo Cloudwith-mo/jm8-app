@@ -137,6 +137,7 @@ cat > .build/lambda-app-policy.json <<POLICY
         "dynamodb:DeleteItem",
         "dynamodb:GetItem",
         "dynamodb:UpdateItem",
+        "dynamodb:TransactWriteItems",
         "dynamodb:Query"
       ],
       "Resource": [

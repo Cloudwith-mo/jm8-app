@@ -1,0 +1,1009 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(
+  cd "$(
+    dirname "${BASH_SOURCE[0]}"
+  )/.."
+  pwd
+)"
+
+cd "$ROOT_DIR"
+
+: "${AWS_PROFILE:?AWS_PROFILE is required}"
+: "${AWS_REGION:?AWS_REGION is required}"
+: "${APP_NAME:?APP_NAME is required}"
+: "${STAGE:?STAGE is required}"
+: "${TABLE_NAME:?TABLE_NAME is required}"
+: "${RAW_BUCKET:?RAW_BUCKET is required}"
+: "${API_NAME:?API_NAME is required}"
+: "${ID_TOKEN:?_NAME:?TABLE_NAME is required}"
+: "${RAW_BUCKET:?RAW_BUCKET is required}"
+: "${API_NAME:?API_NAMEID_TOKEN is required}"
+
+export AWS_DEFAULT_REGION="$AWS_REGION"
+
+if ! printf '%s' "$ID_TOKEN" \
+  | grep -Eq '^[^.]+\.[^.]+\.[^.]+$'
+then
+  echo "ID_TOKEN does not look like a JWT."
+  return 1 2>/dev/null || true
+  false
+fi
+
+TMP_DIR="$(
+  mktemp -d
+)"
+
+PROOF_SUFFIX="$(
+  python3 - <<'PY'
+import secrets
+print(secrets.token_hex(8))
+PY
+)"
+
+PROOF_USER="usage-proof-${PROOF_SUFFIX}"
+ISOLATION_USER="usage-isolation-${PROOF_SUFFIX}"
+
+export PROOF_USER
+export ISOLATION_USER
+
+FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
+ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
+POLICY_NAME="${APP_NAME}-${STAGE}-app-access-policy"
+
+START_MS="$(
+  python3 - <<'PY'
+import time
+print(int((time.time() - 600) * 1000))
+PY
+)"
+
+cleanup() {
+  set +e
+
+  PYTHONPATH=function \
+  python3 - <<'PY' >/dev/null 2>&1
+import os
+
+import boto3
+from boto3.dynamodb.conditions import (
+    Key,
+)
+
+
+session = boto3.Session(
+    profile_name=os.environ["AWS_PROFILE"],
+    region_name=os.environ["AWS_REGION"],
+)
+
+table = session.resource(
+    "dynamodb"
+).Table(
+    os.environ["TABLE_NAME"]
+)
+
+for user_id in (
+    os.environ.get("PROOF_USER"),
+    os.environ.get("ISOLATION_USER"),
+):
+    if not user_id:
+        continue
+
+    partition_key = f"USER#{user_id}"
+
+    query = {
+        "KeyConditionExpression": (
+            Key("PK").eq(
+                partition_key
+            )
+        ),
+    }
+
+    while True:
+        result = table.query(
+            **query
+        )
+
+        with table.batch_writer() as batch:
+            for item in result.get(
+                "Items",
+                [],
+            ):
+                batch.delete_item(
+                    Key={
+                        "PK": item["PK"],
+                        "SK": item["SK"],
+                    }
+                )
+
+        last_key = result.get(
+            "LastEvaluatedKey"
+        )
+
+        if not last_key:
+            break
+
+        query["ExclusiveStartKey"] = (
+            last_key
+        )
+PY
+
+  rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT
+
+API_ID="$(
+  aws apigatewayv2 get-apis \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "Items[?Name=='${API_NAME}'].ApiId | [0]" \
+    --output text
+)"
+
+if [[
+  -z "$API_ID"
+  || "$API_ID" = "None"
+]]; then
+  echo "Usage API could not be resolved."
+  false
+fi
+
+API_ENDPOINT="$(
+  aws apigatewayv2 get-api \
+    --api-id "$API_ID" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query ApiEndpoint \
+    --output text
+)"
+
+API_ENDPOINT="${API_ENDPOINT%/}"
+
+AUTH_TYPE="$(
+  aws apigatewayv2 get-routes \
+    --api-id "$API_ID" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "Items[?RouteKey=='GET /usage'].AuthorizationType | [0]" \
+    --output text
+)"
+
+ROUTE_PROTECTED=false
+
+if [ "$AUTH_TYPE" = "JWT" ]; then
+  ROUTE_PROTECTED=true
+fi
+
+aws lambda get-function-configuration \
+  --function-name "$FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query Environment.Variables \
+  --output json \
+  > "$TMP_DIR/lambda-environment.json"
+
+python3 - \
+  "$TMP_DIR/lambda-environment.json" \
+  <<'PY'
+import json
+import sys
+
+
+with open(
+    sys.argv[1],
+    encoding="utf-8",
+) as handle:
+    environment = json.load(handle)
+
+required = (
+    "FREE_MONTHLY_ASK_QUESTIONS",
+    "FREE_MONTHLY_ENTRY_ANALYSES",
+    "PRO_MONTHLY_ASK_QUESTIONS",
+    "PRO_MONTHLY_ENTRY_ANALYSES",
+)
+
+configured = all(
+    key in environment
+    and str(
+        environment[key]
+    ).isdigit()
+    and int(
+        environment[key]
+    ) >= 0
+    for key in required
+)
+
+print(
+    "Lambda usage limits configured:",
+    configured,
+)
+
+if not configured:
+    raise SystemExit(
+        "Lambda usage-limit configuration "
+        "is incomplete."
+    )
+PY
+
+aws iam get-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$POLICY_NAME" \
+  --profile "$AWS_PROFILE" \
+  --output json \
+  > "$TMP_DIR/role-policy.json"
+
+python3 - \
+  "$TMP_DIR/role-policy.json" \
+  <<'PY'
+import json
+import sys
+
+
+with open(
+    sys.argv[1],
+    encoding="utf-8",
+) as handle:
+    policy = json.load(handle)
+
+actions = set()
+
+for statement in (
+    policy.get(
+        "PolicyDocument",
+        {},
+    ).get(
+        "Statement",
+        [],
+    )
+):
+    current = statement.get(
+        "Action",
+        [],
+    )
+
+    if isinstance(
+        current,
+        str,
+    ):
+        actions.add(current)
+    else:
+        actions.update(current)
+
+configured = (
+    "dynamodb:TransactWriteItems"
+    in actions
+)
+
+print(
+    "Transaction permission configured:",
+    configured,
+)
+
+if not configured:
+    raise SystemExit(
+        "The Lambda role does not have "
+        "DynamoDB transaction access."
+    )
+PY
+
+ROLE_ARN="$(
+  aws iam get-role \
+    --role-name "$ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --query Role.Arn \
+    --output text
+)"
+
+TABLE_ARN="$(
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Table.TableArn \
+    --output text
+)"
+
+IAM_DECISION="$(
+  aws iam simulate-principal-policy \
+    --policy-source-arn "$ROLE_ARN" \
+    --action-names \
+      dynamodb:TransactWriteItems \
+    --resource-arns "$TABLE_ARN" \
+    --profile "$AWS_PROFILE" \
+    --query \
+      'EvaluationResults[0].EvalDecision' \
+    --output text
+)"
+
+IAM_ALLOWED=false
+
+if [ "$IAM_DECISION" = "allowed" ]; then
+  IAM_ALLOWED=true
+fi
+
+echo \
+  "GET /usage JWT protected:" \
+  "$ROUTE_PROTECTED"
+
+echo \
+  "Lambda transaction access allowed:" \
+  "$IAM_ALLOWED"
+
+if [[
+  "$ROUTE_PROTECTED" != true
+  || "$IAM_ALLOWED" != true
+]]; then
+  echo "Deployment authorization proof failed."
+  false
+fi
+
+UNAUTH_STATUS="$(
+  curl \
+    --silent \
+    --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --output "$TMP_DIR/unauthenticated.json" \
+    --write-out '%{http_code}' \
+    "${API_ENDPOINT}/usage"
+)"
+
+UNAUTH_REJECTED=false
+
+if [[
+  "$UNAUTH_STATUS" = "401"
+  || "$UNAUTH_STATUS" = "403"
+]]; then
+  UNAUTH_REJECTED=true
+fi
+
+AUTH_STATUS="$(
+  curl \
+    --silent \
+    --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --header \
+      "Authorization: Bearer ${ID_TOKEN}" \
+    --output "$TMP_DIR/authenticated.json" \
+    --write-out '%{http_code}' \
+    "${API_ENDPOINT}/usage"
+)"
+
+echo \
+  "Unauthenticated usage rejected:" \
+  "$UNAUTH_REJECTED"
+
+echo \
+  "Authenticated usage status 200:" \
+  "$(
+    [ "$AUTH_STATUS" = "200" ] \
+      && echo true \
+      || echo false
+  )"
+
+if [ "$UNAUTH_REJECTED" != true ]; then
+  echo "Unauthenticated request was not rejected."
+  false
+fi
+
+if [ "$AUTH_STATUS" != "200" ]; then
+  echo \
+    "Authenticated usage request failed " \
+    "with status ${AUTH_STATUS}."
+  false
+fi
+
+python3 - \
+  "$TMP_DIR/authenticated.json" \
+  <<'PY'
+import json
+import sys
+
+
+with open(
+    sys.argv[1],
+    encoding="utf-8",
+) as handle:
+    body = json.load(handle)
+
+usage = body.get("usage")
+serialized = json.dumps(body)
+
+root_valid = (
+    isinstance(
+        usage,
+        dict,
+    )
+    and set(usage)
+    == {
+        "usageVersion",
+        "generatedAt",
+        "period",
+        "plan",
+        "operations",
+    }
+)
+
+operations_valid = (
+    isinstance(
+        usage,
+        dict,
+    )
+    and set(
+        usage.get(
+            "operations",
+            {},
+        )
+    )
+    == {
+        "askJm8",
+        "entryAnalysis",
+    }
+)
+
+private_fields_absent = all(
+    value not in serialized
+    for value in (
+        '"PK"',
+        '"SK"',
+        "userId",
+        "entryId",
+        "reservationId",
+        "askJm8Consumed",
+        "entryAnalysisConsumed",
+        "rawText",
+        "cleanText",
+        "question",
+        "answer",
+    )
+)
+
+print(
+    "Usage response contract valid:",
+    root_valid
+    and operations_valid,
+)
+
+print(
+    "Usage response private fields absent:",
+    private_fields_absent,
+)
+
+if not all([
+    root_valid,
+    operations_valid,
+    private_fields_absent,
+]):
+    raise SystemExit(
+        "Authenticated usage response "
+        "privacy proof failed."
+    )
+PY
+
+PYTHONPATH=function \
+python3 - <<'PY'
+import os
+
+import boto3
+
+from usage_policy import (
+    monthly_usage_period,
+)
+from usage_store import (
+    usage_sk,
+)
+from storage import (
+    user_pk,
+)
+
+
+session = boto3.Session(
+    profile_name=os.environ["AWS_PROFILE"],
+    region_name=os.environ["AWS_REGION"],
+)
+
+table = session.resource(
+    "dynamodb"
+).Table(
+    os.environ["TABLE_NAME"]
+)
+
+period = monthly_usage_period()
+
+table.put_item(
+    Item={
+        "PK": user_pk(
+            os.environ[
+                "ISOLATION_USER"
+            ]
+        ),
+        "SK": usage_sk(
+            period["key"]
+        ),
+        "entityType": (
+            "MONTHLY_USAGE"
+        ),
+        "period": period["key"],
+        "askJm8Completed": 777,
+        "askJm8Reserved": 0,
+        "askJm8Failed": 0,
+        (
+            "entryAnalysisCompleted"
+        ): 777,
+        (
+            "entryAnalysisReserved"
+        ): 0,
+        (
+            "entryAnalysisFailed"
+        ): 0,
+    }
+)
+PY
+
+ISOLATION_STATUS="$(
+  curl \
+    --silent \
+    --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --header \
+      "Authorization: Bearer ${ID_TOKEN}" \
+    --output "$TMP_DIR/isolation.json" \
+    --write-out '%{http_code}' \
+    "${API_ENDPOINT}/usage"
+)"
+
+if [ "$ISOLATION_STATUS" != "200" ]; then
+  echo "User-isolation request failed."
+  false
+fi
+
+python3 - \
+  "$TMP_DIR/isolation.json" \
+  <<'PY'
+import json
+import sys
+
+
+with open(
+    sys.argv[1],
+    encoding="utf-8",
+) as handle:
+    body = json.load(handle)
+
+operations = (
+    body.get(
+        "usage",
+        {},
+    ).get(
+        "operations",
+        {},
+    )
+)
+
+values = []
+
+for operation in operations.values():
+    if not isinstance(
+        operation,
+        dict,
+    ):
+        continue
+
+    values.extend(
+        operation.values()
+    )
+
+isolated = 777 not in values
+
+print(
+    "Authenticated user isolated "
+    "from synthetic user:",
+    isolated,
+)
+
+if not isolated:
+    raise SystemExit(
+        "User-isolation proof failed."
+    )
+PY
+
+PYTHONPATH=function \
+python3 - <<'PY'
+from __future__ import annotations
+
+import os
+import random
+import time
+import uuid
+from concurrent.futures import (
+    ThreadPoolExecutor,
+)
+
+from usage_policy import (
+    OPERATION_ASK_JM8,
+    PLAN_FREE,
+)
+from usage_store import (
+    UsageLimitExceededError,
+    UsageReservationConflictError,
+    UsageStoreError,
+    fail_usage_reservation,
+    get_monthly_usage_item,
+    reserve_monthly_usage,
+)
+
+
+LIMIT = 3
+WORKERS = 12
+
+user_id = os.environ[
+    "PROOF_USER"
+]
+
+environment = {
+    "FREE_MONTHLY_ASK_QUESTIONS": (
+        str(LIMIT)
+    ),
+}
+
+
+def reserve_once():
+    for _ in range(10):
+        try:
+            return (
+                "accepted",
+                reserve_monthly_usage(
+                    user_id,
+                    plan=PLAN_FREE,
+                    operation=(
+                        OPERATION_ASK_JM8
+                    ),
+                    reservation_id=(
+                        "usage_"
+                        + uuid.uuid4().hex[:24]
+                    ),
+                    environ=environment,
+                ),
+            )
+
+        except UsageLimitExceededError:
+            return (
+                "limited",
+                None,
+            )
+
+        except (
+            UsageReservationConflictError,
+        ):
+            time.sleep(
+                random.uniform(
+                    0.02,
+                    0.09,
+                )
+            )
+
+        except UsageStoreError as error:
+            if not error.retryable:
+                raise
+
+            time.sleep(
+                random.uniform(
+                    0.03,
+                    0.12,
+                )
+            )
+
+    return (
+        "conflict",
+        None,
+    )
+
+
+with ThreadPoolExecutor(
+    max_workers=WORKERS
+) as executor:
+    concurrent_results = list(
+        executor.map(
+            lambda _: reserve_once(),
+            range(WORKERS),
+        )
+    )
+
+accepted = [
+    result
+    for status, result
+    in concurrent_results
+    if (
+        status == "accepted"
+        and result is not None
+    )
+]
+
+concurrent_within_limit = (
+    len(accepted) <= LIMIT
+)
+
+for _ in range(20):
+    if len(accepted) >= LIMIT:
+        break
+
+    status, result = reserve_once()
+
+    if (
+        status == "accepted"
+        and result is not None
+    ):
+        accepted.append(result)
+        continue
+
+    if status == "limited":
+        break
+
+capacity_filled = (
+    len(accepted) == LIMIT
+)
+
+before_release = (
+    get_monthly_usage_item(
+        user_id
+    )
+)
+
+reserved_exact = (
+    int(
+        before_release.get(
+            "askJm8Reserved",
+            0,
+        )
+    )
+    == LIMIT
+    and int(
+        before_release.get(
+            "askJm8Consumed",
+            0,
+        )
+    )
+    == LIMIT
+)
+
+release_successful = True
+
+for reservation in accepted:
+    released = False
+
+    for _ in range(8):
+        try:
+            fail_usage_reservation(
+                user_id,
+                reservation=reservation,
+            )
+
+            released = True
+            break
+
+        except UsageStoreError as error:
+            if not error.retryable:
+                raise
+
+            time.sleep(0.05)
+
+    if not released:
+        release_successful = False
+
+after_release = (
+    get_monthly_usage_item(
+        user_id
+    )
+)
+
+capacity_restored = (
+    release_successful
+    and int(
+        after_release.get(
+            "askJm8Reserved",
+            0,
+        )
+    )
+    == 0
+    and int(
+        after_release.get(
+            "askJm8Consumed",
+            0,
+        )
+    )
+    == 0
+    and int(
+        after_release.get(
+            "askJm8Failed",
+            0,
+        )
+    )
+    == LIMIT
+)
+
+print(
+    "Concurrent reservations stayed "
+    "within limit:",
+    concurrent_within_limit,
+)
+
+print(
+    "Configured capacity filled:",
+    capacity_filled,
+)
+
+print(
+    "Reserved counters exact:",
+    reserved_exact,
+)
+
+print(
+    "Failed requests restored capacity:",
+    capacity_restored,
+)
+
+if not all([
+    concurrent_within_limit,
+    capacity_filled,
+    reserved_exact,
+    capacity_restored,
+]):
+    raise SystemExit(
+        "Concurrent usage reservation "
+        "proof failed."
+    )
+PY
+
+USAGE_LOG_FOUND=false
+
+for _ in 1 2 3 4 5 6 7 8; do
+  aws logs filter-log-events \
+    --log-group-name \
+      "/aws/lambda/${FUNCTION_NAME}" \
+    --start-time "$START_MS" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$TMP_DIR/log-events.json"
+
+  LOG_COUNT="$(
+    python3 - \
+      "$TMP_DIR/log-events.json" \
+      <<'PY'
+import json
+import sys
+
+
+with open(
+    sys.argv[1],
+    encoding="utf-8",
+) as handle:
+    data = json.load(handle)
+
+messages = [
+    str(event.get("message", ""))
+    for event in data.get(
+        "events",
+        [],
+    )
+]
+
+usage_messages = [
+    message
+    for message in messages
+    if (
+        "usage_snapshot"
+        in message
+        or "_usage_"
+        in message
+    )
+]
+
+print(
+    len(usage_messages)
+)
+PY
+  )"
+
+  if [ "$LOG_COUNT" -gt 0 ]; then
+    USAGE_LOG_FOUND=true
+    break
+  fi
+
+  sleep 3
+done
+
+python3 - \
+  "$TMP_DIR/log-events.json" \
+  "$PROOF_USER" \
+  "$ISOLATION_USER" \
+  <<'PY'
+import json
+import os
+import sys
+
+
+with open(
+    sys.argv[1],
+    encoding="utf-8",
+) as handle:
+    data = json.load(handle)
+
+messages = [
+    str(event.get("message", ""))
+    for event in data.get(
+        "events",
+        [],
+    )
+]
+
+usage_messages = [
+    message
+    for message in messages
+    if (
+        "usage_snapshot"
+        in message
+        or "_usage_"
+        in message
+    )
+]
+
+combined = "\n".join(
+    usage_messages
+)
+
+forbidden_values = (
+    '"PK"',
+    '"SK"',
+    "userId",
+    "entryId",
+    "reservationId",
+    "rawText",
+    "cleanText",
+    '"question"',
+    '"answer"',
+    "Authorization",
+    "Bearer ",
+    sys.argv[2],
+    sys.argv[3],
+    os.environ.get(
+        "ID_TOKEN",
+        "",
+    ),
+)
+
+private_fields_absent = all(
+    not value
+    or value not in combined
+    for value in forbidden_values
+)
+
+print(
+    "Usage log event found:",
+    bool(usage_messages),
+)
+
+print(
+    "Usage log private fields absent:",
+    private_fields_absent,
+)
+
+if not usage_messages:
+    raise SystemExit(
+        "No deployed usage log event "
+        "was found."
+    )
+
+if not private_fields_absent:
+    raise SystemExit(
+        "Usage log privacy proof failed."
+    )
+PY
+
+echo "Upgrade 16A-8 deployed proof passed."
