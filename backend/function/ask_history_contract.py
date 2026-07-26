@@ -302,6 +302,74 @@ def _normalize_optional_date(
     return parsed.isoformat()
 
 
+def _normalize_optional_scope_timestamp(
+    value: Any,
+    *,
+    field: str,
+) -> str | None:
+    if value is None:
+        return None
+
+    text = _clean_text(
+        value,
+        field=field,
+        max_characters=80,
+    )
+
+    if not text:
+        return None
+
+    try:
+        parsed_date = date.fromisoformat(
+            text
+        )
+    except ValueError:
+        parsed_date = None
+
+    if (
+        parsed_date is not None
+        and len(text) == 10
+    ):
+        return parsed_date.isoformat()
+
+    try:
+        parsed_timestamp = (
+            datetime.fromisoformat(
+                text.replace(
+                    "Z",
+                    "+00:00",
+                )
+            )
+        )
+    except ValueError:
+        _raise_contract_error(
+            "InvalidAskHistoryTimestamp",
+            (
+                f"{field} must be a valid "
+                "ISO-8601 date or timestamp."
+            ),
+        )
+
+    if (
+        parsed_timestamp.tzinfo
+        is None
+    ):
+        _raise_contract_error(
+            "InvalidAskHistoryTimestamp",
+            (
+                f"{field} must contain "
+                "a timezone when it is "
+                "a timestamp."
+            ),
+        )
+
+    return (
+        parsed_timestamp.astimezone(
+            timezone.utc
+        ).isoformat()
+    )
+
+
 def _normalize_nonnegative_integer(
     value: Any,
     *,
@@ -536,13 +604,13 @@ def _normalize_scope(
             )
         ),
         "firstEntryAt": (
-            _normalize_optional_date(
+            _normalize_optional_scope_timestamp(
                 scope.get("firstEntryAt"),
                 field="scope.firstEntryAt",
             )
         ),
         "latestEntryAt": (
-            _normalize_optional_date(
+            _normalize_optional_scope_timestamp(
                 scope.get("latestEntryAt"),
                 field="scope.latestEntryAt",
             )

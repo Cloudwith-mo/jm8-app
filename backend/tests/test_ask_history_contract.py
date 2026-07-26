@@ -361,6 +361,75 @@ class AskHistoryContractTests(
             1,
         )
 
+    def test_entry_scope_timestamps_are_preserved(
+        self,
+    ):
+        answer = sample_answer()
+
+        answer["scope"][
+            "firstEntryAt"
+        ] = (
+            "2026-01-03"
+            "T08:15:00+02:00"
+        )
+
+        answer["scope"][
+            "latestEntryAt"
+        ] = (
+            "2026-07-24"
+            "T21:30:00Z"
+        )
+
+        normalized = (
+            normalize_ask_history_answer(
+                answer
+            )
+        )
+
+        self.assertEqual(
+            normalized["scope"][
+                "firstEntryAt"
+            ],
+            (
+                "2026-01-03"
+                "T06:15:00+00:00"
+            ),
+        )
+
+        self.assertEqual(
+            normalized["scope"][
+                "latestEntryAt"
+            ],
+            (
+                "2026-07-24"
+                "T21:30:00+00:00"
+            ),
+        )
+
+    def test_naive_entry_timestamp_is_rejected(
+        self,
+    ):
+        answer = sample_answer()
+
+        answer["scope"][
+            "firstEntryAt"
+        ] = (
+            "2026-01-03"
+            "T08:15:00"
+        )
+
+        with self.assertRaises(
+            AskHistoryContractError
+        ) as raised:
+            normalize_ask_history_answer(
+                answer
+            )
+
+        self.assertEqual(
+            raised.exception.code,
+            "InvalidAskHistoryTimestamp",
+        )
+
     def test_invalid_question_is_rejected(
         self,
     ):
