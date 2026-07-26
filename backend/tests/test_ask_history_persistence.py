@@ -295,6 +295,10 @@ class AskHistoryPersistenceTests(
             answer,
         )
 
+        self.assertTrue(
+            result["_createdInRequest"]
+        )
+
         saved_answer = (
             create_history
             .call_args.args[1]
@@ -340,6 +344,10 @@ class AskHistoryPersistenceTests(
         result = persist_ask_history(
             "private-user",
             sample_answer(),
+        )
+
+        self.assertFalse(
+            result["_createdInRequest"]
         )
 
         self.assertEqual(
@@ -461,7 +469,7 @@ class AskHistoryPersistenceTests(
 
     @patch(
         "ask_history_persistence."
-        "delete_ask_history",
+        "delete_ask_history_by_key",
         return_value=True,
     )
     def test_rollback_deletes_history(
@@ -469,6 +477,9 @@ class AskHistoryPersistenceTests(
         delete_history,
     ):
         history = history_detail()
+        history[
+            "_createdInRequest"
+        ] = True
 
         deleted = (
             rollback_persisted_ask_history(
@@ -481,12 +492,37 @@ class AskHistoryPersistenceTests(
 
         delete_history.assert_called_once_with(
             "private-user",
+            history["createdAt"],
             history["historyId"],
         )
 
     @patch(
         "ask_history_persistence."
-        "delete_ask_history"
+        "delete_ask_history_by_key"
+    )
+    def test_duplicate_rollback_is_safe_noop(
+        self,
+        delete_history,
+    ):
+        history = history_detail()
+        history[
+            "_createdInRequest"
+        ] = False
+
+        result = (
+            rollback_persisted_ask_history(
+                "private-user",
+                history,
+            )
+        )
+
+        self.assertTrue(result)
+
+        delete_history.assert_not_called()
+
+    @patch(
+        "ask_history_persistence."
+        "delete_ask_history_by_key"
     )
     def test_rollback_failure_is_suppressed(
         self,
@@ -500,13 +536,18 @@ class AskHistoryPersistenceTests(
             )
         )
 
+        history = history_detail()
+        history[
+            "_createdInRequest"
+        ] = True
+
         output = io.StringIO()
 
         with redirect_stdout(output):
             deleted = (
                 rollback_persisted_ask_history(
                     "private-user",
-                    history_detail(),
+                    history,
                 )
             )
 

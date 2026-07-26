@@ -18,6 +18,7 @@ from ask_history_contract import (
     ASK_HISTORY_ENTITY_TYPE,
     ASK_HISTORY_SK_PREFIX,
     AskHistoryContractError,
+    ask_history_sk,
     build_ask_history_item,
     build_public_ask_history_detail,
     build_public_ask_history_summary,
@@ -714,6 +715,89 @@ def get_ask_history(
         return None
 
     return _public_detail(item)
+
+
+def delete_ask_history_by_key(
+    user_id: Any,
+    created_at: Any,
+    history_id: Any,
+    *,
+    table_resource=None,
+) -> bool:
+    normalized_user_id = (
+        _normalize_user_id(
+            user_id
+        )
+    )
+
+    try:
+        normalized_history_id = (
+            normalize_ask_history_id(
+                history_id
+            )
+        )
+
+        key = {
+            "PK": user_pk(
+                normalized_user_id
+            ),
+            "SK": ask_history_sk(
+                created_at,
+                normalized_history_id,
+            ),
+        }
+
+    except AskHistoryContractError as error:
+        raise AskHistoryStoreError(
+            error.code,
+            error.message,
+            retryable=False,
+        ) from error
+
+    resource = (
+        table_resource
+        if table_resource is not None
+        else table
+    )
+
+    try:
+        result = resource.delete_item(
+            Key=key,
+            ConditionExpression=(
+                "#entityType = :entityType "
+                "AND "
+                "#historyId = :historyId"
+            ),
+            ExpressionAttributeNames={
+                "#entityType": "entityType",
+                "#historyId": "historyId",
+            },
+            ExpressionAttributeValues={
+                ":entityType": (
+                    ASK_HISTORY_ENTITY_TYPE
+                ),
+                ":historyId": (
+                    normalized_history_id
+                ),
+            },
+            ReturnValues="ALL_OLD",
+        )
+
+    except ClientError as error:
+        if (
+            _client_error_code(error)
+            == "ConditionalCheckFailedException"
+        ):
+            return False
+
+        _raise_client_error(
+            error,
+            action="deleted",
+        )
+
+    return bool(
+        result.get("Attributes")
+    )
 
 
 def delete_ask_history(

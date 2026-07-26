@@ -43,6 +43,7 @@ from ask_history_store import (  # noqa: E402
     create_ask_history,
     decode_ask_history_cursor,
     delete_ask_history,
+    delete_ask_history_by_key,
     encode_ask_history_cursor,
     get_ask_history,
     list_ask_history,
@@ -687,6 +688,62 @@ class AskHistoryStoreTests(
                 "PK": item["PK"],
                 "SK": item["SK"],
             },
+        )
+
+    def test_direct_delete_uses_base_key_without_query(
+        self,
+    ):
+        item = stored_item()
+
+        table = FakeTable(
+            delete_result={
+                "Attributes": item,
+            }
+        )
+
+        deleted = (
+            delete_ask_history_by_key(
+                "test-user",
+                item["createdAt"],
+                HISTORY_ID,
+                table_resource=table,
+            )
+        )
+
+        self.assertTrue(deleted)
+
+        self.assertEqual(
+            table.query_calls,
+            [],
+        )
+
+        self.assertEqual(
+            len(table.delete_calls),
+            1,
+        )
+
+        call = table.delete_calls[0]
+
+        self.assertEqual(
+            call["Key"],
+            {
+                "PK": item["PK"],
+                "SK": item["SK"],
+            },
+        )
+
+        self.assertEqual(
+            call[
+                "ExpressionAttributeValues"
+            ][":historyId"],
+            HISTORY_ID,
+        )
+
+        self.assertEqual(
+            call[
+                "ExpressionAttributeValues"
+            ][":entityType"],
+            "ASK_HISTORY",
         )
 
     def test_delete_missing_returns_false(

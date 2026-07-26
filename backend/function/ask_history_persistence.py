@@ -16,7 +16,7 @@ from ask_history_contract import (
 from ask_history_store import (
     AskHistoryStoreError,
     create_ask_history,
-    delete_ask_history,
+    delete_ask_history_by_key,
 )
 
 
@@ -200,6 +200,10 @@ def persist_ask_history(
                 )
             )
 
+            history[
+                "_createdInRequest"
+            ] = False
+
             _log_history_event(
                 (
                     "ask_jm8_history_"
@@ -230,6 +234,10 @@ def persist_ask_history(
             )
         ) from error
 
+    history[
+        "_createdInRequest"
+    ] = True
+
     _log_history_event(
         "ask_jm8_history_saved",
         status=(
@@ -245,6 +253,20 @@ def persist_ask_history(
     return history
 
 
+def _log_invalid_rollback_reference(
+) -> None:
+    _log_history_event(
+        (
+            "ask_jm8_history_"
+            "rollback_failed"
+        ),
+        failureCode=(
+            "InvalidHistoryReference"
+        ),
+        retryable=False,
+    )
+
+
 def rollback_persisted_ask_history(
     user_id: Any,
     history: Any,
@@ -253,44 +275,56 @@ def rollback_persisted_ask_history(
         history,
         Mapping,
     ):
+        _log_invalid_rollback_reference()
+        return False
+
+    created_in_request = history.get(
+        "_createdInRequest"
+    )
+
+    if created_in_request is False:
         _log_history_event(
             (
                 "ask_jm8_history_"
-                "rollback_failed"
+                "rollback_skipped"
             ),
-            failureCode=(
-                "InvalidHistoryReference"
-            ),
-            retryable=False,
+            reason="duplicateReused",
         )
 
+        return True
+
+    if created_in_request is not True:
+        _log_invalid_rollback_reference()
         return False
 
     history_id = history.get(
         "historyId"
     )
 
-    if not isinstance(
-        history_id,
-        str,
-    ):
-        _log_history_event(
-            (
-                "ask_jm8_history_"
-                "rollback_failed"
-            ),
-            failureCode=(
-                "InvalidHistoryReference"
-            ),
-            retryable=False,
-        )
+    created_at = history.get(
+        "createdAt"
+    )
 
+    if (
+        not isinstance(
+            history_id,
+            str,
+        )
+        or not isinstance(
+            created_at,
+            str,
+        )
+    ):
+        _log_invalid_rollback_reference()
         return False
 
     try:
-        deleted = delete_ask_history(
-            user_id,
-            history_id,
+        deleted = (
+            delete_ask_history_by_key(
+                user_id,
+                created_at,
+                history_id,
+            )
         )
 
     except AskHistoryStoreError as error:
