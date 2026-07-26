@@ -41,6 +41,12 @@ from ask_history_persistence import (
     persist_ask_history,
     rollback_persisted_ask_history,
 )
+from ask_history_api import (
+    AskHistoryApiError,
+    delete_ask_history_for_api,
+    get_ask_history_for_api,
+    list_ask_history_for_api,
+)
 from entry_analysis_usage import (
     EntryAnalysisUsageLimitError,
     EntryAnalysisUsageUnavailableError,
@@ -481,6 +487,146 @@ def lambda_handler(event, context):
                         history["createdAt"]
                     ),
                 },
+            })
+
+        if (
+            method == "GET"
+            and path
+            == "/insights/ask/history"
+        ):
+            query = (
+                event.get(
+                    "queryStringParameters"
+                )
+                or {}
+            )
+
+            try:
+                history_page = (
+                    list_ask_history_for_api(
+                        user_id,
+                        limit=query.get(
+                            "limit"
+                        ),
+                        cursor=query.get(
+                            "cursor"
+                        ),
+                    )
+                )
+
+            except AskHistoryApiError as exc:
+                return response(
+                    exc.status_code,
+                    exc.payload,
+                )
+
+            return response(200, {
+                "count": history_page[
+                    "count"
+                ],
+                "history": history_page[
+                    "items"
+                ],
+                "nextCursor": (
+                    history_page[
+                        "nextCursor"
+                    ]
+                ),
+            })
+
+        history_path_prefix = (
+            "/insights/ask/history/"
+        )
+
+        if (
+            method in {
+                "GET",
+                "DELETE",
+            }
+            and path.startswith(
+                history_path_prefix
+            )
+        ):
+            history_id = (
+                path.removeprefix(
+                    history_path_prefix
+                )
+                .strip("/")
+            )
+
+            if (
+                not history_id
+                or "/" in history_id
+            ):
+                return response(400, {
+                    "error": (
+                        "InvalidAskHistoryId"
+                    ),
+                    "message": (
+                        "The Ask JM8 history "
+                        "ID is invalid."
+                    ),
+                    "retryable": False,
+                })
+
+            if method == "GET":
+                try:
+                    history = (
+                        get_ask_history_for_api(
+                            user_id,
+                            history_id,
+                        )
+                    )
+
+                except AskHistoryApiError as exc:
+                    return response(
+                        exc.status_code,
+                        exc.payload,
+                    )
+
+                if history is None:
+                    return response(404, {
+                        "error": (
+                            "AskHistoryNotFound"
+                        ),
+                        "message": (
+                            "Ask JM8 history "
+                            "record not found."
+                        ),
+                    })
+
+                return response(200, {
+                    "history": history,
+                })
+
+            try:
+                deleted = (
+                    delete_ask_history_for_api(
+                        user_id,
+                        history_id,
+                    )
+                )
+
+            except AskHistoryApiError as exc:
+                return response(
+                    exc.status_code,
+                    exc.payload,
+                )
+
+            if not deleted:
+                return response(404, {
+                    "error": (
+                        "AskHistoryNotFound"
+                    ),
+                    "message": (
+                        "Ask JM8 history "
+                        "record not found."
+                    ),
+                })
+
+            return response(200, {
+                "deleted": True,
+                "historyId": history_id,
             })
 
         if (
