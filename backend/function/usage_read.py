@@ -11,8 +11,11 @@ from botocore.exceptions import (
     ClientError,
 )
 
+from entitlement_resolver import (
+    EntitlementUnavailableError,
+    resolve_user_plan,
+)
 from usage_policy import (
-    PLAN_FREE,
     UsagePolicyError,
     build_usage_snapshot,
 )
@@ -118,11 +121,29 @@ def get_usage_snapshot(
             )
         )
 
+        effective_plan = (
+            resolve_user_plan(
+                user_id,
+                now=now,
+                table_resource=(
+                    table_resource
+                ),
+            )
+        )
+
         snapshot = build_usage_snapshot(
-            plan=PLAN_FREE,
+            plan=effective_plan,
             usage_item=usage_item,
             now=now,
             environ=environ,
+        )
+
+    except EntitlementUnavailableError as error:
+        _raise_unavailable(
+            failure_code=(
+                "EntitlementUnavailable"
+            ),
+            retryable=error.retryable,
         )
 
     except UsageStoreError as error:

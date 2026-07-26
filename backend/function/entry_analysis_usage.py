@@ -8,7 +8,6 @@ from typing import (
 
 from usage_policy import (
     OPERATION_ENTRY_ANALYSIS,
-    PLAN_FREE,
     build_usage_limit_error,
 )
 from usage_store import (
@@ -114,7 +113,6 @@ def reserve_entry_analysis_usage(
         reservation = (
             reserve_monthly_usage(
                 user_id,
-                plan=PLAN_FREE,
                 operation=(
                     OPERATION_ENTRY_ANALYSIS
                 ),

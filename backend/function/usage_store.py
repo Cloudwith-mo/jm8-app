@@ -15,6 +15,10 @@ from botocore.exceptions import (
     ClientError,
 )
 
+from entitlement_resolver import (
+    EntitlementUnavailableError,
+    resolve_user_plan,
+)
 from storage import (
     TABLE_NAME,
     dynamodb_client,
@@ -295,8 +299,8 @@ def get_monthly_usage_item(
 def reserve_monthly_usage(
     user_id: Any,
     *,
-    plan: Any,
     operation: Any,
+    plan: Any = None,
     reservation_id: str | None = None,
     now: datetime | None = None,
     environ: (
@@ -308,15 +312,41 @@ def reserve_monthly_usage(
         normalize_user_id(user_id)
     )
 
-    normalized_plan = normalize_plan(
-        plan
-    )
-
     normalized_operation = (
         normalize_operation(operation)
     )
 
     current = normalize_now(now)
+
+    if plan is None:
+        try:
+            effective_plan = (
+                resolve_user_plan(
+                    normalized_user_id,
+                    now=current,
+                )
+            )
+
+        except (
+            EntitlementUnavailableError
+        ) as error:
+            raise UsageStoreError(
+                "EntitlementUnavailable",
+                (
+                    "The user entitlement "
+                    "could not be resolved."
+                ),
+                retryable=(
+                    error.retryable
+                ),
+            ) from error
+
+    else:
+        effective_plan = plan
+
+    normalized_plan = normalize_plan(
+        effective_plan
+    )
 
     period = monthly_usage_period(
         current

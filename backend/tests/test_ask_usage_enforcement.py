@@ -176,7 +176,7 @@ class AskUsageHelperTests(
     @patch(
         "ask_usage.reserve_monthly_usage"
     )
-    def test_reservation_uses_free_ask_plan(
+    def test_reservation_defers_plan_to_store(
         self,
         reserve_monthly,
     ):
@@ -196,7 +196,6 @@ class AskUsageHelperTests(
 
         reserve_monthly.assert_called_once_with(
             "private-user",
-            plan=PLAN_FREE,
             operation=(
                 OPERATION_ASK_JM8
             ),

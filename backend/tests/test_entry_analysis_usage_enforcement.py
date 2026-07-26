@@ -135,7 +135,7 @@ class EntryAnalysisUsageHelperTests(
         "entry_analysis_usage."
         "reserve_monthly_usage"
     )
-    def test_reservation_uses_free_entry_plan(
+    def test_reservation_defers_plan_to_store(
         self,
         reserve_monthly,
     ):
@@ -156,7 +156,6 @@ class EntryAnalysisUsageHelperTests(
 
         reserve_monthly.assert_called_once_with(
             "test-user",
-            plan=PLAN_FREE,
             operation=(
                 OPERATION_ENTRY_ANALYSIS
             ),
