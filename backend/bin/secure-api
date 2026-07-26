@@ -88,6 +88,7 @@ secure_route() {
 secure_route "POST /entries"
 secure_route "GET /entries"
 secure_route "GET /usage"
+secure_route "GET /account/entitlement"
 secure_route "GET /insights/overview"
 secure_route "GET /insights/themes"
 secure_route "GET /insights/moods"

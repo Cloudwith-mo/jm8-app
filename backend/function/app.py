@@ -58,6 +58,10 @@ from usage_read import (
     UsageReadUnavailableError,
     get_usage_snapshot,
 )
+from account_entitlement import (
+    AccountEntitlementUnavailableError,
+    get_account_entitlement,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -172,6 +176,32 @@ def lambda_handler(event, context):
 
             return response(200, {
                 "usage": usage_snapshot,
+            })
+
+        if (
+            method == "GET"
+            and path
+            == "/account/entitlement"
+        ):
+            try:
+                account_entitlement = (
+                    get_account_entitlement(
+                        user_id
+                    )
+                )
+
+            except (
+                AccountEntitlementUnavailableError
+            ) as exc:
+                return response(
+                    503,
+                    exc.payload,
+                )
+
+            return response(200, {
+                "entitlement": (
+                    account_entitlement
+                ),
             })
 
         if (
