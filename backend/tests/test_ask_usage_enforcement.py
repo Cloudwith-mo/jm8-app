@@ -549,11 +549,28 @@ class AskUsageApiTests(
                 },
             ),
             patch(
+                "app.persist_ask_history",
+                return_value={
+                    "historyVersion": "1.0",
+                    "historyId": (
+                        "askhist_usage123456789"
+                    ),
+                    "createdAt": (
+                        "2026-07-25"
+                        "T22:00:00+00:00"
+                    ),
+                },
+            ) as persist_history,
+            patch(
                 "app.complete_ask_usage"
             ) as complete_usage,
             patch(
                 "app.fail_ask_usage"
             ) as fail_usage,
+            patch(
+                "app."
+                "rollback_persisted_ask_history"
+            ) as rollback_history,
         ):
             result = lambda_handler(
                 api_event(),
@@ -565,12 +582,15 @@ class AskUsageApiTests(
             200,
         )
 
+        persist_history.assert_called_once()
+
         complete_usage.assert_called_once_with(
             "private-user",
             reserved,
         )
 
         fail_usage.assert_not_called()
+        rollback_history.assert_not_called()
 
     def test_answer_failure_releases_reserved_usage(
         self,
@@ -658,6 +678,19 @@ class AskUsageApiTests(
                 },
             ),
             patch(
+                "app.persist_ask_history",
+                return_value={
+                    "historyVersion": "1.0",
+                    "historyId": (
+                        "askhist_usagefailure123"
+                    ),
+                    "createdAt": (
+                        "2026-07-25"
+                        "T22:00:00+00:00"
+                    ),
+                },
+            ) as persist_history,
+            patch(
                 "app.complete_ask_usage",
                 side_effect=(
                     AskUsageUnavailableError(
@@ -665,6 +698,10 @@ class AskUsageApiTests(
                     )
                 ),
             ),
+            patch(
+                "app."
+                "rollback_persisted_ask_history"
+            ) as rollback_history,
         ):
             result = lambda_handler(
                 api_event(),
@@ -689,6 +726,10 @@ class AskUsageApiTests(
             "answer",
             body,
         )
+
+        persist_history.assert_called_once()
+
+        rollback_history.assert_called_once()
 
     def test_deploy_includes_usage_limits(
         self,

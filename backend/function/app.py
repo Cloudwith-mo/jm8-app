@@ -36,6 +36,11 @@ from ask_usage import (
     fail_ask_usage,
     reserve_ask_usage,
 )
+from ask_history_persistence import (
+    AskHistoryPersistenceUnavailableError,
+    persist_ask_history,
+    rollback_persisted_ask_history,
+)
 from entry_analysis_usage import (
     EntryAnalysisUsageLimitError,
     EntryAnalysisUsageUnavailableError,
@@ -424,12 +429,38 @@ def lambda_handler(event, context):
                 })
 
             try:
+                history = (
+                    persist_ask_history(
+                        user_id,
+                        answer,
+                    )
+                )
+
+            except (
+                AskHistoryPersistenceUnavailableError
+            ) as exc:
+                fail_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
+                return response(
+                    exc.status_code,
+                    exc.payload,
+                )
+
+            try:
                 complete_ask_usage(
                     user_id,
                     usage_reservation,
                 )
 
             except AskUsageUnavailableError as exc:
+                rollback_persisted_ask_history(
+                    user_id,
+                    history,
+                )
+
                 return response(
                     503,
                     exc.payload,
@@ -437,6 +468,19 @@ def lambda_handler(event, context):
 
             return response(200, {
                 "answer": answer,
+                "history": {
+                    "historyVersion": (
+                        history[
+                            "historyVersion"
+                        ]
+                    ),
+                    "historyId": (
+                        history["historyId"]
+                    ),
+                    "createdAt": (
+                        history["createdAt"]
+                    ),
+                },
             })
 
         if (

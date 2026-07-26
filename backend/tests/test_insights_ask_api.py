@@ -129,6 +129,9 @@ class AskJm8ApiTests(
         "app.complete_ask_usage"
     )
     @patch(
+        "app.persist_ask_history"
+    )
+    @patch(
         "app.reserve_ask_usage"
     )
     @patch(
@@ -143,6 +146,7 @@ class AskJm8ApiTests(
         list_entries,
         answer_history,
         reserve_usage,
+        persist_history,
         complete_usage,
     ):
         list_entries.return_value = [
@@ -151,6 +155,17 @@ class AskJm8ApiTests(
 
         answer_history.return_value = {
             "status": "ANSWERED",
+        }
+
+        persist_history.return_value = {
+            "historyVersion": "1.0",
+            "historyId": (
+                "askhist_api123456789012"
+            ),
+            "createdAt": (
+                "2026-07-25"
+                "T22:00:00+00:00"
+            ),
         }
 
         response = lambda_handler(
@@ -242,7 +257,17 @@ class AskJm8ApiTests(
 
         reserve_usage.assert_called_once()
 
+        persist_history.assert_called_once_with(
+            "private-user",
+            answer_history.return_value,
+        )
+
         complete_usage.assert_called_once()
+
+        self.assertEqual(
+            body["history"]["historyId"],
+            "askhist_api123456789012",
+        )
 
     @patch(
         "app."
@@ -644,6 +669,9 @@ class AskJm8ApiTests(
         )
 
     @patch(
+        "app.persist_ask_history"
+    )
+    @patch(
         "insights_ask_answer."
         "create_bedrock_client"
     )
@@ -655,8 +683,20 @@ class AskJm8ApiTests(
         self,
         list_entries,
         create_client,
+        persist_history,
     ):
         list_entries.return_value = []
+
+        persist_history.return_value = {
+            "historyVersion": "1.0",
+            "historyId": (
+                "askhist_empty1234567890"
+            ),
+            "createdAt": (
+                "2026-07-25"
+                "T22:00:00+00:00"
+            ),
+        }
 
         response = lambda_handler(
             api_event({
