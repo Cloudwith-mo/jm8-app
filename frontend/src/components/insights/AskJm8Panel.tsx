@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useMemo,
   useState,
 } from "react";
@@ -21,16 +22,21 @@ import {
   ShieldCheck,
   Sparkles,
   Target,
+  Trash2,
   TrendingUp,
   X,
 } from "lucide-react";
 import {
   ApiRequestError,
   askJm8,
+  deleteAskJm8History,
+  getAskJm8History,
+  listAskJm8History,
 } from "../../api/client";
 import type {
   AskJm8Answer,
   AskJm8Evidence,
+  AskJm8HistorySummary,
 } from "../../types/askJm8";
 import type {
   UsageOperation,
@@ -49,12 +55,6 @@ type AskJm8PanelProps = {
   ) => void;
   usage?: UsageOperation;
   onUsageChanged: () => Promise<void>;
-};
-
-
-type AskHistoryItem = {
-  id: string;
-  answer: AskJm8Answer;
 };
 
 
@@ -279,6 +279,42 @@ function getErrorMessage(
 }
 
 
+function getHistoryErrorMessage(
+  error: unknown
+) {
+  if (
+    error instanceof ApiRequestError
+  ) {
+    if (error.status === 400) {
+      return error.message;
+    }
+
+    if (error.status === 404) {
+      return (
+        "This saved answer is no "
+        + "longer available."
+      );
+    }
+
+    if (error.status === 503) {
+      return (
+        "Saved Ask JM8 history is "
+        + "temporarily unavailable."
+      );
+    }
+
+    return error.message;
+  }
+
+  return error instanceof Error
+    ? error.message
+    : (
+        "Saved Ask JM8 history could "
+        + "not be loaded."
+      );
+}
+
+
 function SourceIcon({
   sourceType,
 }: {
@@ -352,8 +388,39 @@ export default function AskJm8Panel({
     history,
     setHistory,
   ] = useState<
-    AskHistoryItem[]
+    AskJm8HistorySummary[]
   >([]);
+
+  const [
+    isHistoryLoading,
+    setIsHistoryLoading,
+  ] = useState(false);
+
+  const [
+    historyError,
+    setHistoryError,
+  ] = useState("");
+
+  const [
+    activeHistoryId,
+    setActiveHistoryId,
+  ] = useState<string | null>(
+    null
+  );
+
+  const [
+    loadingHistoryId,
+    setLoadingHistoryId,
+  ] = useState<string | null>(
+    null
+  );
+
+  const [
+    deletingHistoryId,
+    setDeletingHistoryId,
+  ] = useState<string | null>(
+    null
+  );
 
   const today = useMemo(
     () =>
@@ -373,6 +440,83 @@ export default function AskJm8Panel({
     normalizedQuestion.length >= 3
     && !isLoading
     && !isUsageExhausted;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadInitialHistory() {
+      setIsHistoryLoading(true);
+      setHistoryError("");
+
+      try {
+        const result =
+          await listAskJm8History({
+            limit: 20,
+          });
+
+        if (!cancelled) {
+          setHistory(result.history);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setHistoryError(
+            getHistoryErrorMessage(
+              error
+            )
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsHistoryLoading(false);
+        }
+      }
+    }
+
+    void loadInitialHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+
+  async function refreshHistory({
+    notifyOnError = false,
+  }: {
+    notifyOnError?: boolean;
+  } = {}) {
+    setIsHistoryLoading(true);
+    setHistoryError("");
+
+    try {
+      const result =
+        await listAskJm8History({
+          limit: 20,
+        });
+
+      setHistory(result.history);
+
+      return true;
+    } catch (error) {
+      const message =
+        getHistoryErrorMessage(error);
+
+      setHistoryError(message);
+
+      if (notifyOnError) {
+        onNotify(
+          "error",
+          "History unavailable",
+          message
+        );
+      }
+
+      return false;
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }
+
 
   async function submitQuestion(
     questionOverride?: string
@@ -433,23 +577,12 @@ export default function AskJm8Panel({
       });
 
       setAnswer(result.answer);
+      setActiveHistoryId(
+        result.history.historyId
+      );
 
       await onUsageChanged();
-
-      setHistory(
-        (currentHistory) => [
-          {
-            id:
-              `${result.answer.generatedAt}-${Date.now()}`,
-            answer: result.answer,
-          },
-          ...currentHistory.filter(
-            (item) =>
-              item.answer.question
-              !== result.answer.question
-          ),
-        ].slice(0, 8)
-      );
+      await refreshHistory();
 
       onNotify(
         "success",
@@ -490,20 +623,130 @@ export default function AskJm8Panel({
     void submitQuestion(value);
   }
 
-  function selectHistoryItem(
-    item: AskHistoryItem
+  async function selectHistoryItem(
+    item: AskJm8HistorySummary
   ) {
-    setAnswer(item.answer);
-    setQuestion(
-      item.answer.question
+    setLoadingHistoryId(
+      item.historyId
     );
-    setErrorMessage("");
-    setShowHistory(false);
+    setHistoryError("");
+
+    try {
+      const result =
+        await getAskJm8History(
+          item.historyId
+        );
+
+      const savedAnswer =
+        result.history.answer;
+
+      setAnswer(savedAnswer);
+      setQuestion(
+        savedAnswer.question
+      );
+      setStartDate(
+        savedAnswer.scope.startDate
+        ?? ""
+      );
+      setEndDate(
+        savedAnswer.scope.endDate
+        ?? ""
+      );
+      setActiveHistoryId(
+        item.historyId
+      );
+      setErrorMessage("");
+      setShowHistory(false);
+    } catch (error) {
+      const message =
+        getHistoryErrorMessage(error);
+
+      setHistoryError(message);
+
+      onNotify(
+        "error",
+        "Saved answer unavailable",
+        message
+      );
+    } finally {
+      setLoadingHistoryId(null);
+    }
   }
+
+
+  async function deleteHistoryItem(
+    item: AskJm8HistorySummary
+  ) {
+    const confirmed = window.confirm(
+      (
+        "Delete this saved Ask JM8 "
+        + "answer? This cannot be undone."
+      )
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingHistoryId(
+      item.historyId
+    );
+    setHistoryError("");
+
+    try {
+      await deleteAskJm8History(
+        item.historyId
+      );
+
+      setHistory(
+        (currentHistory) =>
+          currentHistory.filter(
+            (historyItem) =>
+              historyItem.historyId
+              !== item.historyId
+          )
+      );
+
+      if (
+        activeHistoryId
+        === item.historyId
+      ) {
+        setAnswer(null);
+        setQuestion("");
+        setStartDate("");
+        setEndDate("");
+        setActiveHistoryId(null);
+      }
+
+      onNotify(
+        "success",
+        "Saved answer deleted",
+        (
+          "The Ask JM8 answer was "
+          + "removed from your history."
+        )
+      );
+    } catch (error) {
+      const message =
+        getHistoryErrorMessage(error);
+
+      setHistoryError(message);
+
+      onNotify(
+        "error",
+        "Delete failed",
+        message
+      );
+    } finally {
+      setDeletingHistoryId(null);
+    }
+  }
+
 
   function startNewQuestion() {
     setQuestion("");
     setAnswer(null);
+    setActiveHistoryId(null);
     setErrorMessage("");
     setShowHistory(false);
   }
@@ -716,60 +959,202 @@ export default function AskJm8Panel({
         <section className="ask-jm8-history-panel">
           <header>
             <div>
-              <p>Current session</p>
+              <p>Private history</p>
               <h2>
-                Recent questions
+                Saved questions
               </h2>
             </div>
 
             <span>
-              {history.length} saved
+              {isHistoryLoading
+                ? "Loading..."
+                : (
+                    `${history.length} saved`
+                  )}
             </span>
           </header>
 
-          {history.length === 0 ? (
-            <EmptyListMessage>
-              Questions asked during this
-              browser session will appear
-              here.
-            </EmptyListMessage>
-          ) : (
-            <div className="ask-jm8-history-list">
-              {history.map(
-                (item) => (
-                  <button
-                    type="button"
-                    key={item.id}
-                    onClick={() =>
-                      selectHistoryItem(
-                        item
-                      )
-                    }
-                  >
-                    <MessageCircleQuestion
-                      size={18}
-                    />
+          {historyError && (
+            <div
+              className="ask-jm8-history-error"
+              role="alert"
+            >
+              <AlertCircle size={17} />
 
-                    <span>
-                      <strong>
-                        {
-                          item.answer
-                            .question
-                        }
-                      </strong>
+              <span>
+                {historyError}
+              </span>
 
-                      <small>
-                        {formatGeneratedAt(
-                          item.answer
-                            .generatedAt
-                        )}
-                      </small>
-                    </span>
-                  </button>
-                )
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  void refreshHistory({
+                    notifyOnError: true,
+                  });
+                }}
+                disabled={
+                  isHistoryLoading
+                }
+              >
+                <RefreshCw
+                  size={15}
+                  className={
+                    isHistoryLoading
+                      ? "ask-jm8-spin"
+                      : undefined
+                  }
+                />
+                Retry
+              </button>
             </div>
           )}
+
+          {isHistoryLoading
+            && history.length === 0 ? (
+              <div
+                className={
+                  "ask-jm8-history-loading"
+                }
+                aria-live="polite"
+              >
+                <LoaderCircle
+                  size={19}
+                  className="ask-jm8-spin"
+                />
+
+                <span>
+                  Loading saved questions…
+                </span>
+              </div>
+            ) : history.length === 0 ? (
+              <EmptyListMessage>
+                Saved Ask JM8 answers will
+                appear here across sessions
+                and devices.
+              </EmptyListMessage>
+            ) : (
+              <div className="ask-jm8-history-list">
+                {history.map(
+                  (item) => {
+                    const isOpening =
+                      loadingHistoryId
+                      === item.historyId;
+
+                    const isDeleting =
+                      deletingHistoryId
+                      === item.historyId;
+
+                    return (
+                      <article
+                        className={
+                          activeHistoryId
+                          === item.historyId
+                            ? (
+                                "ask-jm8-"
+                                + "history-row "
+                                + "active"
+                              )
+                            : (
+                                "ask-jm8-"
+                                + "history-row"
+                              )
+                        }
+                        key={item.historyId}
+                      >
+                        <button
+                          type="button"
+                          className={
+                            "ask-jm8-"
+                            + "history-open"
+                          }
+                          onClick={() => {
+                            void selectHistoryItem(
+                              item
+                            );
+                          }}
+                          disabled={
+                            isOpening
+                            || isDeleting
+                          }
+                        >
+                          {isOpening ? (
+                            <LoaderCircle
+                              size={18}
+                              className={
+                                "ask-jm8-spin"
+                              }
+                            />
+                          ) : (
+                            <MessageCircleQuestion
+                              size={18}
+                            />
+                          )}
+
+                          <span>
+                            <strong>
+                              {item.question}
+                            </strong>
+
+                            <small>
+                              {formatGeneratedAt(
+                                item.createdAt
+                              )}
+                              {" · "}
+                              {item.status
+                                === "ANSWERED"
+                                  ? (
+                                      "Grounded "
+                                      + "answer"
+                                    )
+                                  : (
+                                      "Limited "
+                                      + "context"
+                                    )}
+                            </small>
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          className={
+                            "ask-jm8-"
+                            + "history-delete"
+                          }
+                          onClick={() => {
+                            void deleteHistoryItem(
+                              item
+                            );
+                          }}
+                          disabled={
+                            isOpening
+                            || isDeleting
+                          }
+                          aria-label={
+                            (
+                              "Delete saved "
+                              + `question: ${
+                                item.question
+                              }`
+                            )
+                          }
+                        >
+                          {isDeleting ? (
+                            <LoaderCircle
+                              size={16}
+                              className={
+                                "ask-jm8-spin"
+                              }
+                            />
+                          ) : (
+                            <Trash2 size={16} />
+                          )}
+                        </button>
+                      </article>
+                    );
+                  }
+                )}
+              </div>
+            )}
         </section>
       )}
 

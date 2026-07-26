@@ -82,6 +82,55 @@ export type AskJm8Answer = {
 };
 
 
+export type AskJm8HistoryReference = {
+  historyVersion: string;
+  historyId: string;
+  createdAt: string;
+};
+
+
+export type AskJm8HistorySummary = {
+  historyVersion: string;
+  historyId: string;
+  createdAt: string;
+  answerVersion: string;
+  question: string;
+  status: AskJm8AnswerStatus;
+  scope: AskJm8Scope;
+  headline: string;
+  summary: string;
+  evidenceCount: number;
+  takeawayCount: number;
+};
+
+
+export type AskJm8HistoryDetail = {
+  historyVersion: string;
+  historyId: string;
+  createdAt: string;
+  answer: AskJm8Answer;
+};
+
+
 export type AskJm8Response = {
   answer: AskJm8Answer;
+  history: AskJm8HistoryReference;
+};
+
+
+export type AskJm8HistoryListResponse = {
+  count: number;
+  history: AskJm8HistorySummary[];
+  nextCursor: string | null;
+};
+
+
+export type AskJm8HistoryDetailResponse = {
+  history: AskJm8HistoryDetail;
+};
+
+
+export type AskJm8HistoryDeleteResponse = {
+  deleted: boolean;
+  historyId: string;
 };

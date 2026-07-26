@@ -13,6 +13,9 @@ import type {
   InsightsReportResponse,
 } from "../types/reports";
 import type {
+  AskJm8HistoryDeleteResponse,
+  AskJm8HistoryDetailResponse,
+  AskJm8HistoryListResponse,
   AskJm8Request,
   AskJm8Response,
 } from "../types/askJm8";
@@ -375,6 +378,63 @@ export async function askJm8(
       body: JSON.stringify(
         payload
       ),
+    }
+  );
+}
+
+
+export async function listAskJm8History({
+  limit = 20,
+  cursor,
+}: {
+  limit?: number;
+  cursor?: string | null;
+} = {}): Promise<AskJm8HistoryListResponse> {
+  const query = new URLSearchParams({
+    limit: String(limit),
+  });
+
+  const normalizedCursor =
+    cursor?.trim();
+
+  if (normalizedCursor) {
+    query.set(
+      "cursor",
+      normalizedCursor
+    );
+  }
+
+  return apiRequest(
+    (
+      "/insights/ask/history?"
+      + query.toString()
+    )
+  );
+}
+
+
+export async function getAskJm8History(
+  historyId: string
+): Promise<AskJm8HistoryDetailResponse> {
+  return apiRequest(
+    (
+      "/insights/ask/history/"
+      + encodeURIComponent(historyId)
+    )
+  );
+}
+
+
+export async function deleteAskJm8History(
+  historyId: string
+): Promise<AskJm8HistoryDeleteResponse> {
+  return apiRequest(
+    (
+      "/insights/ask/history/"
+      + encodeURIComponent(historyId)
+    ),
+    {
+      method: "DELETE",
     }
   );
 }
