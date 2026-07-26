@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -315,6 +316,55 @@ function getHistoryErrorMessage(
 }
 
 
+function mergeHistoryPages(
+  currentHistory:
+    AskJm8HistorySummary[],
+  incomingHistory:
+    AskJm8HistorySummary[]
+) {
+  const merged = [
+    ...currentHistory,
+  ];
+
+  const seenHistoryIds = new Set(
+    currentHistory.map(
+      (item) => item.historyId
+    )
+  );
+
+  for (
+    const item
+    of incomingHistory
+  ) {
+    if (
+      seenHistoryIds.has(
+        item.historyId
+      )
+    ) {
+      continue;
+    }
+
+    seenHistoryIds.add(
+      item.historyId
+    );
+
+    merged.push(item);
+  }
+
+  return merged;
+}
+
+
+function isMissingHistoryError(
+  error: unknown
+) {
+  return (
+    error instanceof ApiRequestError
+    && error.status === 404
+  );
+}
+
+
 function SourceIcon({
   sourceType,
 }: {
@@ -422,6 +472,31 @@ export default function AskJm8Panel({
     null
   );
 
+  const [
+    nextHistoryCursor,
+    setNextHistoryCursor,
+  ] = useState<string | null>(
+    null
+  );
+
+  const [
+    isHistoryPageLoading,
+    setIsHistoryPageLoading,
+  ] = useState(false);
+
+  const [
+    historyPageError,
+    setHistoryPageError,
+  ] = useState("");
+
+  const historyPageRequestRef =
+    useRef<string | null>(null);
+
+  const loadedHistoryCursorsRef =
+    useRef<Set<string>>(
+      new Set()
+    );
+
   const today = useMemo(
     () =>
       new Date()
@@ -456,6 +531,16 @@ export default function AskJm8Panel({
 
         if (!cancelled) {
           setHistory(result.history);
+
+          setNextHistoryCursor(
+            result.nextCursor
+          );
+
+          setHistoryPageError("");
+
+          loadedHistoryCursorsRef
+            .current
+            .clear();
         }
       } catch (error) {
         if (!cancelled) {
@@ -496,6 +581,16 @@ export default function AskJm8Panel({
 
       setHistory(result.history);
 
+      setNextHistoryCursor(
+        result.nextCursor
+      );
+
+      setHistoryPageError("");
+
+      loadedHistoryCursorsRef
+        .current
+        .clear();
+
       return true;
     } catch (error) {
       const message =
@@ -515,6 +610,122 @@ export default function AskJm8Panel({
     } finally {
       setIsHistoryLoading(false);
     }
+  }
+
+
+  async function loadMoreHistory() {
+    const cursor =
+      nextHistoryCursor;
+
+    if (
+      !cursor
+      || isHistoryPageLoading
+      || historyPageRequestRef
+        .current === cursor
+    ) {
+      return;
+    }
+
+    if (
+      loadedHistoryCursorsRef
+        .current
+        .has(cursor)
+    ) {
+      setNextHistoryCursor(null);
+
+      setHistoryPageError(
+        (
+          "JM8 stopped loading older "
+          + "history because this page "
+          + "was already received."
+        )
+      );
+
+      return;
+    }
+
+    historyPageRequestRef.current =
+      cursor;
+
+    setIsHistoryPageLoading(true);
+    setHistoryPageError("");
+
+    try {
+      const result =
+        await listAskJm8History({
+          limit: 20,
+          cursor,
+        });
+
+      loadedHistoryCursorsRef
+        .current
+        .add(cursor);
+
+      setHistory(
+        (currentHistory) =>
+          mergeHistoryPages(
+            currentHistory,
+            result.history
+          )
+      );
+
+      if (
+        result.nextCursor
+        === cursor
+      ) {
+        setNextHistoryCursor(null);
+
+        setHistoryPageError(
+          (
+            "JM8 stopped loading older "
+            + "history because pagination "
+            + "did not advance."
+          )
+        );
+      } else {
+        setNextHistoryCursor(
+          result.nextCursor
+        );
+      }
+    } catch (error) {
+      setHistoryPageError(
+        getHistoryErrorMessage(
+          error
+        )
+      );
+    } finally {
+      historyPageRequestRef.current =
+        null;
+
+      setIsHistoryPageLoading(false);
+    }
+  }
+
+
+  function removeHistoryItemLocally(
+    historyId: string
+  ) {
+    setHistory(
+      (currentHistory) =>
+        currentHistory.filter(
+          (item) =>
+            item.historyId
+            !== historyId
+        )
+    );
+
+    if (
+      activeHistoryId
+      !== historyId
+    ) {
+      return;
+    }
+
+    setAnswer(null);
+    setQuestion("");
+    setStartDate("");
+    setEndDate("");
+    setActiveHistoryId(null);
   }
 
 
@@ -658,6 +869,28 @@ export default function AskJm8Panel({
       setErrorMessage("");
       setShowHistory(false);
     } catch (error) {
+      if (
+        isMissingHistoryError(error)
+      ) {
+        removeHistoryItemLocally(
+          item.historyId
+        );
+
+        setHistoryError("");
+
+        onNotify(
+          "info",
+          "Saved answer removed",
+          (
+            "This answer was deleted "
+            + "from another session or "
+            + "device."
+          )
+        );
+
+        return;
+      }
+
       const message =
         getHistoryErrorMessage(error);
 
@@ -698,25 +931,9 @@ export default function AskJm8Panel({
         item.historyId
       );
 
-      setHistory(
-        (currentHistory) =>
-          currentHistory.filter(
-            (historyItem) =>
-              historyItem.historyId
-              !== item.historyId
-          )
+      removeHistoryItemLocally(
+        item.historyId
       );
-
-      if (
-        activeHistoryId
-        === item.historyId
-      ) {
-        setAnswer(null);
-        setQuestion("");
-        setStartDate("");
-        setEndDate("");
-        setActiveHistoryId(null);
-      }
 
       onNotify(
         "success",
@@ -727,6 +944,28 @@ export default function AskJm8Panel({
         )
       );
     } catch (error) {
+      if (
+        isMissingHistoryError(error)
+      ) {
+        removeHistoryItemLocally(
+          item.historyId
+        );
+
+        setHistoryError("");
+
+        onNotify(
+          "info",
+          "Already removed",
+          (
+            "This saved answer had "
+            + "already been deleted from "
+            + "another session or device."
+          )
+        );
+
+        return;
+      }
+
       const message =
         getHistoryErrorMessage(error);
 
@@ -969,7 +1208,7 @@ export default function AskJm8Panel({
               {isHistoryLoading
                 ? "Loading..."
                 : (
-                    `${history.length} saved`
+                    `${history.length} loaded`
                   )}
             </span>
           </header>
@@ -1155,6 +1394,92 @@ export default function AskJm8Panel({
                 )}
               </div>
             )}
+
+          {history.length > 0 && (
+            <div
+              className={
+                "ask-jm8-history-"
+                + "pagination"
+              }
+            >
+              {historyPageError ? (
+                <div
+                  className={
+                    "ask-jm8-history-"
+                    + "page-error"
+                  }
+                  role="alert"
+                >
+                  <AlertCircle
+                    size={16}
+                  />
+
+                  <span>
+                    {historyPageError}
+                  </span>
+
+                  {nextHistoryCursor && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void loadMoreHistory();
+                      }}
+                      disabled={
+                        isHistoryPageLoading
+                      }
+                    >
+                      <RefreshCw
+                        size={15}
+                        className={
+                          isHistoryPageLoading
+                            ? "ask-jm8-spin"
+                            : undefined
+                        }
+                      />
+                      Retry
+                    </button>
+                  )}
+                </div>
+              ) : nextHistoryCursor ? (
+                <button
+                  type="button"
+                  className={
+                    "ask-jm8-history-"
+                    + "load-more"
+                  }
+                  onClick={() => {
+                    void loadMoreHistory();
+                  }}
+                  disabled={
+                    isHistoryPageLoading
+                  }
+                >
+                  {isHistoryPageLoading ? (
+                    <LoaderCircle
+                      size={17}
+                      className={
+                        "ask-jm8-spin"
+                      }
+                    />
+                  ) : (
+                    <History size={17} />
+                  )}
+
+                  {isHistoryPageLoading
+                    ? "Loading older questions…"
+                    : "Load older questions"}
+                </button>
+              ) : (
+                <span
+                  className={
+                    "ask-jm8-history-end"
+                  }
+                >
+                  All saved questions loaded
+                </span>
+              )}
+            </div>
+          )}
         </section>
       )}
 
