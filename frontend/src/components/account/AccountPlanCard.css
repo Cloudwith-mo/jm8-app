@@ -1,0 +1,326 @@
+.account-plan-card {
+  display: grid;
+  gap: 16px;
+  margin: 0 0 18px;
+  padding: 18px;
+  border: 1px solid rgba(23, 37, 31, 0.12);
+  border-radius: 20px;
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.99),
+      rgba(244, 248, 245, 0.98)
+    );
+  box-shadow:
+    0 14px 36px rgba(23, 37, 31, 0.07);
+}
+
+.account-plan-pro {
+  border-color: rgba(54, 84, 72, 0.25);
+  background:
+    linear-gradient(
+      145deg,
+      #ffffff,
+      #edf5f0
+    );
+}
+
+.account-plan-loading,
+.account-plan-error {
+  grid-template-columns:
+    auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.account-plan-loading div,
+.account-plan-error div {
+  display: grid;
+  gap: 3px;
+}
+
+.account-plan-loading span,
+.account-plan-error span {
+  color: #68736d;
+  font-size: 0.86rem;
+}
+
+.account-plan-error {
+  border-color: rgba(161, 70, 56, 0.24);
+  background: #fff9f7;
+}
+
+.account-plan-error button,
+.account-plan-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(23, 37, 31, 0.14);
+  border-radius: 999px;
+  background: #ffffff;
+  color: #1c2b24;
+  cursor: pointer;
+}
+
+.account-plan-error button {
+  padding: 8px 12px;
+}
+
+.account-plan-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.account-plan-heading,
+.account-plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-plan-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 13px;
+  background: #edf3ef;
+  color: #365448;
+}
+
+.account-plan-heading p {
+  margin: 0 0 4px;
+  color: #68756e;
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.account-plan-heading h2 {
+  margin: 0;
+  color: #17251f;
+  font-size: 1.08rem;
+}
+
+.account-plan-actions {
+  justify-content: flex-end;
+}
+
+.account-plan-badge {
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.account-plan-badge.free {
+  background: #edf1ee;
+  color: #46554e;
+}
+
+.account-plan-badge.pro {
+  background: #1c2b24;
+  color: #ffffff;
+}
+
+.account-plan-actions button {
+  width: 31px;
+  height: 31px;
+}
+
+.account-plan-actions button:disabled,
+.account-plan-error button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.account-plan-inline-error {
+  margin: 0;
+  color: #994d42;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.account-plan-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.account-plan-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.account-plan-summary strong {
+  color: #17251f;
+  font-size: 0.91rem;
+}
+
+.account-plan-summary span {
+  color: #6e7a74;
+  font-size: 0.78rem;
+}
+
+.account-plan-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.account-plan-limits {
+  display: grid;
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-plan-limits article {
+  display: grid;
+  gap: 3px;
+  padding: 14px;
+  border: 1px solid rgba(23, 37, 31, 0.1);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.account-plan-limits span {
+  color: #6d7973;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.account-plan-limits strong {
+  color: #17251f;
+  font-size: 1.45rem;
+}
+
+.account-plan-limits small {
+  color: #7a857f;
+  font-size: 0.7rem;
+}
+
+.account-upgrade-panel,
+.account-pro-confirmation {
+  display: grid;
+  grid-template-columns:
+    auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border-radius: 15px;
+}
+
+.account-upgrade-panel {
+  border: 1px solid rgba(82, 96, 88, 0.12);
+  background: #f7f9f7;
+}
+
+.account-upgrade-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: #e9efeb;
+  color: #456b5a;
+}
+
+.account-upgrade-panel div {
+  display: grid;
+  gap: 3px;
+}
+
+.account-upgrade-panel strong {
+  color: #17251f;
+  font-size: 0.85rem;
+}
+
+.account-upgrade-panel p {
+  margin: 0;
+  color: #748079;
+  font-size: 0.75rem;
+}
+
+.account-upgrade-panel button {
+  padding: 8px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: #dfe5e1;
+  color: #758079;
+  font-size: 0.72rem;
+  font-weight: 750;
+  cursor: not-allowed;
+}
+
+.account-pro-confirmation {
+  grid-template-columns:
+    auto minmax(0, 1fr);
+  background: #eaf3ed;
+  color: #365448;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.account-plan-spin {
+  animation:
+    account-plan-spin
+    0.8s linear infinite;
+}
+
+@keyframes account-plan-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 760px) {
+  .account-plan-card {
+    padding: 15px;
+    border-radius: 17px;
+  }
+
+  .account-plan-header,
+  .account-plan-summary {
+    display: grid;
+  }
+
+  .account-plan-actions {
+    justify-content: flex-start;
+  }
+
+  .account-plan-limits {
+    grid-template-columns: 1fr;
+  }
+
+  .account-upgrade-panel {
+    grid-template-columns:
+      auto minmax(0, 1fr);
+  }
+
+  .account-upgrade-panel button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .account-plan-loading,
+  .account-plan-error {
+    grid-template-columns:
+      auto minmax(0, 1fr);
+  }
+
+  .account-plan-error button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}

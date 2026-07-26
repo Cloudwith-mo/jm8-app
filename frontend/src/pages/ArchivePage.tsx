@@ -16,10 +16,14 @@ import ReportsPanel from "../components/insights/ReportsPanel";
 import AskJm8Panel from "../components/insights/AskJm8Panel";
 import AuthStatus from "../components/layout/AuthStatus";
 import UsageMeter from "../components/usage/UsageMeter";
+import AccountPlanCard from "../components/account/AccountPlanCard";
 import type { JournalEntry } from "../types/journal";
 import type {
   UsageSnapshot,
 } from "../types/usage";
+import type {
+  AccountEntitlement,
+} from "../types/accountEntitlement";
 import {
   getCurrentUser,
   handleCognitoCallback,
@@ -33,6 +37,7 @@ import {
   createEntry,
   createUploadUrl,
   deleteEntry,
+  getAccountEntitlement,
   getEntry,
   getUsage,
   listEntries,
@@ -120,6 +125,20 @@ export default function ArchivePage() {
   const [
     usageError,
     setUsageError,
+  ] = useState("");
+  const [
+    accountEntitlement,
+    setAccountEntitlement,
+  ] = useState<AccountEntitlement | null>(
+    null
+  );
+  const [
+    isEntitlementLoading,
+    setIsEntitlementLoading,
+  ] = useState(false);
+  const [
+    entitlementError,
+    setEntitlementError,
   ] = useState("");
 
   const filteredEntries = useMemo(() => {
@@ -247,6 +266,48 @@ export default function ArchivePage() {
       }
     } finally {
       setIsUsageLoading(false);
+    }
+  }
+
+  async function refreshEntitlement({
+    silent = false,
+  }: {
+    silent?: boolean;
+  } = {}) {
+    setIsEntitlementLoading(true);
+
+    if (!silent) {
+      setEntitlementError("");
+    }
+
+    try {
+      const result =
+        await getAccountEntitlement();
+
+      setAccountEntitlement(
+        result.entitlement
+      );
+      setEntitlementError("");
+    } catch (error) {
+      const message = getErrorMessage(
+        error,
+        (
+          "Account plan details "
+          + "could not be loaded."
+        )
+      );
+
+      setEntitlementError(message);
+
+      if (!silent) {
+        showToast(
+          "error",
+          "Plan unavailable",
+          message
+        );
+      }
+    } finally {
+      setIsEntitlementLoading(false);
     }
   }
 
@@ -547,6 +608,8 @@ export default function ArchivePage() {
         setSelectedEntry(null);
         setUsage(null);
         setUsageError("");
+        setAccountEntitlement(null);
+        setEntitlementError("");
         updateStatus("Sign in to load your private archive.", "info", "Login required");
         return;
       }
@@ -555,6 +618,9 @@ export default function ArchivePage() {
         await Promise.all([
           refreshEntries(),
           refreshUsage({
+            silent: true,
+          }),
+          refreshEntitlement({
             silent: true,
           }),
         ]);
@@ -655,6 +721,23 @@ export default function ArchivePage() {
           onLogin={loginWithCognito}
           onLogout={logoutFromCognito}
         />
+
+        {authUser && (
+          <AccountPlanCard
+            entitlement={
+              accountEntitlement
+            }
+            isLoading={
+              isEntitlementLoading
+            }
+            errorMessage={
+              entitlementError
+            }
+            onRetry={() => {
+              void refreshEntitlement();
+            }}
+          />
+        )}
 
         {authUser && (
           <UsageMeter

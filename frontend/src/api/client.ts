@@ -28,6 +28,9 @@ import type {
 import type {
   UsageResponse,
 } from "../types/usage";
+import type {
+  AccountEntitlementResponse,
+} from "../types/accountEntitlement";
 
 const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
 const DEMO_USER_ID = import.meta.env.VITE_DEMO_USER_ID || "demo-user";
@@ -129,6 +132,14 @@ export async function getUsage():
 Promise<UsageResponse> {
   return apiRequest(
     "/usage"
+  );
+}
+
+
+export async function getAccountEntitlement():
+Promise<AccountEntitlementResponse> {
+  return apiRequest(
+    "/account/entitlement"
   );
 }
 
