@@ -1,0 +1,864 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${STRIPE_SECRET_KEY:?A Stripe test secret key is required.}"
+
+if [[ "$STRIPE_SECRET_KEY" != sk_test_* ]]; then
+  echo "Only a Stripe test-mode secret key is allowed."
+  exit 1
+fi
+
+PYTHONPATH=function \
+python3 - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+from pathlib import Path
+from typing import (
+    Any,
+)
+from urllib.error import (
+    HTTPError,
+    URLError,
+)
+from urllib.parse import (
+    quote,
+    urlencode,
+)
+from urllib.request import (
+    Request,
+    urlopen,
+)
+
+from billing_policy import (
+    BILLING_CURRENCY,
+    BILLING_INTERVAL,
+    BILLING_INTERVAL_COUNT,
+    BILLING_OFFER_PRO_MONTHLY,
+    BILLING_PRODUCT_NAME,
+    BILLING_UNIT_AMOUNT,
+    STRIPE_PRO_MONTHLY_LOOKUP_KEY,
+    load_stripe_checkout_config,
+)
+from usage_policy import (
+    PLAN_PRO,
+)
+
+
+STRIPE_API_BASE = (
+    "https://api.stripe.com/v1"
+)
+
+CATALOG_VERSION = "1.0"
+
+PRODUCT_IDEMPOTENCY_KEY = (
+    "jm8-16d2-product-v1"
+)
+
+PRICE_IDEMPOTENCY_KEY = (
+    "jm8-16d2-price-v1"
+)
+
+secret_key = str(
+    os.environ.get(
+        "STRIPE_SECRET_KEY"
+    )
+    or ""
+).strip()
+
+if not secret_key.startswith(
+    "sk_test_"
+):
+    raise SystemExit(
+        "Only Stripe test mode is "
+        "permitted during Upgrade 16D-2."
+    )
+
+
+class CatalogSetupError(
+    RuntimeError
+):
+    pass
+
+
+def stripe_request(
+    method: str,
+    path: str,
+    *,
+    parameters: (
+        list[tuple[str, str]]
+        | None
+    ) = None,
+    idempotency_key: (
+        str | None
+    ) = None,
+) -> dict[str, Any]:
+    parameters = (
+        parameters or []
+    )
+
+    url = (
+        STRIPE_API_BASE
+        + path
+    )
+
+    data = None
+
+    if method == "GET":
+        if parameters:
+            url += (
+                "?"
+                + urlencode(
+                    parameters
+                )
+            )
+    else:
+        data = urlencode(
+            parameters
+        ).encode("utf-8")
+
+    headers = {
+        "Authorization":
+            f"Bearer {secret_key}",
+
+        "Content-Type":
+            (
+                "application/"
+                "x-www-form-urlencoded"
+            ),
+
+        "User-Agent":
+            "JM8-Stripe-Catalog/1.0",
+    }
+
+    if idempotency_key:
+        headers[
+            "Idempotency-Key"
+        ] = idempotency_key
+
+    request = Request(
+        url,
+        data=data,
+        method=method,
+        headers=headers,
+    )
+
+    try:
+        with urlopen(
+            request,
+            timeout=30,
+        ) as response:
+            payload = json.loads(
+                response.read().decode(
+                    "utf-8"
+                )
+            )
+
+    except HTTPError as error:
+        raise CatalogSetupError(
+            (
+                "Stripe catalog request "
+                f"failed with HTTP "
+                f"{error.code}."
+            )
+        ) from error
+
+    except (
+        URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+    ) as error:
+        raise CatalogSetupError(
+            "Stripe catalog request failed."
+        ) from error
+
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        raise CatalogSetupError(
+            "Stripe returned an invalid "
+            "catalog response."
+        )
+
+    return payload
+
+
+def list_products(
+) -> list[dict[str, Any]]:
+    products = []
+    starting_after = None
+
+    while True:
+        parameters = [
+            ("active", "true"),
+            ("limit", "100"),
+        ]
+
+        if starting_after:
+            parameters.append(
+                (
+                    "starting_after",
+                    starting_after,
+                )
+            )
+
+        payload = stripe_request(
+            "GET",
+            "/products",
+            parameters=parameters,
+        )
+
+        page = payload.get(
+            "data",
+            [],
+        )
+
+        if not isinstance(
+            page,
+            list,
+        ):
+            raise CatalogSetupError(
+                "Stripe returned an invalid "
+                "product list."
+            )
+
+        products.extend(
+            item
+            for item in page
+            if isinstance(
+                item,
+                dict,
+            )
+        )
+
+        if not payload.get(
+            "has_more"
+        ):
+            return products
+
+        if not page:
+            raise CatalogSetupError(
+                "Stripe product pagination "
+                "could not continue."
+            )
+
+        starting_after = str(
+            page[-1].get("id")
+            or ""
+        )
+
+        if not starting_after:
+            raise CatalogSetupError(
+                "Stripe product pagination "
+                "returned an invalid cursor."
+            )
+
+
+def find_jm8_products(
+) -> list[dict[str, Any]]:
+    return [
+        product
+        for product in list_products()
+        if (
+            product.get(
+                "metadata",
+                {},
+            ).get(
+                "jm8_offer_id"
+            )
+            == BILLING_OFFER_PRO_MONTHLY
+        )
+    ]
+
+
+def create_product(
+) -> dict[str, Any]:
+    return stripe_request(
+        "POST",
+        "/products",
+        parameters=[
+            (
+                "name",
+                BILLING_PRODUCT_NAME,
+            ),
+            (
+                "description",
+                (
+                    "Expanded Ask JM8 and "
+                    "entry-analysis allowances."
+                ),
+            ),
+            (
+                "metadata[jm8_offer_id]",
+                BILLING_OFFER_PRO_MONTHLY,
+            ),
+            (
+                "metadata[jm8_plan_id]",
+                PLAN_PRO,
+            ),
+            (
+                (
+                    "metadata["
+                    "jm8_catalog_version"
+                    "]"
+                ),
+                CATALOG_VERSION,
+            ),
+        ],
+        idempotency_key=(
+            PRODUCT_IDEMPOTENCY_KEY
+        ),
+    )
+
+
+def verify_product(
+    product: dict[str, Any],
+) -> None:
+    checks = (
+        product.get("object")
+        == "product",
+
+        product.get("active")
+        is True,
+
+        product.get("livemode")
+        is False,
+
+        product.get("name")
+        == BILLING_PRODUCT_NAME,
+
+        product.get(
+            "metadata",
+            {},
+        ).get(
+            "jm8_offer_id"
+        )
+        == BILLING_OFFER_PRO_MONTHLY,
+
+        product.get(
+            "metadata",
+            {},
+        ).get(
+            "jm8_plan_id"
+        )
+        == PLAN_PRO,
+    )
+
+    if not all(checks):
+        raise CatalogSetupError(
+            "The existing JM8 Stripe "
+            "product does not match the "
+            "catalog contract."
+        )
+
+
+def list_lookup_prices(
+) -> list[dict[str, Any]]:
+    payload = stripe_request(
+        "GET",
+        "/prices",
+        parameters=[
+            (
+                "lookup_keys[]",
+                (
+                    STRIPE_PRO_MONTHLY_LOOKUP_KEY
+                ),
+            ),
+            ("active", "true"),
+            ("limit", "100"),
+        ],
+    )
+
+    data = payload.get(
+        "data",
+        [],
+    )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+        raise CatalogSetupError(
+            "Stripe returned an invalid "
+            "price list."
+        )
+
+    return [
+        item
+        for item in data
+        if isinstance(
+            item,
+            dict,
+        )
+    ]
+
+
+def create_price(
+    product_id: str,
+) -> dict[str, Any]:
+    return stripe_request(
+        "POST",
+        "/prices",
+        parameters=[
+            (
+                "product",
+                product_id,
+            ),
+            (
+                "currency",
+                BILLING_CURRENCY.lower(),
+            ),
+            (
+                "unit_amount",
+                str(
+                    BILLING_UNIT_AMOUNT
+                ),
+            ),
+            (
+                "recurring[interval]",
+                BILLING_INTERVAL,
+            ),
+            (
+                (
+                    "recurring["
+                    "interval_count"
+                    "]"
+                ),
+                str(
+                    BILLING_INTERVAL_COUNT
+                ),
+            ),
+            (
+                "recurring[usage_type]",
+                "licensed",
+            ),
+            (
+                "lookup_key",
+                (
+                    STRIPE_PRO_MONTHLY_LOOKUP_KEY
+                ),
+            ),
+            (
+                "nickname",
+                "JM8 Pro Monthly",
+            ),
+            (
+                "metadata[jm8_offer_id]",
+                BILLING_OFFER_PRO_MONTHLY,
+            ),
+            (
+                "metadata[jm8_plan_id]",
+                PLAN_PRO,
+            ),
+            (
+                (
+                    "metadata["
+                    "jm8_catalog_version"
+                    "]"
+                ),
+                CATALOG_VERSION,
+            ),
+        ],
+        idempotency_key=(
+            PRICE_IDEMPOTENCY_KEY
+        ),
+    )
+
+
+def verify_price(
+    price: dict[str, Any],
+    *,
+    product_id: str,
+) -> None:
+    recurring = price.get(
+        "recurring",
+        {},
+    )
+
+    checks = (
+        price.get("object")
+        == "price",
+
+        price.get("active")
+        is True,
+
+        price.get("livemode")
+        is False,
+
+        price.get("product")
+        == product_id,
+
+        price.get("currency")
+        == BILLING_CURRENCY.lower(),
+
+        price.get("unit_amount")
+        == BILLING_UNIT_AMOUNT,
+
+        price.get("type")
+        == "recurring",
+
+        price.get("lookup_key")
+        == (
+            STRIPE_PRO_MONTHLY_LOOKUP_KEY
+        ),
+
+        recurring.get("interval")
+        == BILLING_INTERVAL,
+
+        recurring.get(
+            "interval_count"
+        )
+        == BILLING_INTERVAL_COUNT,
+
+        recurring.get("usage_type")
+        == "licensed",
+    )
+
+    if not all(checks):
+        raise CatalogSetupError(
+            "The existing JM8 Stripe "
+            "price does not match the "
+            "catalog contract."
+        )
+
+
+def retrieve_product(
+    product_id: str,
+) -> dict[str, Any]:
+    return stripe_request(
+        "GET",
+        (
+            "/products/"
+            + quote(
+                product_id,
+                safe="",
+            )
+        ),
+    )
+
+
+def shell_quote(
+    value: str,
+) -> str:
+    return (
+        "'"
+        + value.replace(
+            "'",
+            "'\"'\"'",
+        )
+        + "'"
+    )
+
+
+def update_environment(
+    *,
+    price_id: str,
+) -> None:
+    path = Path(".env")
+
+    if not path.exists():
+        raise CatalogSetupError(
+            "backend/.env was not found."
+        )
+
+    updates = {
+        "STRIPE_SECRET_KEY":
+            secret_key,
+
+        "STRIPE_PRO_MONTHLY_PRICE_ID":
+            price_id,
+
+        "STRIPE_CHECKOUT_SUCCESS_URL":
+            (
+                "http://localhost:5173/"
+                "?checkout=success"
+                "&session_id="
+                "{CHECKOUT_SESSION_ID}"
+            ),
+
+        "STRIPE_CHECKOUT_CANCEL_URL":
+            (
+                "http://localhost:5173/"
+                "?checkout=cancelled"
+            ),
+
+        "STRIPE_PORTAL_RETURN_URL":
+            "http://localhost:5173/",
+    }
+
+    lines = path.read_text().splitlines()
+
+    found = {
+        key: False
+        for key in updates
+    }
+
+    rendered = []
+
+    for line in lines:
+        match = re.match(
+            (
+                r"^([A-Z0-9_]+)"
+                r"="
+            ),
+            line,
+        )
+
+        key = (
+            match.group(1)
+            if match
+            else None
+        )
+
+        if key in updates:
+            rendered.append(
+                (
+                    f"{key}="
+                    + shell_quote(
+                        updates[key]
+                    )
+                )
+            )
+
+            found[key] = True
+        else:
+            rendered.append(line)
+
+    missing = [
+        key
+        for key, present
+        in found.items()
+        if not present
+    ]
+
+    if missing:
+        if (
+            rendered
+            and rendered[-1].strip()
+        ):
+            rendered.append("")
+
+        rendered.append(
+            "# Stripe test-mode billing"
+        )
+
+        for key in missing:
+            rendered.append(
+                (
+                    f"{key}="
+                    + shell_quote(
+                        updates[key]
+                    )
+                )
+            )
+
+    final_content = (
+        "\n".join(rendered)
+        + "\n"
+    )
+
+    existing_mode = (
+        path.stat().st_mode
+    )
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=".env.",
+        delete=False,
+    ) as temporary:
+        temporary.write(
+            final_content
+        )
+
+        temporary_path = Path(
+            temporary.name
+        )
+
+    temporary_path.chmod(
+        existing_mode
+    )
+
+    temporary_path.replace(
+        path
+    )
+
+    load_stripe_checkout_config({
+        "STRIPE_SECRET_KEY":
+            secret_key,
+
+        "STRIPE_PRO_MONTHLY_PRICE_ID":
+            price_id,
+
+        "STRIPE_CHECKOUT_SUCCESS_URL":
+            updates[
+                "STRIPE_CHECKOUT_SUCCESS_URL"
+            ],
+
+        "STRIPE_CHECKOUT_CANCEL_URL":
+            updates[
+                "STRIPE_CHECKOUT_CANCEL_URL"
+            ],
+
+        "STRIPE_PORTAL_RETURN_URL":
+            updates[
+                "STRIPE_PORTAL_RETURN_URL"
+            ],
+    })
+
+
+prices = list_lookup_prices()
+
+if len(prices) > 1:
+    raise CatalogSetupError(
+        "Multiple active JM8 monthly "
+        "prices use the same lookup key."
+    )
+
+product_created = False
+price_created = False
+
+if prices:
+    price = prices[0]
+
+    product_id = str(
+        price.get("product")
+        or ""
+    )
+
+    if not product_id:
+        raise CatalogSetupError(
+            "The Stripe price is missing "
+            "its product reference."
+        )
+
+    product = retrieve_product(
+        product_id
+    )
+
+else:
+    products = find_jm8_products()
+
+    if len(products) > 1:
+        raise CatalogSetupError(
+            "Multiple active JM8 Pro "
+            "products were found."
+        )
+
+    if products:
+        product = products[0]
+    else:
+        product = create_product()
+        product_created = True
+
+    product_id = str(
+        product.get("id")
+        or ""
+    )
+
+    if not product_id:
+        raise CatalogSetupError(
+            "Stripe did not return a "
+            "product identifier."
+        )
+
+    verify_product(product)
+
+    price = create_price(
+        product_id
+    )
+
+    price_created = True
+
+
+verify_product(product)
+
+verify_price(
+    price,
+    product_id=product_id,
+)
+
+price_id = str(
+    price.get("id")
+    or ""
+)
+
+if not price_id:
+    raise CatalogSetupError(
+        "Stripe did not return a price "
+        "identifier."
+    )
+
+update_environment(
+    price_id=price_id,
+)
+
+results = {
+    "stripeModeIsTest":
+        not bool(
+            product.get("livemode")
+            or price.get("livemode")
+        ),
+
+    "productReady":
+        True,
+
+    "productCreated":
+        product_created,
+
+    "priceReady":
+        True,
+
+    "priceCreated":
+        price_created,
+
+    "priceIsTenDollarsMonthly":
+        (
+            price.get("unit_amount")
+            == BILLING_UNIT_AMOUNT
+            and price.get("currency")
+            == "usd"
+            and price.get(
+                "recurring",
+                {},
+            ).get("interval")
+            == "month"
+        ),
+
+    "lookupKeyConfigured":
+        price.get("lookup_key")
+        == (
+            STRIPE_PRO_MONTHLY_LOOKUP_KEY
+        ),
+
+    "localEnvironmentUpdated":
+        True,
+}
+
+for key, value in results.items():
+    print(
+        f"{key}: {value}"
+    )
+
+required = (
+    "stripeModeIsTest",
+    "productReady",
+    "priceReady",
+    "priceIsTenDollarsMonthly",
+    "lookupKeyConfigured",
+    "localEnvironmentUpdated",
+)
+
+if not all(
+    results[key]
+    for key in required
+):
+    raise SystemExit(
+        "Stripe catalog setup failed."
+    )
+PY

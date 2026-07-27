@@ -28,6 +28,7 @@ from billing_policy import (  # noqa: E402
     BILLING_OFFER_PRO_MONTHLY,
     BILLING_PROVIDER_STRIPE,
     BILLING_UNIT_AMOUNT,
+    STRIPE_PRO_MONTHLY_LOOKUP_KEY,
     BillingPolicyError,
     get_public_billing_offer,
     load_stripe_checkout_config,
@@ -133,6 +134,14 @@ class BillingPolicyTests(
         self.assertEqual(
             offer["offer"]["id"],
             BILLING_OFFER_PRO_MONTHLY,
+        )
+
+    def test_stripe_lookup_key_is_stable(
+        self,
+    ):
+        self.assertEqual(
+            STRIPE_PRO_MONTHLY_LOOKUP_KEY,
+            "jm8_pro_monthly",
         )
 
     def test_public_offer_is_monthly(
