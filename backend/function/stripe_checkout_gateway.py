@@ -27,6 +27,10 @@ from billing_policy import (
     BillingPolicyError,
     load_stripe_checkout_config,
 )
+from stripe_secret_loader import (
+    StripeSecretLoadError,
+    load_stripe_runtime_environment,
+)
 from usage_policy import (
     PLAN_PRO,
 )
@@ -272,13 +276,35 @@ class StripeCheckoutGateway:
             urlopen
         ),
         timeout_seconds: int = 20,
+        secret_loader: Callable[
+            [Mapping[str, str] | None],
+            Mapping[str, str],
+        ] = load_stripe_runtime_environment,
     ):
         try:
-            config = (
-                load_stripe_checkout_config(
+            runtime_environment = (
+                secret_loader(
                     environ
                 )
             )
+
+            config = (
+                load_stripe_checkout_config(
+                    runtime_environment
+                )
+            )
+
+        except StripeSecretLoadError as error:
+            raise StripeGatewayError(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+                status_code=(
+                    503
+                    if error.retryable
+                    else 500
+                ),
+            ) from error
 
         except BillingPolicyError as error:
             raise StripeGatewayError(
