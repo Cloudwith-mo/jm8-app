@@ -62,15 +62,43 @@ class HistoricalReanalysisDeploymentTests(
             "bin/deploy"
         )
 
-        marker = (
-            "HISTORICAL_REANALYSIS_"
-            "WORKFLOW_ARN="
-            "${HISTORICAL_REANALYSIS_"
-            "WORKFLOW_ARN}"
+        self.assertIn(
+            (
+                "export "
+                "HISTORICAL_REANALYSIS_"
+                "WORKFLOW_ARN"
+            ),
+            script,
+        )
+
+        environment_block = (
+            script
+            .split(
+                "environment_keys = [",
+                1,
+            )[1]
+            .split(
+                "]\n\nvariables",
+                1,
+            )[0]
+        )
+
+        self.assertIn(
+            (
+                '"HISTORICAL_REANALYSIS_'
+                'WORKFLOW_ARN"'
+            ),
+            environment_block,
         )
 
         self.assertEqual(
-            script.count(marker),
+            script.count(
+                (
+                    "--environment "
+                    "file://.build/"
+                    "api-environment.json"
+                )
+            ),
             2,
         )
 
