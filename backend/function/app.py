@@ -62,6 +62,10 @@ from account_entitlement import (
     AccountEntitlementUnavailableError,
     get_account_entitlement,
 )
+from billing_checkout import (
+    BillingCheckoutError,
+    create_billing_checkout,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -202,6 +206,74 @@ def lambda_handler(event, context):
                 "entitlement": (
                     account_entitlement
                 ),
+            })
+
+        if (
+            method == "POST"
+            and path
+            == "/billing/checkout"
+        ):
+            try:
+                body = parse_body(
+                    event
+                )
+
+            except (
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+                ValueError,
+            ):
+                return response(400, {
+                    "error":
+                        "InvalidRequestBody",
+
+                    "message":
+                        (
+                            "Request body must "
+                            "contain valid JSON."
+                        ),
+                })
+
+            if not isinstance(
+                body,
+                dict,
+            ):
+                return response(400, {
+                    "error":
+                        "InvalidRequestBody",
+
+                    "message":
+                        (
+                            "Request body must "
+                            "be a JSON object."
+                        ),
+                })
+
+            try:
+                checkout = (
+                    create_billing_checkout(
+                        user_id=user_id,
+                        request_token=(
+                            body.get(
+                                "requestToken"
+                            )
+                        ),
+                        email=(
+                            get_user_email(
+                                event
+                            )
+                        ),
+                    )
+                )
+
+            except BillingCheckoutError as exc:
+                return response(
+                    exc.status_code,
+                    exc.payload,
+                )
+
+            return response(201, {
+                "checkout": checkout,
             })
 
         if (
@@ -1935,6 +2007,42 @@ def get_user_id(event):
     }
 
     return normalized_headers.get("x-user-id", "demo-user")
+
+
+def get_user_email(
+    event: dict[str, Any],
+) -> str | None:
+    claims = (
+        event.get(
+            "requestContext",
+            {},
+        )
+        .get(
+            "authorizer",
+            {},
+        )
+        .get(
+            "jwt",
+            {},
+        )
+        .get(
+            "claims",
+            {},
+        )
+    )
+
+    email = str(
+        claims.get("email")
+        or ""
+    ).strip()
+
+    if (
+        not email
+        or len(email) > 512
+    ):
+        return None
+
+    return email
 
 
 def parse_body(event: dict[str, Any]) -> dict[str, Any]:
