@@ -92,28 +92,109 @@ echo "Integration timeout configured for 30 seconds."
 
 create_route_if_missing () {
   local ROUTE_KEY="$1"
+  local TARGET="integrations/${INTEGRATION_ID}"
 
-  local EXISTING_ROUTE_ID
-  EXISTING_ROUTE_ID=$(aws apigatewayv2 get-routes \
-    --api-id "$API_ID" \
-    --query "Items[?RouteKey=='${ROUTE_KEY}'].RouteId | [0]" \
-    --output text \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION")
-
-  if [ "$EXISTING_ROUTE_ID" = "None" ] || [ -z "$EXISTING_ROUTE_ID" ]; then
-    aws apigatewayv2 create-route \
+  local ROUTE_COUNT
+  ROUTE_COUNT="$(
+    aws apigatewayv2 get-routes \
       --api-id "$API_ID" \
-      --route-key "$ROUTE_KEY" \
-      --target "integrations/${INTEGRATION_ID}" \
+      --query \
+        "length(Items[?RouteKey=='${ROUTE_KEY}'])" \
+      --output text \
       --profile "$AWS_PROFILE" \
-      --region "$AWS_REGION" \
-      >/dev/null
+      --region "$AWS_REGION"
+  )"
+
+  if [[ "$ROUTE_COUNT" -gt 1 ]]; then
+    echo "Duplicate route detected: $ROUTE_KEY"
+    return 1
+  fi
+
+  local ROUTE_ID
+
+  if [[ "$ROUTE_COUNT" -eq 0 ]]; then
+    ROUTE_ID="$(
+      aws apigatewayv2 create-route \
+        --api-id "$API_ID" \
+        --route-key "$ROUTE_KEY" \
+        --target "$TARGET" \
+        --query "RouteId" \
+        --output text \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION"
+    )"
 
     echo "Created route: $ROUTE_KEY"
+
   else
-    echo "Route already exists: $ROUTE_KEY"
+    ROUTE_ID="$(
+      aws apigatewayv2 get-routes \
+        --api-id "$API_ID" \
+        --query \
+          "Items[?RouteKey=='${ROUTE_KEY}'].RouteId | [0]" \
+        --output text \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION"
+    )"
+
+    echo "Reusing route: $ROUTE_KEY"
   fi
+
+  if [[
+    -z "$ROUTE_ID"
+    || "$ROUTE_ID" == "None"
+    || "$ROUTE_ID" == "null"
+  ]]; then
+    echo "Route identifier was not resolved: $ROUTE_KEY"
+    return 1
+  fi
+
+  aws apigatewayv2 update-route \
+    --api-id "$API_ID" \
+    --route-id "$ROUTE_ID" \
+    --target "$TARGET" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  local ATTEMPT
+  local VERIFIED_COUNT
+  local VERIFIED_TARGET
+
+  for ATTEMPT in {1..10}; do
+    VERIFIED_COUNT="$(
+      aws apigatewayv2 get-routes \
+        --api-id "$API_ID" \
+        --query \
+          "length(Items[?RouteKey=='${ROUTE_KEY}'])" \
+        --output text \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION"
+    )"
+
+    VERIFIED_TARGET="$(
+      aws apigatewayv2 get-routes \
+        --api-id "$API_ID" \
+        --query \
+          "Items[?RouteKey=='${ROUTE_KEY}'].Target | [0]" \
+        --output text \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION"
+    )"
+
+    if [[
+      "$VERIFIED_COUNT" == "1"
+      && "$VERIFIED_TARGET" == "$TARGET"
+    ]]; then
+      echo "Verified route: $ROUTE_KEY"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "Route verification failed: $ROUTE_KEY"
+  return 1
 }
 
 create_route_if_missing "POST /entries"

@@ -24,7 +24,7 @@ if [[ "$API_ID" == "None" || -z "$API_ID" ]]; then
   exit 1
 fi
 
-echo "API ID: $API_ID"
+echo "API resolved."
 
 echo "Checking JWT authorizer: $AUTHORIZER_NAME"
 
@@ -53,11 +53,28 @@ if [[ "$AUTHORIZER_ID" == "None" || -z "$AUTHORIZER_ID" ]]; then
       --output text
   )"
 else
-  echo "Authorizer already exists: $AUTHORIZER_ID"
+  echo "JWT authorizer already exists."
 fi
 
 secure_route() {
   local route_key="$1"
+
+  local route_count
+  route_count="$(
+    aws apigatewayv2 get-routes \
+      --api-id "$API_ID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query \
+        "length(Items[?RouteKey=='$route_key'])" \
+      --output text
+  )"
+
+  if [[ "$route_count" -ne 1 ]]; then
+    echo \
+      "Required route missing or duplicated: $route_key"
+    return 1
+  fi
 
   local route_id
   route_id="$(
@@ -65,13 +82,18 @@ secure_route() {
       --api-id "$API_ID" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
-      --query "Items[?RouteKey=='$route_key'].RouteId | [0]" \
+      --query \
+        "Items[?RouteKey=='$route_key'].RouteId | [0]" \
       --output text
   )"
 
-  if [[ "$route_id" == "None" || -z "$route_id" ]]; then
-    echo "Route not found, skipping: $route_key"
-    return
+  if [[
+    -z "$route_id"
+    || "$route_id" == "None"
+    || "$route_id" == "null"
+  ]]; then
+    echo "Route identifier was not resolved: $route_key"
+    return 1
   fi
 
   aws apigatewayv2 update-route \
@@ -80,9 +102,47 @@ secure_route() {
     --authorization-type JWT \
     --authorizer-id "$AUTHORIZER_ID" \
     --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" >/dev/null
+    --region "$AWS_REGION" \
+    >/dev/null
 
-  echo "Secured route: $route_key"
+  local attempt
+  local verified_authorization_type
+  local verified_authorizer_id
+
+  for attempt in {1..10}; do
+    verified_authorization_type="$(
+      aws apigatewayv2 get-route \
+        --api-id "$API_ID" \
+        --route-id "$route_id" \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION" \
+        --query "AuthorizationType" \
+        --output text
+    )"
+
+    verified_authorizer_id="$(
+      aws apigatewayv2 get-route \
+        --api-id "$API_ID" \
+        --route-id "$route_id" \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION" \
+        --query "AuthorizerId" \
+        --output text
+    )"
+
+    if [[
+      "$verified_authorization_type" == "JWT"
+      && "$verified_authorizer_id" == "$AUTHORIZER_ID"
+    ]]; then
+      echo "Verified secured route: $route_key"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "Route authorization verification failed: $route_key"
+  return 1
 }
 
 secure_route "POST /entries"
@@ -116,4 +176,4 @@ secure_route "POST /upload-url"
 
 echo
 echo "API is now protected by Cognito JWT authorizer."
-echo "Authorizer ID: $AUTHORIZER_ID"
+echo "JWT authorizer configuration verified."
