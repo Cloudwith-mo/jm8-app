@@ -62,6 +62,8 @@ secure_route() {
   local route_count
   route_count="$(
     aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
       --api-id "$API_ID" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
@@ -79,6 +81,8 @@ secure_route() {
   local route_id
   route_id="$(
     aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
       --api-id "$API_ID" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \

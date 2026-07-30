@@ -97,6 +97,8 @@ create_route_if_missing () {
   local ROUTE_COUNT
   ROUTE_COUNT="$(
     aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
       --api-id "$API_ID" \
       --query \
         "length(Items[?RouteKey=='${ROUTE_KEY}'])" \
@@ -129,6 +131,8 @@ create_route_if_missing () {
   else
     ROUTE_ID="$(
       aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
         --api-id "$API_ID" \
         --query \
           "Items[?RouteKey=='${ROUTE_KEY}'].RouteId | [0]" \
@@ -164,6 +168,8 @@ create_route_if_missing () {
   for ATTEMPT in {1..10}; do
     VERIFIED_COUNT="$(
       aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
         --api-id "$API_ID" \
         --query \
           "length(Items[?RouteKey=='${ROUTE_KEY}'])" \
@@ -174,6 +180,8 @@ create_route_if_missing () {
 
     VERIFIED_TARGET="$(
       aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
         --api-id "$API_ID" \
         --query \
           "Items[?RouteKey=='${ROUTE_KEY}'].Target | [0]" \
