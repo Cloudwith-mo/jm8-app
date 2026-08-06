@@ -94,9 +94,56 @@ def checkout_event(
     }
 
 
+def webhook_event():
+    return {
+        "requestContext": {
+            "http": {
+                "method": "POST",
+                "path": "/billing/webhook",
+            }
+        },
+        "headers": {"Stripe-Signature": "test-signature"},
+        "body": "{}",
+    }
+
+
+def portal_event():
+    return {
+        "requestContext": {
+            "http": {
+                "method": "POST",
+                "path": "/billing/portal",
+            },
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        "sub": "jwt-user",
+                    }
+                }
+            },
+        },
+        "body": "{}",
+    }
+
+
 class BillingCheckoutRouteTests(
     unittest.TestCase
 ):
+    def test_webhook_route_runs_before_authenticated_user_resolution(self):
+        with patch.object(
+            app,
+            "process_billing_webhook",
+            return_value={"received": True},
+        ), patch.object(
+            app,
+            "get_user_id",
+            side_effect=AssertionError("webhook must not require a JWT"),
+        ):
+            result = app.lambda_handler(webhook_event(), None)
+
+        self.assertEqual(result["statusCode"], 200)
+        self.assertEqual(json.loads(result["body"]), {"received": True})
+
     def test_success_uses_jwt_identity_and_email(
         self,
     ):
@@ -164,6 +211,37 @@ class BillingCheckoutRouteTests(
                 "checkout": {
                     "checkoutUrl":
                         CHECKOUT_URL,
+                }
+            },
+        )
+
+    def test_portal_route_uses_jwt_identity(self):
+        with patch.object(
+            app,
+            "create_billing_portal",
+            return_value={
+                "billingPortalUrl": (
+                    "https://billing.stripe.com/"
+                    "p/session/test-route"
+                )
+            },
+        ) as mocked:
+            result = app.lambda_handler(
+                portal_event(),
+                None,
+            )
+
+        self.assertEqual(result["statusCode"], 201)
+        mocked.assert_called_once_with(user_id="jwt-user")
+
+        self.assertEqual(
+            json.loads(result["body"]),
+            {
+                "portal": {
+                    "billingPortalUrl": (
+                        "https://billing.stripe.com/"
+                        "p/session/test-route"
+                    )
                 }
             },
         )

@@ -168,6 +168,31 @@ class ApiRoutePostconditionTests(
             self.secure_api,
         )
 
+    def test_webhook_route_is_explicitly_public(
+        self,
+    ):
+        route = "POST /billing/webhook"
+
+        self.assertIn(
+            route,
+            self.create_api,
+        )
+
+        self.assertIn(
+            'public_route "POST /billing/webhook"',
+            self.secure_api,
+        )
+
+        self.assertIn(
+            "--authorization-type NONE",
+            self.secure_api,
+        )
+
+        self.assertIn(
+            '"$verified_authorization_type" == "NONE"',
+            self.secure_api,
+        )
+
     def test_checkout_route_remains_configured(
         self,
     ):
@@ -182,6 +207,14 @@ class ApiRoutePostconditionTests(
 
         self.assertIn(
             route,
+            self.secure_api,
+        )
+
+    def test_portal_route_is_secured(self):
+        route = "POST /billing/portal"
+        self.assertIn(route, self.create_api)
+        self.assertIn(
+            'secure_route "POST /billing/portal"',
             self.secure_api,
         )
 

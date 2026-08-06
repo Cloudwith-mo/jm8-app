@@ -66,6 +66,14 @@ from billing_checkout import (
     BillingCheckoutError,
     create_billing_checkout,
 )
+from billing_portal import (
+    BillingPortalError,
+    create_billing_portal,
+)
+from billing_webhook import (
+    BillingWebhookError,
+    process_billing_webhook,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -104,6 +112,13 @@ def lambda_handler(event, context):
         if method == "OPTIONS":
             return response(204, {})
 
+        if method == "POST" and path == "/billing/webhook":
+            try:
+                result = process_billing_webhook(event)
+            except BillingWebhookError as exc:
+                return response(exc.status_code, exc.payload)
+            return response(200, result)
+
         user_id = get_user_id(event)
 
         if method == "POST" and path == "/entries":
@@ -121,45 +136,38 @@ def lambda_handler(event, context):
             })
 
         if method == "GET" and path == "/ocr-jobs":
-
             query_params = event.get("queryStringParameters") or {}
-
             status_filter = str(query_params.get("status") or "ALL").upper()
-
-
             allowed_statuses = {"ALL", "PENDING", "COMPLETED", "FAILED"}
-
-
             if status_filter not in allowed_statuses:
-
                 return response(400, {
-
                     "error": "Invalid OCR job status.",
-
                     "allowedStatuses": sorted(allowed_statuses),
-
                 })
 
-
-            jobs = list_ocr_jobs(
-
-                user_id=get_user_id(event),
-
-                status_filter=status_filter,
-
-            )
-
+            try:
+                page = list_ocr_jobs(
+                    user_id=user_id,
+                    status_filter=status_filter,
+                    limit=query_params.get("limit", 25),
+                    cursor=query_params.get("cursor"),
+                )
+            except ValueError:
+                return response(400, {
+                    "error": "InvalidOCRJobsCursor",
+                    "message": (
+                        "The OCR jobs cursor is invalid for this request."
+                    ),
+                    "retryable": False,
+                })
 
             return response(200, {
-
-                "jobs": jobs,
-
-                "count": len(jobs),
-
+                "jobs": page["items"],
+                "count": page["count"],
                 "statusFilter": status_filter,
-
+                "limit": page["limit"],
+                "nextCursor": page["nextCursor"],
             })
-
 
         if (
             method == "GET"
@@ -274,6 +282,24 @@ def lambda_handler(event, context):
 
             return response(201, {
                 "checkout": checkout,
+            })
+
+        if (
+            method == "POST"
+            and path == "/billing/portal"
+        ):
+            try:
+                portal = create_billing_portal(
+                    user_id=user_id,
+                )
+            except BillingPortalError as exc:
+                return response(
+                    exc.status_code,
+                    exc.payload,
+                )
+
+            return response(201, {
+                "portal": portal,
             })
 
         if (

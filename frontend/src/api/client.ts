@@ -31,6 +31,11 @@ import type {
 import type {
   AccountEntitlementResponse,
 } from "../types/accountEntitlement";
+import type {
+  OcrJobListResponse,
+  OcrJobRetryResponse,
+  OcrJobStatusFilter,
+} from "../types/ocrJobs";
 
 const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
 const DEMO_USER_ID = import.meta.env.VITE_DEMO_USER_ID || "demo-user";
@@ -498,5 +503,29 @@ export async function retryHistoricalReanalysisJob(
         pageSize,
       }),
     }
+  );
+}
+
+export async function listOcrJobs(
+  status: OcrJobStatusFilter = "ALL",
+  limit = 20,
+  cursor?: string
+): Promise<OcrJobListResponse> {
+  const query = new URLSearchParams({
+    status,
+    limit: String(limit),
+  });
+
+  if (cursor) query.set("cursor", cursor);
+
+  return apiRequest(`/ocr-jobs?${query.toString()}`);
+}
+
+export async function retryOcrJob(
+  entryId: string
+): Promise<OcrJobRetryResponse> {
+  return apiRequest(
+    `/entries/${encodeURIComponent(entryId)}/ocr/retry`,
+    { method: "POST" }
   );
 }

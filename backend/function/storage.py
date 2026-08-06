@@ -2827,80 +2827,203 @@ def derive_ocr_job_status(entry: dict) -> str:
     return "PENDING"
 
 
+def encode_ocr_jobs_cursor(
+    *,
+    user_id: str,
+    status_filter: str,
+    last_evaluated_key: dict | None,
+) -> str | None:
+    if not last_evaluated_key:
+        return None
+
+    payload = {
+        "version": 1,
+        "userPk": user_pk(user_id),
+        "statusFilter": status_filter,
+        "key": {
+            "PK": last_evaluated_key.get("PK"),
+            "SK": last_evaluated_key.get("SK"),
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    return (
+        base64.urlsafe_b64encode(encoded)
+        .decode("ascii")
+        .rstrip("=")
+    )
+
+
+def decode_ocr_jobs_cursor(
+    cursor: str | None,
+    *,
+    user_id: str,
+    status_filter: str,
+) -> dict | None:
+    safe_cursor = str(cursor or "").strip()
+
+    if not safe_cursor:
+        return None
+
+    try:
+        padded = safe_cursor + (
+            "=" * (-len(safe_cursor) % 4)
+        )
+        payload = json.loads(
+            base64.urlsafe_b64decode(
+                padded.encode("ascii")
+            ).decode("utf-8")
+        )
+    except (
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError(
+            "Invalid OCR jobs cursor."
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid OCR jobs cursor.")
+
+    key = payload.get("key")
+    expected_pk = user_pk(user_id)
+
+    if (
+        payload.get("version") != 1
+        or payload.get("userPk") != expected_pk
+        or payload.get("statusFilter") != status_filter
+        or not isinstance(key, dict)
+        or key.get("PK") != expected_pk
+        or not isinstance(key.get("SK"), str)
+        or not key["SK"].startswith("ENTRY#")
+    ):
+        raise ValueError(
+            "OCR jobs cursor does not match this request."
+        )
+
+    return {
+        "PK": key["PK"],
+        "SK": key["SK"],
+    }
+
+
+def public_ocr_job(entry: dict) -> dict:
+    clean_entry = attach_image_preview_url(entry)
+    retry_state = get_ocr_retry_state(clean_entry)
+
+    return {
+        "entryId": clean_entry.get("entryId"),
+        "jobStatus": derive_ocr_job_status(clean_entry),
+        "status": clean_entry.get("status"),
+        "ocrStatus": clean_entry.get("ocrStatus"),
+        "reviewStatus": clean_entry.get("reviewStatus"),
+        "analysisStatus": clean_entry.get("analysisStatus"),
+        "originalFileName": clean_entry.get("originalFileName"),
+        "contentType": clean_entry.get("contentType"),
+        "s3RawKey": clean_entry.get("s3RawKey"),
+        "imagePreviewUrl": clean_entry.get("imagePreviewUrl"),
+        "ocrWordCount": clean_entry.get("ocrWordCount", 0),
+        "ocrLineCount": clean_entry.get("ocrLineCount", 0),
+        "failureReason": clean_entry.get("failureReason"),
+        "workflowError": clean_entry.get("ocrWorkflowError"),
+        "workflowCause": clean_entry.get("ocrWorkflowCause"),
+        "workflowFailedAt": clean_entry.get("ocrWorkflowFailedAt"),
+        "attemptCount": retry_state["attemptCount"],
+        "maxAttempts": retry_state["maxAttempts"],
+        "remainingAttempts": retry_state["remainingAttempts"],
+        "canRetry": retry_state["canRetry"],
+        "queuedAt": clean_entry.get("ocrQueuedAt"),
+        "lastAttemptAt": clean_entry.get("ocrLastAttemptAt"),
+        "processingStartedAt": clean_entry.get("ocrStartedAt"),
+        "completedAt": clean_entry.get("ocrCompletedAt"),
+        "failedAt": clean_entry.get("ocrFailedAt"),
+        "createdAt": clean_entry.get("createdAt"),
+        "updatedAt": clean_entry.get("updatedAt"),
+    }
+
+
 def list_ocr_jobs(
     user_id: str,
     status_filter: str | None = None,
-) -> list[dict]:
+    *,
+    limit: int = 25,
+    cursor: str | None = None,
+) -> dict:
     """
     Returns image-based journal entries as OCR job records.
 
-    Pagination is handled internally so this continues working after the
-    user's archive grows beyond DynamoDB's single-query response limit.
+    Returns a bounded page while scanning through mixed entry types and
+    nonmatching OCR statuses without skipping records.
     """
+    requested_status = (status_filter or "ALL").upper()
+    safe_limit = max(
+        1,
+        min(non_negative_integer(limit, 25), 100),
+    )
+    exclusive_start_key = decode_ocr_jobs_cursor(
+        cursor,
+        user_id=user_id,
+        status_filter=requested_status,
+    )
     query_args = {
         "KeyConditionExpression": (
-            Key("PK").eq(f"USER#{user_id}")
+            Key("PK").eq(user_pk(user_id))
             & Key("SK").begins_with("ENTRY#")
         ),
         "ScanIndexForward": False,
+        "Limit": min(max(safe_limit * 2, 25), 100),
     }
 
-    entries: list[dict] = []
+    if exclusive_start_key:
+        query_args["ExclusiveStartKey"] = exclusive_start_key
+
+    jobs: list[dict] = []
+    next_key = None
 
     while True:
         result = table.query(**query_args)
-        entries.extend(result.get("Items", []))
-
+        items = result.get("Items", [])
         last_key = result.get("LastEvaluatedKey")
 
-        if not last_key:
+        for index, entry in enumerate(items):
+            if entry.get("sourceType") != "image":
+                continue
+
+            job_status = derive_ocr_job_status(entry)
+            if (
+                requested_status != "ALL"
+                and job_status != requested_status
+            ):
+                continue
+
+            jobs.append(public_ocr_job(entry))
+
+            if len(jobs) == safe_limit:
+                if index < len(items) - 1 or last_key:
+                    next_key = {
+                        "PK": entry["PK"],
+                        "SK": entry["SK"],
+                    }
+                break
+
+        if len(jobs) == safe_limit or not last_key:
             break
 
         query_args["ExclusiveStartKey"] = last_key
 
-    requested_status = (status_filter or "ALL").upper()
-    jobs: list[dict] = []
-
-    for entry in entries:
-        if entry.get("sourceType") != "image":
-            continue
-
-        job_status = derive_ocr_job_status(entry)
-
-        if requested_status != "ALL" and job_status != requested_status:
-            continue
-
-        clean_entry = attach_image_preview_url(entry)
-        retry_state = get_ocr_retry_state(clean_entry)
-
-        jobs.append({
-            "entryId": clean_entry.get("entryId"),
-            "jobStatus": job_status,
-            "status": clean_entry.get("status"),
-            "ocrStatus": clean_entry.get("ocrStatus"),
-            "reviewStatus": clean_entry.get("reviewStatus"),
-            "analysisStatus": clean_entry.get("analysisStatus"),
-            "originalFileName": clean_entry.get("originalFileName"),
-            "contentType": clean_entry.get("contentType"),
-            "s3RawKey": clean_entry.get("s3RawKey"),
-            "imagePreviewUrl": clean_entry.get("imagePreviewUrl"),
-            "ocrWordCount": clean_entry.get("ocrWordCount", 0),
-            "ocrLineCount": clean_entry.get("ocrLineCount", 0),
-            "failureReason": clean_entry.get("failureReason"),
-            "workflowError": clean_entry.get("ocrWorkflowError"),
-            "workflowCause": clean_entry.get("ocrWorkflowCause"),
-            "workflowFailedAt": clean_entry.get("ocrWorkflowFailedAt"),
-            "attemptCount": retry_state["attemptCount"],
-            "maxAttempts": retry_state["maxAttempts"],
-            "remainingAttempts": retry_state["remainingAttempts"],
-            "canRetry": retry_state["canRetry"],
-            "queuedAt": clean_entry.get("ocrQueuedAt"),
-            "lastAttemptAt": clean_entry.get("ocrLastAttemptAt"),
-            "processingStartedAt": clean_entry.get("ocrStartedAt"),
-            "completedAt": clean_entry.get("ocrCompletedAt"),
-            "failedAt": clean_entry.get("ocrFailedAt"),
-            "createdAt": clean_entry.get("createdAt"),
-            "updatedAt": clean_entry.get("updatedAt"),
-        })
-
-    return jobs
+    return {
+        "items": jobs,
+        "count": len(jobs),
+        "limit": safe_limit,
+        "nextCursor": encode_ocr_jobs_cursor(
+            user_id=user_id,
+            status_filter=requested_status,
+            last_evaluated_key=next_key,
+        ),
+    }

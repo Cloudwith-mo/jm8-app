@@ -10,6 +10,7 @@ import EntryCard from "../components/archive/EntryCard";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
 import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
+import OcrJobsPanel from "../components/ocr/OcrJobsPanel";
 import InsightsOverviewPanel from "../components/insights/InsightsOverviewPanel";
 import InsightsTrendsPanel from "../components/insights/InsightsTrendsPanel";
 import ReportsPanel from "../components/insights/ReportsPanel";
@@ -974,6 +975,14 @@ export default function ArchivePage() {
                   silent: true,
                 })
               }
+            />
+          )}
+
+        {authUser &&
+          activeSection ===
+            "ocrJobs" && (
+            <OcrJobsPanel
+              onNotify={showToast}
             />
           )}
 

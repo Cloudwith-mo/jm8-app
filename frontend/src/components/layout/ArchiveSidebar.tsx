@@ -25,6 +25,7 @@ export type ArchiveSection =
   | "insightsTrends"
   | "reports"
   | "askJm8"
+  | "ocrJobs"
   | "analysisJobs";
 
 type ArchiveSidebarProps = {
@@ -85,6 +86,7 @@ const navItems: SidebarNavItem[] = [
   {
     label: "OCR Jobs",
     icon: FileText,
+    section: "ocrJobs",
   },
   {
     label: "Analysis Jobs",

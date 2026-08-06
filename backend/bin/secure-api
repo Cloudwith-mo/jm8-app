@@ -149,11 +149,91 @@ secure_route() {
   return 1
 }
 
+public_route() {
+  local route_key="$1"
+
+  local route_count
+  route_count="$(
+    aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
+      --api-id "$API_ID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query \
+        "length(Items[?RouteKey=='$route_key'])" \
+      --output text
+  )"
+
+  if [[ "$route_count" -ne 1 ]]; then
+    echo "Required public route missing or duplicated: $route_key"
+    return 1
+  fi
+
+  local route_id
+  route_id="$(
+    aws apigatewayv2 get-routes \
+      --no-paginate \
+      --max-results 500 \
+      --api-id "$API_ID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query \
+        "Items[?RouteKey=='$route_key'].RouteId | [0]" \
+      --output text
+  )"
+
+  if [[
+    -z "$route_id"
+    || "$route_id" == "None"
+    || "$route_id" == "null"
+  ]]; then
+    echo "Public route identifier was not resolved: $route_key"
+    return 1
+  fi
+
+  aws apigatewayv2 update-route \
+    --api-id "$API_ID" \
+    --route-id "$route_id" \
+    --authorization-type NONE \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  local attempt
+  local verified_authorization_type
+
+  for attempt in {1..10}; do
+    verified_authorization_type="$(
+      aws apigatewayv2 get-route \
+        --api-id "$API_ID" \
+        --route-id "$route_id" \
+        --profile "$AWS_PROFILE" \
+        --region "$AWS_REGION" \
+        --query "AuthorizationType" \
+        --output text
+    )"
+
+    if [[ "$verified_authorization_type" == "NONE" ]]; then
+      echo "Verified public route: $route_key"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  echo "Public route authorization verification failed: $route_key"
+  return 1
+}
+
+public_route "POST /billing/webhook"
+
 secure_route "POST /entries"
 secure_route "GET /entries"
 secure_route "GET /usage"
 secure_route "GET /account/entitlement"
 secure_route "POST /billing/checkout"
+secure_route "POST /billing/portal"
 secure_route "GET /insights/overview"
 secure_route "GET /insights/themes"
 secure_route "GET /insights/moods"

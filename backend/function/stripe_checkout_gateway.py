@@ -265,6 +265,35 @@ def _checkout_url(
     return normalized
 
 
+def _portal_url(
+    value: Any,
+) -> str:
+    normalized = str(
+        value or ""
+    ).strip()
+
+    parsed = urlparse(
+        normalized
+    )
+
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname
+        != "billing.stripe.com"
+    ):
+        raise StripeGatewayError(
+            "InvalidBillingPortalSession",
+            (
+                "Stripe returned an invalid "
+                "Billing Portal URL."
+            ),
+            retryable=False,
+            status_code=502,
+        )
+
+    return normalized
+
+
 class StripeCheckoutGateway:
     def __init__(
         self,
@@ -1025,6 +1054,58 @@ class StripeCheckoutGateway:
 
         return session
 
+    def create_billing_portal_session(
+        self,
+        *,
+        customer_id: Any,
+    ) -> dict[str, Any]:
+        normalized_customer_id = (
+            normalize_stripe_customer_id(
+                customer_id
+            )
+        )
+
+        session = self._request(
+            "POST",
+            "/billing_portal/sessions",
+            parameters=[
+                (
+                    "customer",
+                    normalized_customer_id,
+                ),
+                (
+                    "return_url",
+                    self.portal_return_url,
+                ),
+            ],
+        )
+
+        if (
+            session.get("object")
+            != "billing_portal.session"
+            or session.get("customer")
+            != normalized_customer_id
+        ):
+            raise StripeGatewayError(
+                "InvalidBillingPortalSession",
+                (
+                    "Stripe returned an invalid "
+                    "Billing Portal Session."
+                ),
+                retryable=False,
+                status_code=502,
+            )
+
+        self._verify_livemode(
+            session
+        )
+
+        _portal_url(
+            session.get("url")
+        )
+
+        return session
+
 
 def build_public_checkout_result(
     session: Mapping[str, Any],
@@ -1045,6 +1126,30 @@ def build_public_checkout_result(
 
     return {
         "checkoutUrl": _checkout_url(
+            session.get("url")
+        ),
+    }
+
+
+def build_public_portal_result(
+    session: Mapping[str, Any],
+) -> dict[str, str]:
+    if not isinstance(
+        session,
+        Mapping,
+    ):
+        raise StripeGatewayError(
+            "InvalidBillingPortalSession",
+            (
+                "The Billing Portal Session "
+                "result is invalid."
+            ),
+            retryable=False,
+            status_code=502,
+        )
+
+    return {
+        "billingPortalUrl": _portal_url(
             session.get("url")
         ),
     }
