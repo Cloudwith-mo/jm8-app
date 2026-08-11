@@ -20,6 +20,7 @@ RESOLVED_DEFINITION=".build/ocr-workflow.resolved.json"
 
 WORKER_POLICY_NAME="${APP_NAME}-${STAGE}-ocr-worker-access"
 STATE_POLICY_NAME="${APP_NAME}-${STAGE}-invoke-ocr-worker"
+STATE_LOG_GROUP="/aws/vendedlogs/states/${STATE_MACHINE_NAME}"
 
 echo "Checking AWS identity..."
 
@@ -39,6 +40,34 @@ TABLE_ARN="$(
 )"
 
 mkdir -p .build
+
+if ! aws logs describe-log-groups \
+  --log-group-name-prefix "$STATE_LOG_GROUP" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query "logGroups[?logGroupName=='${STATE_LOG_GROUP}'].logGroupName | [0]" \
+  --output text | grep -Fxq "$STATE_LOG_GROUP"
+then
+  aws logs create-log-group \
+    --log-group-name "$STATE_LOG_GROUP" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+fi
+
+aws logs put-retention-policy \
+  --log-group-name "$STATE_LOG_GROUP" \
+  --retention-in-days 30 \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+STATE_LOG_GROUP_ARN="$(
+  aws logs describe-log-groups \
+    --log-group-name-prefix "$STATE_LOG_GROUP" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "logGroups[?logGroupName=='${STATE_LOG_GROUP}'].arn | [0]" \
+    --output text
+)"
 
 cat > .build/lambda-worker-trust.json <<'JSON'
 {
@@ -366,6 +395,24 @@ policy = {
                 worker_arn,
                 failure_handler_arn
             ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogDelivery",
+                "logs:GetLogDelivery",
+                "logs:UpdateLogDelivery",
+                "logs:DeleteLogDelivery",
+                "logs:ListLogDeliveries",
+                "logs:PutResourcePolicy",
+                "logs:DescribeResourcePolicies",
+                "logs:DescribeLogGroups",
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+                "xray:GetSamplingRules",
+                "xray:GetSamplingTargets"
+            ],
+            "Resource": "*"
         }
     ]
 }
@@ -430,6 +477,9 @@ if [ -z "$STATE_MACHINE_ARN" ] || [ "$STATE_MACHINE_ARN" = "None" ]; then
       --definition "file://${RESOLVED_DEFINITION}" \
       --role-arn "$STATE_ROLE_ARN" \
       --type STANDARD \
+      --logging-configuration \
+        "level=ERROR,includeExecutionData=true,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
+      --tracing-configuration enabled=true \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
       --query "stateMachineArn" \
@@ -444,6 +494,9 @@ else
     --state-machine-arn "$STATE_MACHINE_ARN" \
     --definition "file://${RESOLVED_DEFINITION}" \
     --role-arn "$STATE_ROLE_ARN" \
+    --logging-configuration \
+      "level=ERROR,includeExecutionData=true,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
+    --tracing-configuration enabled=true \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null

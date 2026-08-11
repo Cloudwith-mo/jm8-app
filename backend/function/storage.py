@@ -2388,7 +2388,9 @@ def begin_ocr_attempt(
     ocr_status = str(entry.get("ocrStatus") or "").upper()
 
     if current_status == "OCR_PROCESSING" or ocr_status == "PROCESSING":
-        raise OcrStateError("OCR is already processing for this entry.")
+        # Step Functions may reinvoke the worker after a temporary AWS
+        # failure. Resume the same logical attempt without incrementing it.
+        return entry
 
     if retry_state["jobStatus"] == "COMPLETED" and not force:
         raise OcrStateError("OCR has already completed for this entry.")

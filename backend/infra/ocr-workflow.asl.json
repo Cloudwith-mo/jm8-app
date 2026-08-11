@@ -9,6 +9,16 @@
       "Retry": [
         {
           "ErrorEquals": [
+            "OcrRetryableError"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "MaxDelaySeconds": 15,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
             "Lambda.ServiceException",
             "Lambda.AWSLambdaException",
             "Lambda.SdkClientException",

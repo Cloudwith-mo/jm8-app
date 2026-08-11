@@ -1,4 +1,8 @@
+import os
 from typing import Any
+
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ocr import extract_text_from_s3_image
 from storage import (
@@ -9,6 +13,98 @@ from storage import (
     mark_ocr_failed,
     update_entry_ocr_result,
 )
+
+
+AWS_REGION = (
+    os.environ.get("AWS_REGION")
+    or os.environ.get("AWS_DEFAULT_REGION")
+    or "us-east-1"
+)
+s3 = boto3.client("s3", region_name=AWS_REGION)
+
+
+class OcrInputError(RuntimeError):
+    """Permanent OCR input failure that must not be retried automatically."""
+
+
+class OcrRetryableError(RuntimeError):
+    """Temporary AWS failure that Step Functions may retry."""
+
+
+RETRYABLE_AWS_ERROR_CODES = {
+    "InternalServerError",
+    "LimitExceededException",
+    "ProvisionedThroughputExceededException",
+    "RequestTimeout",
+    "RequestTimeoutException",
+    "ServiceUnavailable",
+    "SlowDown",
+    "Throttling",
+    "ThrottlingException",
+}
+
+MISSING_OBJECT_ERROR_CODES = {
+    "404",
+    "NoSuchKey",
+    "NotFound",
+}
+
+
+def _client_error_code(exc: ClientError) -> str:
+    return str(exc.response.get("Error", {}).get("Code") or "")
+
+
+def _ensure_upload_is_ready(bucket: str, key: str) -> None:
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        code = _client_error_code(exc)
+
+        if code in MISSING_OBJECT_ERROR_CODES:
+            raise OcrInputError(
+                "The journal image upload is missing or incomplete. "
+                "Upload the image again before retrying OCR."
+            ) from exc
+
+        if code in RETRYABLE_AWS_ERROR_CODES:
+            raise OcrRetryableError(
+                f"S3 temporarily could not validate the upload ({code})."
+            ) from exc
+
+        raise OcrInputError(
+            f"The journal image cannot be read from S3 ({code or 'Unknown'})."
+        ) from exc
+    except BotoCoreError as exc:
+        raise OcrRetryableError(
+            "S3 temporarily could not validate the journal image."
+        ) from exc
+
+
+def _raise_classified_ocr_error(exc: Exception) -> None:
+    if isinstance(exc, OcrRetryableError):
+        raise exc
+
+    if isinstance(exc, OcrInputError):
+        raise exc
+
+    if isinstance(exc, ClientError):
+        code = _client_error_code(exc)
+
+        if code in RETRYABLE_AWS_ERROR_CODES:
+            raise OcrRetryableError(
+                f"Textract temporarily failed ({code})."
+            ) from exc
+
+        raise OcrInputError(
+            f"Textract rejected the journal image ({code or 'Unknown'})."
+        ) from exc
+
+    if isinstance(exc, BotoCoreError):
+        raise OcrRetryableError(
+            "Textract temporarily could not process the journal image."
+        ) from exc
+
+    raise OcrInputError(str(exc)) from exc
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -51,6 +147,17 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     if not bucket or not key:
         raise ValueError("Entry does not have S3 raw file information.")
+
+    # Do not consume an OCR attempt until the browser upload is visible in S3.
+    try:
+        _ensure_upload_is_ready(bucket=bucket, key=key)
+    except OcrInputError as exc:
+        mark_ocr_failed(
+            user_id=user_id,
+            entry_id=entry_id,
+            failure_reason=str(exc),
+        )
+        raise
 
     try:
         begin_ocr_attempt(
@@ -95,6 +202,20 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return result
 
     except Exception as exc:
+        try:
+            _raise_classified_ocr_error(exc)
+        except OcrRetryableError:
+            # Leave the entry PROCESSING. A Step Functions retry resumes the
+            # same logical attempt without incrementing its counter.
+            print({
+                "event": "ocr_workflow_retryable_failure",
+                "entryId": entry_id,
+                "errorType": type(exc).__name__,
+            })
+            raise
+        except OcrInputError as classified_exc:
+            exc = classified_exc
+
         failed_entry = mark_ocr_failed(
             user_id=user_id,
             entry_id=entry_id,
@@ -114,6 +235,6 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "retry": retry_state,
         })
 
-        raise RuntimeError(
+        raise OcrInputError(
             f"OCR failed for entry {entry_id}: {exc}"
         ) from exc
