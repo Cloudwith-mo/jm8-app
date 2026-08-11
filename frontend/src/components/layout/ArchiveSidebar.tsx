@@ -212,6 +212,8 @@ export default function ArchiveSidebar({
           const isActive =
             item.section ===
             activeSection;
+          const isUploadAction =
+            item.label === "Upload";
 
           return (
             <button
@@ -222,6 +224,11 @@ export default function ArchiveSidebar({
                   : "archive-nav-item"
               }
               onClick={() => {
+                if (isUploadAction) {
+                  onUpload();
+                  return;
+                }
+
                 if (item.section) {
                   onNavigate(
                     item.section
@@ -234,7 +241,8 @@ export default function ArchiveSidebar({
                   : undefined
               }
               aria-disabled={
-                !item.section
+                !item.section &&
+                !isUploadAction
               }
             >
               <Icon size={19} />
