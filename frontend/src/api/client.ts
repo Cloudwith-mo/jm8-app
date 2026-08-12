@@ -149,6 +149,28 @@ Promise<AccountEntitlementResponse> {
 }
 
 
+export type BillingCheckoutResponse = {
+  checkout: {
+    checkoutUrl: string;
+  };
+};
+
+
+export async function createBillingCheckout(
+  requestToken: string
+): Promise<BillingCheckoutResponse> {
+  return apiRequest(
+    "/billing/checkout",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        requestToken,
+      }),
+    }
+  );
+}
+
+
 export async function createEntry(text: string): Promise<{ message: string; entry: JournalEntry }> {
   return apiRequest("/entries", {
     method: "POST",

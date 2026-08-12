@@ -35,6 +35,7 @@ import {
 import {
   ApiRequestError,
   analyzeEntry,
+  createBillingCheckout,
   createEntry,
   createUploadUrl,
   deleteEntry,
@@ -141,6 +142,10 @@ export default function ArchivePage() {
     entitlementError,
     setEntitlementError,
   ] = useState("");
+  const [
+    isCheckoutLoading,
+    setIsCheckoutLoading,
+  ] = useState(false);
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -309,6 +314,57 @@ export default function ArchivePage() {
       }
     } finally {
       setIsEntitlementLoading(false);
+    }
+  }
+
+  async function handleUpgrade() {
+    if (isCheckoutLoading) {
+      return;
+    }
+
+    setIsCheckoutLoading(true);
+
+    try {
+      const requestToken =
+        crypto.randomUUID();
+
+      const result =
+        await createBillingCheckout(
+          requestToken
+        );
+
+      const checkoutUrl =
+        result.checkout.checkoutUrl
+          ?.trim();
+
+      if (!checkoutUrl) {
+        throw new Error(
+          (
+            "Checkout URL was missing "
+            + "from the billing response."
+          )
+        );
+      }
+
+      window.location.assign(
+        checkoutUrl
+      );
+    } catch (error) {
+      const message = getErrorMessage(
+        error,
+        (
+          "Could not start Stripe "
+          + "checkout."
+        )
+      );
+
+      showToast(
+        "error",
+        "Checkout failed",
+        message
+      );
+    } finally {
+      setIsCheckoutLoading(false);
     }
   }
 
@@ -734,8 +790,14 @@ export default function ArchivePage() {
             errorMessage={
               entitlementError
             }
+            isCheckoutLoading={
+              isCheckoutLoading
+            }
             onRetry={() => {
               void refreshEntitlement();
+            }}
+            onUpgrade={() => {
+              void handleUpgrade();
             }}
           />
         )}

@@ -15,7 +15,9 @@ type AccountPlanCardProps = {
   entitlement: AccountEntitlement | null;
   isLoading: boolean;
   errorMessage: string;
+  isCheckoutLoading: boolean;
   onRetry: () => void;
+  onUpgrade: () => void;
 };
 
 
@@ -129,7 +131,9 @@ export default function AccountPlanCard({
   entitlement,
   isLoading,
   errorMessage,
+  isCheckoutLoading,
   onRetry,
+  onUpgrade,
 }: AccountPlanCardProps) {
   if (
     isLoading
@@ -349,13 +353,17 @@ export default function AccountPlanCard({
 
           <button
             type="button"
-            disabled
-            title={
-              "Billing will be enabled "
-              + "in Upgrade 16D."
+            onClick={onUpgrade}
+            disabled={
+              isCheckoutLoading
+            }
+            aria-busy={
+              isCheckoutLoading
             }
           >
-            Upgrade coming soon
+            {isCheckoutLoading
+              ? "Opening checkout..."
+              : "Upgrade to Pro"}
           </button>
         </div>
       )}

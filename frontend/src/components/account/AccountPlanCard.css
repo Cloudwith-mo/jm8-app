@@ -256,11 +256,20 @@
   padding: 8px 11px;
   border: 0;
   border-radius: 999px;
-  background: #dfe5e1;
-  color: #758079;
+  background: #1c2b24;
+  color: #ffffff;
   font-size: 0.72rem;
   font-weight: 750;
-  cursor: not-allowed;
+  cursor: pointer;
+}
+
+.account-upgrade-panel button:hover:not(:disabled) {
+  background: #365448;
+}
+
+.account-upgrade-panel button:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .account-pro-confirmation {
