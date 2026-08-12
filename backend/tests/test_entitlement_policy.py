@@ -180,14 +180,14 @@ class EntitlementPolicyTests(
             PLAN_FREE,
         )
 
-    def test_canceled_plan_remains_pro_until_end(
+    def test_scheduled_cancellation_remains_pro_until_end(
         self,
     ):
         entitlement = (
             resolve_effective_entitlement(
                 pro_record(
                     status=(
-                        STATUS_CANCELED
+                        STATUS_ACTIVE
                     ),
                     ends_at=FUTURE,
                     cancel_at_period_end=True,
@@ -203,8 +203,41 @@ class EntitlementPolicyTests(
 
         self.assertTrue(
             entitlement[
+                "access"
+            ]["isPro"]
+        )
+
+        self.assertTrue(
+            entitlement[
                 "subscription"
             ]["cancelAtPeriodEnd"]
+        )
+
+    def test_deleted_canceled_status_revokes_pro_immediately(
+        self,
+    ):
+        entitlement = (
+            resolve_effective_entitlement(
+                pro_record(
+                    status=(
+                        STATUS_CANCELED
+                    ),
+                    ends_at=FUTURE,
+                    cancel_at_period_end=False,
+                ),
+                now=FIXED_NOW,
+            )
+        )
+
+        self.assertEqual(
+            entitlement["plan"]["id"],
+            PLAN_FREE,
+        )
+
+        self.assertFalse(
+            entitlement[
+                "access"
+            ]["isPro"]
         )
 
     def test_canceled_plan_without_end_is_free(

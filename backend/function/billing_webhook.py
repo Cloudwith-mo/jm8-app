@@ -48,6 +48,11 @@ SUPPORTED_EVENT_TYPES = {
     "customer.subscription.deleted",
 }
 
+TERMINAL_ENTITLEMENT_STATUSES = {
+    STATUS_CANCELED,
+    STATUS_EXPIRED,
+}
+
 
 class BillingWebhookError(RuntimeError):
     def __init__(
@@ -270,10 +275,13 @@ def _entitlement_values(
             status_code=400,
         )
     starts_at, ends_at = _period(stripe_object)
-    scheduled_cancellation = (
-        stripe_object.get("cancel_at_period_end") is True
-        or stripe_object.get("cancel_at") is not None
-    )
+    if event_type == "customer.subscription.deleted":
+        scheduled_cancellation = False
+    else:
+        scheduled_cancellation = (
+            stripe_object.get("cancel_at_period_end") is True
+            or stripe_object.get("cancel_at") is not None
+        )
     return {
         "status": status_map[raw_status],
         "access_starts_at": starts_at,
@@ -397,6 +405,18 @@ def process_billing_webhook(
         _error("BillingCustomerOwnershipMismatch", "The billing customer ownership could not be verified.", status_code=409)
     if metadata.get("jm8_plan_id") != PLAN_PRO or metadata.get("jm8_offer_id") != BILLING_OFFER_PRO_MONTHLY:
         _error("InvalidBillingMetadata", "The Stripe billing metadata is invalid.", status_code=400)
+
+    if event_type == "customer.subscription.updated":
+        current = entitlement_reader(mapping["userId"])
+        if (
+            isinstance(current, Mapping)
+            and current.get("status") in TERMINAL_ENTITLEMENT_STATUSES
+        ):
+            return {
+                "received": True,
+                "eventId": event_id,
+                "ignored": True,
+            }
 
     values = _entitlement_values(event_type, stripe_object)
     try:
