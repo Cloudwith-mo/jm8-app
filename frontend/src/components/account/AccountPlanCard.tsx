@@ -16,8 +16,10 @@ type AccountPlanCardProps = {
   isLoading: boolean;
   errorMessage: string;
   isCheckoutLoading: boolean;
+  isPortalLoading: boolean;
   onRetry: () => void;
   onUpgrade: () => void;
+  onManageSubscription: () => void;
 };
 
 
@@ -132,8 +134,10 @@ export default function AccountPlanCard({
   isLoading,
   errorMessage,
   isCheckoutLoading,
+  isPortalLoading,
   onRetry,
   onUpgrade,
+  onManageSubscription,
 }: AccountPlanCardProps) {
   if (
     isLoading
@@ -376,6 +380,23 @@ export default function AccountPlanCard({
             Pro intelligence allowances
             are enabled for this account.
           </span>
+
+          <button
+            type="button"
+            onClick={
+              onManageSubscription
+            }
+            disabled={
+              isPortalLoading
+            }
+            aria-busy={
+              isPortalLoading
+            }
+          >
+            {isPortalLoading
+              ? "Opening portal..."
+              : "Manage subscription"}
+          </button>
         </div>
       )}
     </section>

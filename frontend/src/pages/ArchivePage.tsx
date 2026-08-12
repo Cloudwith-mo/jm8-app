@@ -36,6 +36,7 @@ import {
   ApiRequestError,
   analyzeEntry,
   createBillingCheckout,
+  createBillingPortal,
   createEntry,
   createUploadUrl,
   deleteEntry,
@@ -145,6 +146,10 @@ export default function ArchivePage() {
   const [
     isCheckoutLoading,
     setIsCheckoutLoading,
+  ] = useState(false);
+  const [
+    isPortalLoading,
+    setIsPortalLoading,
   ] = useState(false);
 
   const filteredEntries = useMemo(() => {
@@ -365,6 +370,52 @@ export default function ArchivePage() {
       );
     } finally {
       setIsCheckoutLoading(false);
+    }
+  }
+
+  async function handleManageSubscription() {
+    if (isPortalLoading) {
+      return;
+    }
+
+    setIsPortalLoading(true);
+
+    try {
+      const result =
+        await createBillingPortal();
+
+      const portalUrl =
+        result.portal.billingPortalUrl
+          ?.trim();
+
+      if (!portalUrl) {
+        throw new Error(
+          (
+            "Portal URL was missing "
+            + "from the billing response."
+          )
+        );
+      }
+
+      window.location.assign(
+        portalUrl
+      );
+    } catch (error) {
+      const message = getErrorMessage(
+        error,
+        (
+          "Could not open the Stripe "
+          + "customer portal."
+        )
+      );
+
+      showToast(
+        "error",
+        "Portal failed",
+        message
+      );
+    } finally {
+      setIsPortalLoading(false);
     }
   }
 
@@ -793,11 +844,17 @@ export default function ArchivePage() {
             isCheckoutLoading={
               isCheckoutLoading
             }
+            isPortalLoading={
+              isPortalLoading
+            }
             onRetry={() => {
               void refreshEntitlement();
             }}
             onUpgrade={() => {
               void handleUpgrade();
+            }}
+            onManageSubscription={() => {
+              void handleManageSubscription();
             }}
           />
         )}

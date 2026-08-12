@@ -252,7 +252,8 @@
   font-size: 0.75rem;
 }
 
-.account-upgrade-panel button {
+.account-upgrade-panel button,
+.account-pro-confirmation button {
   padding: 8px 11px;
   border: 0;
   border-radius: 999px;
@@ -263,18 +264,28 @@
   cursor: pointer;
 }
 
-.account-upgrade-panel button:hover:not(:disabled) {
+.account-upgrade-panel button:hover:not(:disabled),
+.account-pro-confirmation button:hover:not(:disabled) {
   background: #365448;
 }
 
-.account-upgrade-panel button:disabled {
+.account-upgrade-panel button:focus-visible,
+.account-pro-confirmation button:focus-visible {
+  outline: 2px solid #365448;
+  outline-offset: 2px;
+}
+
+.account-upgrade-panel button:disabled,
+.account-pro-confirmation button:disabled,
+.account-upgrade-panel button[aria-busy="true"],
+.account-pro-confirmation button[aria-busy="true"] {
   opacity: 0.55;
   cursor: wait;
 }
 
 .account-pro-confirmation {
   grid-template-columns:
-    auto minmax(0, 1fr);
+    auto minmax(0, 1fr) auto;
   background: #eaf3ed;
   color: #365448;
   font-size: 0.78rem;
@@ -312,12 +323,14 @@
     grid-template-columns: 1fr;
   }
 
-  .account-upgrade-panel {
+  .account-upgrade-panel,
+  .account-pro-confirmation {
     grid-template-columns:
       auto minmax(0, 1fr);
   }
 
-  .account-upgrade-panel button {
+  .account-upgrade-panel button,
+  .account-pro-confirmation button {
     grid-column: 1 / -1;
     justify-self: start;
   }

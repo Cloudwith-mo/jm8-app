@@ -171,6 +171,25 @@ export async function createBillingCheckout(
 }
 
 
+export type BillingPortalResponse = {
+  portal: {
+    billingPortalUrl: string;
+  };
+};
+
+
+export async function createBillingPortal():
+Promise<BillingPortalResponse> {
+  return apiRequest(
+    "/billing/portal",
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    }
+  );
+}
+
+
 export async function createEntry(text: string): Promise<{ message: string; entry: JournalEntry }> {
   return apiRequest("/entries", {
     method: "POST",
