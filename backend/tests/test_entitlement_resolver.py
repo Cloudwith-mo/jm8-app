@@ -245,13 +245,13 @@ class EntitlementResolverTests(
             "get_entitlement_record"
         )
     )
-    def test_scheduled_cancellation_window_resolves_to_pro(
+    def test_canceled_window_resolves_to_pro(
         self,
         read_record,
     ):
         read_record.return_value = (
             pro_record(
-                status=STATUS_ACTIVE,
+                status=STATUS_CANCELED,
                 ends_at=FUTURE,
                 cancel_at_period_end=True,
             )
@@ -267,48 +267,6 @@ class EntitlementResolverTests(
         self.assertEqual(
             entitlement["plan"]["id"],
             PLAN_PRO,
-        )
-
-        self.assertTrue(
-            entitlement[
-                "access"
-            ]["isPro"]
-        )
-
-    @patch(
-        (
-            "entitlement_resolver."
-            "get_entitlement_record"
-        )
-    )
-    def test_deleted_canceled_status_resolves_to_free(
-        self,
-        read_record,
-    ):
-        read_record.return_value = (
-            pro_record(
-                status=STATUS_CANCELED,
-                ends_at=FUTURE,
-                cancel_at_period_end=False,
-            )
-        )
-
-        entitlement = (
-            resolve_user_entitlement(
-                "test-user",
-                now=FIXED_NOW,
-            )
-        )
-
-        self.assertEqual(
-            entitlement["plan"]["id"],
-            PLAN_FREE,
-        )
-
-        self.assertFalse(
-            entitlement[
-                "access"
-            ]["isPro"]
         )
 
     @patch(

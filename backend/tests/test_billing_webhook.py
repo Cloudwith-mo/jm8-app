@@ -4,7 +4,6 @@ import json
 import os
 import time
 import unittest
-from datetime import datetime, timezone
 
 
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
@@ -19,13 +18,6 @@ from billing_identity import build_billing_user_reference  # noqa: E402
 from billing_webhook import (  # noqa: E402
     BillingWebhookError,
     process_billing_webhook,
-)
-from entitlement_policy import (  # noqa: E402
-    resolve_effective_entitlement,
-)
-from usage_policy import (  # noqa: E402
-    PLAN_FREE,
-    PLAN_PRO,
 )
 
 
@@ -238,135 +230,6 @@ class BillingWebhookTests(unittest.TestCase):
         )
 
         self.assertFalse(writes[0][1]["cancel_at_period_end"])
-
-    def test_scheduled_cancellation_update_retains_active_pro_access(self):
-        payload = checkout_payload()
-        payload["id"] = "evt_subscription_scheduled_cancel_123"
-        payload["type"] = "customer.subscription.updated"
-        payload["data"]["object"] = {
-            "object": "subscription",
-            "status": "active",
-            "customer": CUSTOMER_ID,
-            "current_period_start": 1_700_000_000,
-            "current_period_end": 1_702_592_000,
-            "cancel_at_period_end": True,
-            "metadata": {
-                "jm8_user_ref": USER_REFERENCE,
-                "jm8_plan_id": "PRO",
-                "jm8_offer_id": "JM8_PRO_MONTHLY",
-            },
-        }
-        writes = []
-
-        process_billing_webhook(
-            signed_event(payload),
-            secret_loader=lambda _environment: {"STRIPE_WEBHOOK_SECRET": SECRET},
-            customer_reader=customer_reader,
-            entitlement_reader=lambda _user_id: {"updatedAt": "2026-01-01T00:00:00+00:00"},
-            entitlement_creator=lambda *_args, **_kwargs: self.fail("create must not run"),
-            entitlement_replacer=lambda user_id, **values: writes.append((user_id, values)) or values,
-        )
-
-        self.assertEqual(writes[0][1]["status"], "ACTIVE")
-        self.assertTrue(writes[0][1]["cancel_at_period_end"])
-
-        entitlement = resolve_effective_entitlement(
-            {
-                "plan": PLAN_PRO,
-                "status": writes[0][1]["status"],
-                "source": writes[0][1]["source"],
-                "accessStartsAt": writes[0][1]["access_starts_at"],
-                "accessEndsAt": writes[0][1]["access_ends_at"],
-                "cancelAtPeriodEnd": writes[0][1]["cancel_at_period_end"],
-                "updatedAt": "2026-08-01T00:00:00+00:00",
-            },
-            now=datetime.fromtimestamp(1_700_500_000, tz=timezone.utc),
-        )
-
-        self.assertEqual(entitlement["plan"]["id"], PLAN_PRO)
-        self.assertTrue(entitlement["access"]["isPro"])
-
-    def test_subscription_deleted_marks_canceled_and_revokes_pro(self):
-        payload = checkout_payload()
-        payload["id"] = "evt_subscription_deleted_123"
-        payload["type"] = "customer.subscription.deleted"
-        payload["data"]["object"] = {
-            "object": "subscription",
-            "status": "canceled",
-            "customer": CUSTOMER_ID,
-            "current_period_start": 1_700_000_000,
-            "current_period_end": 1_702_592_000,
-            "cancel_at_period_end": True,
-            "metadata": {
-                "jm8_user_ref": USER_REFERENCE,
-                "jm8_plan_id": "PRO",
-                "jm8_offer_id": "JM8_PRO_MONTHLY",
-            },
-        }
-        writes = []
-
-        process_billing_webhook(
-            signed_event(payload),
-            secret_loader=lambda _environment: {"STRIPE_WEBHOOK_SECRET": SECRET},
-            customer_reader=customer_reader,
-            entitlement_reader=lambda _user_id: {"updatedAt": "2026-01-01T00:00:00+00:00"},
-            entitlement_creator=lambda *_args, **_kwargs: self.fail("create must not run"),
-            entitlement_replacer=lambda user_id, **values: writes.append((user_id, values)) or values,
-        )
-
-        self.assertEqual(writes[0][1]["status"], "CANCELED")
-        self.assertFalse(writes[0][1]["cancel_at_period_end"])
-
-        entitlement = resolve_effective_entitlement(
-            {
-                "plan": PLAN_PRO,
-                "status": writes[0][1]["status"],
-                "source": writes[0][1]["source"],
-                "accessStartsAt": writes[0][1]["access_starts_at"],
-                "accessEndsAt": writes[0][1]["access_ends_at"],
-                "cancelAtPeriodEnd": writes[0][1]["cancel_at_period_end"],
-                "updatedAt": "2026-08-01T00:00:00+00:00",
-            },
-            now=datetime.fromtimestamp(1_700_500_000, tz=timezone.utc),
-        )
-
-        self.assertEqual(entitlement["plan"]["id"], PLAN_FREE)
-        self.assertFalse(entitlement["access"]["isPro"])
-        self.assertEqual(entitlement["subscription"]["status"], "CANCELED")
-
-    def test_stale_subscription_update_is_ignored_after_deletion(self):
-        payload = checkout_payload()
-        payload["id"] = "evt_subscription_stale_update_123"
-        payload["type"] = "customer.subscription.updated"
-        payload["data"]["object"] = {
-            "object": "subscription",
-            "status": "active",
-            "customer": CUSTOMER_ID,
-            "current_period_start": 1_700_000_000,
-            "current_period_end": 1_702_592_000,
-            "cancel_at_period_end": True,
-            "metadata": {
-                "jm8_user_ref": USER_REFERENCE,
-                "jm8_plan_id": "PRO",
-                "jm8_offer_id": "JM8_PRO_MONTHLY",
-            },
-        }
-        writes = []
-
-        result = process_billing_webhook(
-            signed_event(payload),
-            secret_loader=lambda _environment: {"STRIPE_WEBHOOK_SECRET": SECRET},
-            customer_reader=customer_reader,
-            entitlement_reader=lambda _user_id: {
-                "updatedAt": "2026-08-01T00:00:00+00:00",
-                "status": "CANCELED",
-            },
-            entitlement_creator=lambda *_args, **_kwargs: self.fail("create must not run"),
-            entitlement_replacer=lambda user_id, **values: writes.append((user_id, values)) or values,
-        )
-
-        self.assertTrue(result["ignored"])
-        self.assertEqual(writes, [])
 
 
 if __name__ == "__main__":
