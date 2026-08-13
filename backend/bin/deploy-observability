@@ -21,11 +21,16 @@ WORKER_LOG_GROUP="/aws/lambda/${WORKER_FUNCTION_NAME}"
 FAILURE_LOG_GROUP="/aws/lambda/${FAILURE_FUNCTION_NAME}"
 HISTORICAL_WORKER_LOG_GROUP="/aws/lambda/${HISTORICAL_WORKER_FUNCTION_NAME}"
 HISTORICAL_COORDINATOR_LOG_GROUP="/aws/lambda/${HISTORICAL_COORDINATOR_FUNCTION_NAME}"
+ANALYZE_ENTRY_FUNCTION_NAME="${APP_NAME}-${STAGE}-analyze-entry"
+ANALYZE_ENTRY_LOG_GROUP="/aws/lambda/${ANALYZE_ENTRY_FUNCTION_NAME}"
+API_GATEWAY_NAME="${APP_NAME}-${STAGE}-api"
+API_ACCESS_LOG_GROUP="/aws/apigateway/${API_GATEWAY_NAME}"
 
 DASHBOARD_NAME="${APP_NAME}-${STAGE}-operations"
 TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
 METRIC_NAMESPACE="JM8/OCR"
 REANALYSIS_METRIC_NAMESPACE="JM8/HistoricalReanalysis"
+BILLING_METRIC_NAMESPACE="JM8/Billing"
 
 API_ERRORS_ALARM="${APP_NAME}-${STAGE}-api-errors"
 API_THROTTLES_ALARM="${APP_NAME}-${STAGE}-api-throttles"
@@ -41,6 +46,7 @@ REANALYSIS_COORDINATOR_ERRORS_ALARM="${APP_NAME}-${STAGE}-reanalysis-coordinator
 REANALYSIS_COORDINATOR_THROTTLES_ALARM="${APP_NAME}-${STAGE}-reanalysis-coordinator-throttles"
 REANALYSIS_WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-reanalysis-workflow-failed"
 REANALYSIS_WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-reanalysis-workflow-timed-out"
+BILLING_WEBHOOK_FAILURES_ALARM="${APP_NAME}-${STAGE}-billing-webhook-failures"
 
 mkdir -p .build
 
@@ -214,7 +220,9 @@ for LOG_GROUP in \
   "$WORKER_LOG_GROUP" \
   "$FAILURE_LOG_GROUP" \
   "$HISTORICAL_WORKER_LOG_GROUP" \
-  "$HISTORICAL_COORDINATOR_LOG_GROUP"
+  "$HISTORICAL_COORDINATOR_LOG_GROUP" \
+  "$ANALYZE_ENTRY_LOG_GROUP" \
+  "$API_ACCESS_LOG_GROUP"
 do
   LOG_GROUP_EXISTS="$(
     aws logs describe-log-groups \
@@ -243,6 +251,109 @@ done
 
 echo "Lambda log retention configured for 30 days."
 echo "Historical re-analysis worker and coordinator logs are included."
+echo "Analysis Lambda log retention is included."
+echo "API Gateway access log retention is included."
+
+echo "Configuring API Gateway access logging and detailed metrics..."
+
+API_ID="$(
+  aws apigatewayv2 get-apis \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Items[?Name=='${API_GATEWAY_NAME}'].ApiId | [0]" \
+    --output text
+)"
+
+if [ -z "$API_ID" ] || [ "$API_ID" = "None" ]; then
+  echo "HTTP API was not found: $API_GATEWAY_NAME"
+  exit 1
+fi
+
+API_ACCESS_LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${API_ACCESS_LOG_GROUP}"
+API_ACCESS_LOG_POLICY_NAME="${API_GATEWAY_NAME}-access-logs"
+
+python3 - \
+  "$API_ACCESS_LOG_GROUP_ARN" \
+  "$AWS_REGION" \
+  "$ACCOUNT_ID" \
+  "$API_ID" \
+  > .build/api-access-log-resource-policy.json <<'PY'
+import json
+import sys
+
+log_group_arn = sys.argv[1]
+region = sys.argv[2]
+account_id = sys.argv[3]
+api_id = sys.argv[4]
+
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowJM8ApiGatewayAccessLogs",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "apigateway.amazonaws.com",
+            },
+            "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+            ],
+            "Resource": f"{log_group_arn}:*",
+            "Condition": {
+                "ArnLike": {
+                    "aws:SourceArn": (
+                        f"arn:aws:apigateway:{region}::/apis/{api_id}/*"
+                    ),
+                },
+                "StringEquals": {
+                    "aws:SourceAccount": account_id,
+                },
+            },
+        }
+    ],
+}))
+PY
+
+aws logs put-resource-policy \
+  --policy-name "$API_ACCESS_LOG_POLICY_NAME" \
+  --policy-document "$(cat .build/api-access-log-resource-policy.json)" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+python3 - \
+  "$API_ACCESS_LOG_GROUP_ARN" \
+  > .build/api-access-log-settings.json <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "DestinationArn": sys.argv[1],
+    "Format": json.dumps({
+        "requestId": "$context.requestId",
+        "routeKey": "$context.routeKey",
+        "httpMethod": "$context.httpMethod",
+        "status": "$context.status",
+        "responseLatency": "$context.responseLatency",
+        "integrationLatency": "$context.integrationLatency",
+        "integrationError": "$context.integrationErrorMessage",
+        "sourceIp": "$context.identity.sourceIp",
+    }, separators=(",", ":")),
+}))
+PY
+
+aws apigatewayv2 update-stage \
+  --api-id "$API_ID" \
+  --stage-name '$default' \
+  --auto-deploy \
+  --access-log-settings file://.build/api-access-log-settings.json \
+  --default-route-settings DetailedMetricsEnabled=true \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+echo "API Gateway access logging and detailed metrics configured."
 
 echo "Creating OCR metric filters..."
 
@@ -367,6 +478,18 @@ put_log_metric \
   "1"
 
 echo "Historical re-analysis metric filters created."
+
+echo "Creating billing webhook metric filters..."
+
+put_log_metric \
+  "$API_LOG_GROUP" \
+  "${APP_NAME}-${STAGE}-billing-webhook-failed" \
+  '{ $.event = "billing_webhook_failed" }' \
+  "$BILLING_METRIC_NAMESPACE" \
+  "BillingWebhookFailures" \
+  "1"
+
+echo "Billing webhook metric filters created."
 
 put_count_alarm() {
   local alarm_name="$1"
@@ -533,6 +656,16 @@ put_count_alarm \
 
 echo "Historical re-analysis alarms created."
 
+echo "Creating billing webhook alarms..."
+
+put_undimensioned_count_alarm \
+  "$BILLING_WEBHOOK_FAILURES_ALARM" \
+  "JM8 billing webhook reported one or more failures in five minutes." \
+  "$BILLING_METRIC_NAMESPACE" \
+  "BillingWebhookFailures"
+
+echo "Billing webhook alarms created."
+
 echo "CloudWatch alarms created."
 
 python3 - \
@@ -584,6 +717,7 @@ alarm_names = [
     f"{app_name}-{stage}-failure-handler-errors",
     f"{app_name}-{stage}-workflow-failed",
     f"{app_name}-{stage}-workflow-timed-out",
+    f"{app_name}-{stage}-billing-webhook-failures",
 ]
 
 alarm_arns = [
@@ -1288,6 +1422,29 @@ dashboard["widgets"].extend([
                 "| sort @timestamp desc\n"
                 "| limit 20"
             ),
+        },
+    },
+    {
+        "type": "metric",
+        "x": 0,
+        "y": 52,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": "Billing webhook failures",
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    "JM8/Billing",
+                    "BillingWebhookFailures",
+                    {
+                        "stat": "Sum",
+                        "label": "Webhook failures",
+                    },
+                ],
+            ],
         },
     },
 ])

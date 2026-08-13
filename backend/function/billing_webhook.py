@@ -73,13 +73,38 @@ class BillingWebhookError(RuntimeError):
         }
 
 
+def _log(event_name: str, **fields: Any) -> None:
+    print(json.dumps({"event": event_name, **fields}))
+
+
+def _log_failure(
+    code: str,
+    *,
+    retryable: bool = False,
+    failure_stage: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "failureCode": code,
+        "retryable": retryable,
+    }
+    if failure_stage:
+        payload["failureStage"] = failure_stage
+    _log("billing_webhook_failed", **payload)
+
+
 def _error(
     code: str,
     message: str,
     *,
     status_code: int,
     retryable: bool = False,
+    failure_stage: str | None = None,
 ) -> None:
+    _log_failure(
+        code,
+        retryable=retryable,
+        failure_stage=failure_stage,
+    )
     raise BillingWebhookError(
         code,
         message,
@@ -104,6 +129,7 @@ def _raw_body(event: Mapping[str, Any]) -> bytes:
             else body.encode("utf-8")
         )
     except (ValueError, UnicodeEncodeError) as exc:
+        _log_failure("InvalidWebhookBody")
         raise BillingWebhookError(
             "InvalidWebhookBody",
             "The Stripe webhook body is invalid.",
@@ -204,6 +230,7 @@ def _stripe_timestamp(value: Any) -> str | None:
     try:
         return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
     except (OverflowError, OSError, ValueError) as exc:
+        _log_failure("InvalidWebhookEvent")
         raise BillingWebhookError(
             "InvalidWebhookEvent",
             "The Stripe subscription period is invalid.",
@@ -335,6 +362,11 @@ def process_billing_webhook(
         runtime_environment = secret_loader(None)
         config = load_stripe_webhook_config(runtime_environment)
     except (StripeSecretLoadError, BillingPolicyError) as exc:
+        _log_failure(
+            getattr(exc, "code", "WebhookConfigurationUnavailable"),
+            retryable=isinstance(exc, StripeSecretLoadError) and exc.retryable,
+            failure_stage="configuration",
+        )
         raise BillingWebhookError(
             getattr(exc, "code", "WebhookConfigurationUnavailable"),
             "Stripe webhook verification is unavailable.",
@@ -351,6 +383,7 @@ def process_billing_webhook(
     try:
         stripe_event = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _log_failure("InvalidWebhookEvent")
         raise BillingWebhookError(
             "InvalidWebhookEvent",
             "The Stripe webhook event is invalid.",
@@ -379,6 +412,11 @@ def process_billing_webhook(
     try:
         mapping = customer_reader(customer_id, livemode=livemode)
     except BillingCustomerStoreError as exc:
+        _log_failure(
+            exc.code,
+            retryable=exc.retryable,
+            failure_stage="customerStore",
+        )
         raise BillingWebhookError(
             exc.code,
             "The billing customer mapping is unavailable.",
@@ -408,6 +446,11 @@ def process_billing_webhook(
             replacer=entitlement_replacer,
         )
     except EntitlementStoreError as exc:
+        _log_failure(
+            exc.code,
+            retryable=exc.retryable,
+            failure_stage="entitlement",
+        )
         raise BillingWebhookError(
             exc.code,
             "The JM8 entitlement could not be updated.",

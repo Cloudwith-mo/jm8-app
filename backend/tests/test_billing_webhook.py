@@ -1,9 +1,12 @@
 import hashlib
 import hmac
+import io
 import json
 import os
 import time
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 
 
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
@@ -19,6 +22,7 @@ from billing_webhook import (  # noqa: E402
     BillingWebhookError,
     process_billing_webhook,
 )
+from stripe_secret_loader import StripeSecretLoadError  # noqa: E402
 
 
 SECRET = "whsec_test_webhook_12345678"
@@ -230,6 +234,124 @@ class BillingWebhookTests(unittest.TestCase):
         )
 
         self.assertFalse(writes[0][1]["cancel_at_period_end"])
+
+    def test_configuration_failure_logs_safe_fields(self):
+        event = signed_event(checkout_payload())
+        event["headers"]["Authorization"] = "Bearer secret-jwt-token"
+        event["headers"]["Stripe-Signature"] = "t=1700000000,v1=deadbeef"
+        event["body"] = json.dumps({
+            "customer_email": "alice@example.com",
+            "customer": CUSTOMER_ID,
+            "subscription_id": "sub_test_123",
+            "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.signature",
+            "journal": "earnest journal content with sensitive notes",
+            "secret": "sk_test_12345",
+        }, separators=(",", ":"))
+
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout), self.assertRaises(BillingWebhookError) as captured:
+            process_billing_webhook(
+                event,
+                secret_loader=lambda _environment: (_ for _ in ()).throw(
+                    StripeSecretLoadError(
+                        "InvalidStripeSecretArn",
+                        "The Stripe secret reference is not configured correctly.",
+                        retryable=False,
+                    )
+                ),
+                customer_reader=lambda *_args, **_kwargs: self.fail("lookup must not run"),
+            )
+
+        self.assertEqual(captured.exception.code, "InvalidStripeSecretArn")
+        self.assertEqual(captured.exception.status_code, 500)
+        self.assertFalse(captured.exception.retryable)
+
+        payloads = [
+            json.loads(line)
+            for line in stdout.getvalue().splitlines()
+            if line.strip()
+        ]
+        failure = next(item for item in payloads if item.get("event") == "billing_webhook_failed")
+
+        self.assertEqual(failure["event"], "billing_webhook_failed")
+        self.assertEqual(failure["failureCode"], "InvalidStripeSecretArn")
+        self.assertFalse(failure["retryable"])
+        self.assertEqual(failure["failureStage"], "configuration")
+
+        serialized = json.dumps(payloads)
+        for forbidden in (
+            "Authorization",
+            "Stripe-Signature",
+            "customer_email",
+            "alice@example.com",
+            "customer_id",
+            "customer",
+            "subscription_id",
+            "sub_test_123",
+            "secret",
+            "sk_test",
+            "whsec",
+            "JWT",
+            "journal",
+            "content",
+            "eyJhbGci",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+
+class ObservabilityDeploymentWiringTests(unittest.TestCase):
+    def test_observability_scripts_configure_default_stage_and_safe_api_logging(self):
+        create_api = Path("bin/create-api").read_text()
+        deploy_observability = Path("bin/deploy-observability").read_text()
+
+        def access_log_format(script_text: str) -> str:
+            start = script_text.find('"Format": json.dumps({')
+            self.assertNotEqual(start, -1)
+            end = script_text.find("}))", start)
+            self.assertNotEqual(end, -1)
+            return script_text[start:end + 3]
+
+        create_format = access_log_format(create_api)
+        deploy_format = access_log_format(deploy_observability)
+
+        self.assertIn("--stage-name '$default'", create_api)
+        self.assertIn("--stage-name '$default'", deploy_observability)
+        self.assertIn("DetailedMetricsEnabled=true", create_api)
+        self.assertIn("DetailedMetricsEnabled=true", deploy_observability)
+        self.assertIn("/aws/apigateway/${API_NAME}", create_api)
+        self.assertIn("/aws/apigateway/${API_GATEWAY_NAME}", deploy_observability)
+        self.assertIn("--retention-in-days 30", create_api)
+        self.assertIn("--retention-in-days 30", deploy_observability)
+        self.assertIn('"requestId": "$context.requestId"', create_format)
+        self.assertIn('"routeKey": "$context.routeKey"', create_format)
+        self.assertIn('"httpMethod": "$context.httpMethod"', create_format)
+        self.assertIn('"status": "$context.status"', create_format)
+        self.assertIn('"responseLatency": "$context.responseLatency"', create_format)
+        self.assertIn('"integrationLatency": "$context.integrationLatency"', create_format)
+        self.assertIn('"integrationError": "$context.integrationErrorMessage"', create_format)
+        self.assertIn('"sourceIp": "$context.identity.sourceIp"', create_format)
+
+        for forbidden in (
+            "Authorization",
+            "authorization",
+            "jwt",
+            "request body",
+            "response body",
+            "Stripe-Signature",
+            "journal",
+            "journal text",
+        ):
+            self.assertNotIn(forbidden, create_format)
+            self.assertNotIn(forbidden, deploy_format)
+
+        self.assertIn("ANALYZE_ENTRY_LOG_GROUP", deploy_observability)
+        self.assertIn("$ANALYZE_ENTRY_LOG_GROUP", deploy_observability)
+        self.assertIn("billing_webhook_failed", deploy_observability)
+        self.assertIn("$TOPIC_ARN", deploy_observability)
+        self.assertIn("billing-webhook-failures", deploy_observability)
+        self.assertIn("billing_webhook_failed", deploy_observability)
+        self.assertIn('"widgets"', deploy_observability)
 
 
 if __name__ == "__main__":

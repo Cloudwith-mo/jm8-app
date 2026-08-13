@@ -259,6 +259,122 @@ else
   echo "Default stage already exists."
 fi
 
+ACCESS_LOG_GROUP="/aws/apigateway/${API_NAME}"
+ACCESS_LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${ACCESS_LOG_GROUP}"
+ACCESS_LOG_POLICY_NAME="${API_NAME}-access-logs"
+
+mkdir -p .build
+
+echo "Configuring API Gateway access logs and detailed metrics."
+
+ACCESS_LOG_GROUP_EXISTS="$(
+  aws logs describe-log-groups \
+    --log-group-name-prefix "$ACCESS_LOG_GROUP" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "logGroups[?logGroupName=='${ACCESS_LOG_GROUP}'].logGroupName | [0]" \
+    --output text
+)"
+
+if [ -z "$ACCESS_LOG_GROUP_EXISTS" ] ||
+   [ "$ACCESS_LOG_GROUP_EXISTS" = "None" ]; then
+  aws logs create-log-group \
+    --log-group-name "$ACCESS_LOG_GROUP" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+fi
+
+aws logs put-retention-policy \
+  --log-group-name "$ACCESS_LOG_GROUP" \
+  --retention-in-days 30 \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+python3 - \
+  "$ACCESS_LOG_GROUP_ARN" \
+  "$AWS_REGION" \
+  "$ACCOUNT_ID" \
+  "$API_ID" \
+  "$ACCESS_LOG_POLICY_NAME" \
+  > .build/api-access-log-resource-policy.json <<'PY'
+import json
+import sys
+
+log_group_arn = sys.argv[1]
+region = sys.argv[2]
+account_id = sys.argv[3]
+api_id = sys.argv[4]
+
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowJM8ApiGatewayAccessLogs",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "apigateway.amazonaws.com",
+            },
+            "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+            ],
+            "Resource": f"{log_group_arn}:*",
+            "Condition": {
+                "ArnLike": {
+                    "aws:SourceArn": (
+                        f"arn:aws:apigateway:{region}::/apis/{api_id}/*"
+                    ),
+                },
+                "StringEquals": {
+                    "aws:SourceAccount": account_id,
+                },
+            },
+        }
+    ],
+}))
+PY
+
+aws logs put-resource-policy \
+  --policy-name "$ACCESS_LOG_POLICY_NAME" \
+  --policy-document "$(cat .build/api-access-log-resource-policy.json)" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+python3 - \
+  "$ACCESS_LOG_GROUP_ARN" \
+  > .build/api-access-log-settings.json <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "DestinationArn": sys.argv[1],
+    "Format": json.dumps({
+        "requestId": "$context.requestId",
+        "routeKey": "$context.routeKey",
+        "httpMethod": "$context.httpMethod",
+        "status": "$context.status",
+        "responseLatency": "$context.responseLatency",
+        "integrationLatency": "$context.integrationLatency",
+        "integrationError": "$context.integrationErrorMessage",
+        "sourceIp": "$context.identity.sourceIp",
+    }, separators=(",", ":")),
+}))
+PY
+
+aws apigatewayv2 update-stage \
+  --api-id "$API_ID" \
+  --stage-name '$default' \
+  --auto-deploy \
+  --access-log-settings file://.build/api-access-log-settings.json \
+  --default-route-settings DetailedMetricsEnabled=true \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+echo "API Gateway access logging and detailed metrics configured."
+
 echo "Adding Lambda permission for API Gateway."
 
 SOURCE_ARN="arn:aws:execute-api:${AWS_REGION}:${ACCOUNT_ID}:${API_ID}/*/*"
