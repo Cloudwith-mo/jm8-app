@@ -115,6 +115,18 @@ class TestCreateResourcesScriptSafety(unittest.TestCase):
         for f in forbidden:
             self.assertNotIn(f, self.script)
 
+    def test_uses_valid_dynamodb_pitr_parameter(self):
+        normalized_script = self.script.replace("\\\n", " ")
+        self.assertIn(
+            "--point-in-time-recovery-specification "
+            "PointInTimeRecoveryEnabled=true",
+            normalized_script,
+        )
+        self.assertNotIn(
+            "--point-in-time-recovery-specification Enabled=true",
+            normalized_script,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

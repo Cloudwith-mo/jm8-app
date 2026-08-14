@@ -127,7 +127,7 @@ fi
   echo "Enabling DynamoDB Point-in-Time Recovery for $TABLE_NAME (idempotent)"
   aws dynamodb update-continuous-backups \
     --table-name "$TABLE_NAME" \
-    --point-in-time-recovery-specification Enabled=true \
+    --point-in-time-recovery-specification PointInTimeRecoveryEnabled=true \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" >/dev/null
 
