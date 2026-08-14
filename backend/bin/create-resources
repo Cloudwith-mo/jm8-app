@@ -121,6 +121,123 @@ else
   echo "S3 bucket already exists."
 fi
 
+  echo "Applying DynamoDB and S3 hardening (PITR, deletion protection, HTTPS-only policy, lifecycle, tags, CORS)..."
+
+  # Ensure DynamoDB point-in-time recovery (PITR) is enabled idempotently
+  echo "Enabling DynamoDB Point-in-Time Recovery for $TABLE_NAME (idempotent)"
+  aws dynamodb update-continuous-backups \
+    --table-name "$TABLE_NAME" \
+    --point-in-time-recovery-specification Enabled=true \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" >/dev/null
+
+  echo "Enabling DynamoDB deletion protection for $TABLE_NAME (idempotent)"
+  aws dynamodb update-table \
+    --table-name "$TABLE_NAME" \
+    --deletion-protection-enabled \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" >/dev/null
+
+  # Prepare build dir for policy/lifecycle/tag files
+  mkdir -p .build
+
+  # --- HTTPS-only bucket policy (deny when aws:SecureTransport is false) ---
+  echo "Merging HTTPS-only deny with any existing bucket policy (preserve unrelated statements)"
+  set +e
+  aws s3api get-bucket-policy --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/existing_policy.json 2>.build/get_policy_err.json
+  GET_POLICY_RC=$?
+  set -e
+  python3 bin/jm8_s3_helpers.py check-error .build/get_policy_err.json NoSuchBucketPolicy || exit $?
+  if [ "$GET_POLICY_RC" -ne 0 ] && [ ! -s .build/existing_policy.json ]; then
+    : > .build/existing_policy.json
+  fi
+  python3 bin/jm8_s3_helpers.py merge-policy .build/existing_policy.json "$RAW_BUCKET" .build/https-only-policy.json
+  aws s3api put-bucket-policy \
+    --bucket "$RAW_BUCKET" \
+    --policy file://.build/https-only-policy.json \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  # --- Lifecycle: abort incomplete multipart after 7 days, delete noncurrent versions after 30 days ---
+  echo "Ensuring lifecycle rules for $RAW_BUCKET"
+  set +e
+  aws s3api get-bucket-lifecycle-configuration --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/existing_lifecycle.json 2>.build/get_lifecycle_err.json
+  GET_LIFECYCLE_RC=$?
+  set -e
+  python3 bin/jm8_s3_helpers.py check-error .build/get_lifecycle_err.json NoSuchLifecycleConfiguration || exit $?
+  if [ "$GET_LIFECYCLE_RC" -ne 0 ] && [ ! -s .build/existing_lifecycle.json ]; then
+    : > .build/existing_lifecycle.json
+  fi
+  python3 bin/jm8_s3_helpers.py merge-lifecycle .build/existing_lifecycle.json .build/lifecycle.json
+  aws s3api put-bucket-lifecycle-configuration \
+    --bucket "$RAW_BUCKET" \
+    --lifecycle-configuration file://.build/lifecycle.json \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  # --- Tags: App, Stage, ManagedBy=aws-cli, DataClassification=Sensitive ---
+  echo "Ensuring bucket tags for $RAW_BUCKET"
+  set +e
+  aws s3api get-bucket-tagging --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/existing_tags.json 2>.build/get_tags_err.json
+  GET_TAGS_RC=$?
+  set -e
+  python3 bin/jm8_s3_helpers.py check-error .build/get_tags_err.json NoSuchTagSet || exit $?
+  if [ "$GET_TAGS_RC" -ne 0 ] && [ ! -s .build/existing_tags.json ]; then
+    : > .build/existing_tags.json
+  fi
+  python3 bin/jm8_s3_helpers.py merge-tags .build/existing_tags.json "$APP_NAME" "$STAGE" .build/tags.json
+  aws s3api put-bucket-tagging \
+    --bucket "$RAW_BUCKET" \
+    --tagging file://.build/tags.json \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  # --- CORS: apply only for dev stage, and remove stale generated file before deciding ---
+  echo "Ensuring CORS for local development origins only for STAGE=dev"
+  rm -f .build/cors.json
+  set +e
+  aws s3api get-bucket-cors --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/existing_cors.json 2>.build/get_cors_err.json
+  GET_CORS_RC=$?
+  set -e
+  python3 bin/jm8_s3_helpers.py check-error .build/get_cors_err.json NoSuchCORSConfiguration || exit $?
+  if [ "$GET_CORS_RC" -ne 0 ] && [ ! -s .build/existing_cors.json ]; then
+    : > .build/existing_cors.json
+  fi
+  python3 bin/jm8_s3_helpers.py decide-cors .build/existing_cors.json "$STAGE" .build/cors.json
+  if [ -f .build/cors.json ]; then
+    aws s3api put-bucket-cors \
+      --bucket "$RAW_BUCKET" \
+      --cors-configuration file://.build/cors.json \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION"
+  fi
+
+  echo "S3 hardening complete."
+
+  echo "Running post-deployment verification (enforcing checks)"
+  aws dynamodb describe-continuous-backups \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" > .build/describe_continuous_backups.json
+
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" > .build/describe_table.json
+
+  set +e
+  aws s3api get-bucket-policy --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/effective_policy.json 2>.build/get_policy_err_post.json
+  python3 bin/jm8_s3_helpers.py check-error .build/get_policy_err_post.json || exit $?
+  aws s3api get-bucket-lifecycle-configuration --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/effective_lifecycle.json 2>.build/get_lifecycle_err_post.json
+  python3 bin/jm8_s3_helpers.py check-error .build/get_lifecycle_err_post.json || exit $?
+  aws s3api get-bucket-tagging --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/effective_tags.json 2>.build/get_tags_err_post.json
+  python3 bin/jm8_s3_helpers.py check-error .build/get_tags_err_post.json || exit $?
+  aws s3api get-bucket-cors --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/effective_cors.json 2>.build/get_cors_err_post.json
+  python3 bin/jm8_s3_helpers.py check-error .build/get_cors_err_post.json || exit $?
+  set -e
+
+  python3 bin/jm8_s3_helpers.py verify-postdeploy .build/describe_continuous_backups.json .build/describe_table.json .build/effective_policy.json .build/effective_lifecycle.json .build/effective_tags.json .build/effective_cors.json "$RAW_BUCKET" "$APP_NAME" "$STAGE"
+
 echo "Creating Lambda app access policy."
 
 mkdir -p .build
