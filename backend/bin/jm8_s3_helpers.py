@@ -14,10 +14,16 @@ from typing import Any, Dict, List, Optional
 def load_json(path: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = f.read()
     except FileNotFoundError:
         return None
-    except Exception:
+
+    if raw is None or raw.strip() == "":
+        return None
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
         raise
 
 

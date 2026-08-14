@@ -70,6 +70,34 @@ class TestJM8S3Helpers(unittest.TestCase):
         res = helpers.decide_cors_apply(None, 'dev')
         self.assertEqual(res, desired)
 
+    def test_load_json_empty_file_returns_none(self):
+        with tempfile.NamedTemporaryFile('w', delete=False) as tf:
+            tf.write('')
+            path = tf.name
+        try:
+            self.assertIsNone(helpers.load_json(path))
+        finally:
+            os.unlink(path)
+
+    def test_load_json_whitespace_returns_none(self):
+        with tempfile.NamedTemporaryFile('w', delete=False) as tf:
+            tf.write('  \n \t  ')
+            path = tf.name
+        try:
+            self.assertIsNone(helpers.load_json(path))
+        finally:
+            os.unlink(path)
+
+    def test_load_json_malformed_nonempty_json_raises(self):
+        with tempfile.NamedTemporaryFile('w', delete=False) as tf:
+            tf.write('{not valid json}')
+            path = tf.name
+        try:
+            with self.assertRaises(json.JSONDecodeError):
+                helpers.load_json(path)
+        finally:
+            os.unlink(path)
+
     def test_cli_check_error_allows_nosuch(self):
         with tempfile.NamedTemporaryFile('w', delete=False) as tf:
             tf.write('{"Error": {"Code": "NoSuchBucketPolicy"}}')
@@ -85,6 +113,18 @@ class TestJM8S3Helpers(unittest.TestCase):
             rc = subprocess.call([sys.executable, HELPER_PATH, 'check-error', tf.name])
             os.unlink(tf.name)
             self.assertNotEqual(rc, 0)
+
+    def test_cli_merge_policy_accepts_empty_existing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            existing = os.path.join(td, 'existing.json')
+            out = os.path.join(td, 'out.json')
+            open(existing, 'w', encoding='utf-8').close()
+            rc = subprocess.call([sys.executable, HELPER_PATH, 'merge-policy', existing, 'mybucket', out])
+            self.assertEqual(rc, 0)
+            with open(out, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.assertEqual(data['Statement'][0]['Sid'], 'EnforceHttpsTransport')
+            self.assertEqual(data['Statement'][0]['Effect'], 'Deny')
 
     def test_cli_merge_policy_writes_file(self):
         with tempfile.TemporaryDirectory() as td:
