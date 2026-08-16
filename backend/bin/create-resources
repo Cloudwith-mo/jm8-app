@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# === Environment Contract Validation ===
+# Every mutating script must validate the environment before proceeding
 : "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
 : "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
 : "${APP_NAME:?APP_NAME is required. Run: source .env}"
 : "${STAGE:?STAGE is required. Run: source .env}"
-: "${ACCOUNT_ID:?ACCOUNT_ID is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+
+# Validate contract before proceeding with any AWS operations
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+jm8_validate_contract_or_exit
+
+# Fetch actual account ID from STS for use in deployment
+ACCOUNT_ID=$(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text)
 
 ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 POLICY_NAME="${APP_NAME}-${STAGE}-app-access-policy"

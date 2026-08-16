@@ -71,7 +71,22 @@ class StripeSecretDeploymentTests(
         self,
     ):
         self.assertIn(
-            '!= sk_test_*',
+            '"dev": "sk_test_"',
+            self.provision,
+        )
+
+        self.assertIn(
+            '"staging": "sk_test_"',
+            self.provision,
+        )
+
+        self.assertIn(
+            '"prod": "sk_live_"',
+            self.provision,
+        )
+
+        self.assertIn(
+            'export JM8_OPERATION="provision-stripe-secret"',
             self.provision,
         )
 

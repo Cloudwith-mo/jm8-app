@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${STRIPE_SECRET_KEY:?A Stripe test secret key is required.}"
+# === Environment Contract Validation ===
+: "${AWS_PROFILE:?AWS_PROFILE is required.}"
+: "${AWS_REGION:?AWS_REGION is required.}"
+: "${APP_NAME:?APP_NAME is required.}"
+: "${STAGE:?STAGE is required (dev|staging|prod)}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required.}"
+: "${STRIPE_SECRET_KEY:?A Stripe secret key is required.}"
 
-if [[ "$STRIPE_SECRET_KEY" != sk_test_* ]]; then
-  echo "Only a Stripe test-mode secret key is allowed."
-  exit 1
-fi
+# Use shared operation-specific validation for Stripe mode checks.
+export JM8_OPERATION="setup-stripe-catalog"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+jm8_validate_contract_or_exit
 
 PYTHONPATH=function \
 python3 - <<'PY'
@@ -69,12 +76,37 @@ secret_key = str(
     or ""
 ).strip()
 
+stage = str(
+    os.environ.get(
+        "STAGE"
+    )
+    or ""
+).strip()
+
+expected_prefix_by_stage = {
+    "dev": "sk_test_",
+    "staging": "sk_test_",
+    "prod": "sk_live_",
+}
+
+expected_prefix = (
+    expected_prefix_by_stage.get(
+        stage
+    )
+)
+
+if expected_prefix is None:
+    raise SystemExit(
+        "Invalid STAGE for Stripe "
+        "catalog setup."
+    )
+
 if not secret_key.startswith(
-    "sk_test_"
+    expected_prefix
 ):
     raise SystemExit(
-        "Only Stripe test mode is "
-        "permitted during Upgrade 16D-2."
+        "Stripe secret key mode "
+        "does not match STAGE."
     )
 
 
@@ -318,6 +350,10 @@ def create_product(
 def verify_product(
     product: dict[str, Any],
 ) -> None:
+    expected_livemode = (
+        stage == "prod"
+    )
+
     checks = (
         product.get("object")
         == "product",
@@ -326,7 +362,7 @@ def verify_product(
         is True,
 
         product.get("livemode")
-        is False,
+        is expected_livemode,
 
         product.get("name")
         == BILLING_PRODUCT_NAME,
@@ -479,6 +515,10 @@ def verify_price(
         {},
     )
 
+    expected_livemode = (
+        stage == "prod"
+    )
+
     checks = (
         price.get("object")
         == "price",
@@ -487,7 +527,7 @@ def verify_price(
         is True,
 
         price.get("livemode")
-        is False,
+        is expected_livemode,
 
         price.get("product")
         == product_id,
@@ -643,7 +683,7 @@ def update_environment(
             rendered.append("")
 
         rendered.append(
-            "# Stripe test-mode billing"
+            "# Stripe billing"
         )
 
         for key in missing:
@@ -799,10 +839,16 @@ update_environment(
 )
 
 results = {
-    "stripeModeIsTest":
-        not bool(
-            product.get("livemode")
-            or price.get("livemode")
+    "stripeModeMatchesStage":
+        (
+            bool(
+                product.get("livemode")
+            )
+            == (stage == "prod")
+            and bool(
+                price.get("livemode")
+            )
+            == (stage == "prod")
         ),
 
     "productReady":
@@ -846,7 +892,7 @@ for key, value in results.items():
     )
 
 required = (
-    "stripeModeIsTest",
+    "stripeModeMatchesStage",
     "productReady",
     "priceReady",
     "priceIsTenDollarsMonthly",

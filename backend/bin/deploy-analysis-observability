@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# === Environment Contract Validation ===
 : "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
 : "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
 : "${APP_NAME:?APP_NAME is required. Run: source .env}"
 : "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+
+# Validate contract before proceeding with any AWS operations
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+jm8_validate_contract_or_exit
 
 API_FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"

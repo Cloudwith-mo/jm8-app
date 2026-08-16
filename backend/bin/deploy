@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# === Environment Contract Validation ===
 : "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
 : "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
 : "${APP_NAME:?APP_NAME is required. Run: source .env}"
 : "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
 : "${BEDROCK_ANALYSIS_MODEL_ID:?BEDROCK_ANALYSIS_MODEL_ID is required.}"
@@ -16,6 +18,11 @@ set -euo pipefail
 : "${STRIPE_CHECKOUT_SUCCESS_URL:?STRIPE_CHECKOUT_SUCCESS_URL is required.}"
 : "${STRIPE_CHECKOUT_CANCEL_URL:?STRIPE_CHECKOUT_CANCEL_URL is required.}"
 : "${STRIPE_PORTAL_RETURN_URL:?STRIPE_PORTAL_RETURN_URL is required.}"
+
+# Validate contract before proceeding with any AWS operations
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+jm8_validate_contract_or_exit
 
 ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 FUNCTION_NAME="${APP_NAME}-${STAGE}-api"

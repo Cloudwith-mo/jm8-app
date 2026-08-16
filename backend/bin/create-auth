@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# === Environment Contract Validation ===
+# create-auth must validate stage and account before proceeding
 : "${AWS_REGION:?AWS_REGION is required}"
 : "${AWS_PROFILE:?AWS_PROFILE is required}"
+: "${STAGE:?STAGE is required. Use: STAGE=dev|staging|prod}"
+: "${APP_NAME:?APP_NAME is required. Use: APP_NAME=journalm8}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required}"
+: "${CALLBACK_URL:?CALLBACK_URL is required and cannot be localhost outside dev}"
+: "${LOGOUT_URL:?LOGOUT_URL is required and cannot be localhost outside dev}"
 
+# Validate contract before proceeding with any AWS operations
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+jm8_validate_contract_or_exit
+
+# Use STAGE as the environment name (more consistent with deployment)
+ENV_NAME="$STAGE"
 APP_NAME="${APP_NAME:-journalm8}"
-ENV_NAME="${ENV_NAME:-dev}"
 
 USER_POOL_NAME="${APP_NAME}-${ENV_NAME}-users"
 APP_CLIENT_NAME="${APP_NAME}-${ENV_NAME}-web"
-CALLBACK_URL="${CALLBACK_URL:-http://localhost:5173/}"
-LOGOUT_URL="${LOGOUT_URL:-http://localhost:5173/}"
 
+# Fetch actual account ID from STS
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity \
   --profile "$AWS_PROFILE" \
   --query Account \
