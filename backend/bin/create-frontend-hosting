@@ -37,8 +37,22 @@ if ! jm8_validate_contract_or_exit; then
 fi
 
 STACK_NAME="${APP_NAME}-${STAGE}-frontend-hosting"
+
+sha256_hex() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    echo "ERROR: neither shasum nor sha256sum is available for SHA-256 hashing." >&2
+    return 1
+  fi
+}
+
+set +x
 AUTH_HEADER="$(printf '%s:%s' "$STAGING_BASIC_AUTH_USERNAME" "$STAGING_BASIC_AUTH_PASSWORD" | base64)"
-AUTH_DIGEST="$(printf '%s' "Basic ${AUTH_HEADER}" | sha256sum | awk '{print $1}')"
+AUTH_DIGEST="$(printf '%s' "Basic ${AUTH_HEADER}" | sha256_hex)"
+unset AUTH_HEADER
 
 aws cloudformation deploy \
   --stack-name "$STACK_NAME" \
@@ -53,11 +67,37 @@ aws cloudformation deploy \
   --region "$AWS_REGION" \
   >/dev/null
 
-if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
-  aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
-else
-  aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
-fi
+STACK_STATUS="$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].StackStatus' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+
+case "$STACK_STATUS" in
+  CREATE_COMPLETE|UPDATE_COMPLETE)
+    ;;
+  UPDATE_COMPLETE_CLEANUP_IN_PROGRESS)
+    echo "ERROR: CloudFormation stack is still cleaning up: $STACK_STATUS" >&2
+    exit 1
+    ;;
+  *)
+    echo "ERROR: CloudFormation stack did not reach a stable completed state: $STACK_STATUS" >&2
+    exit 1
+    ;;
+esac
+
+require_output() {
+  local output_name="$1"
+  local output_value="$2"
+
+  case "$output_value" in
+    ""|None|null)
+      echo "ERROR: CloudFormation output ${output_name} is missing or invalid." >&2
+      exit 1
+      ;;
+  esac
+}
 
 BUCKET_NAME="$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
@@ -77,23 +117,183 @@ DISTRIBUTION_DOMAIN="$(aws cloudformation describe-stacks \
   --output text \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION")"
+FRONTEND_BUCKET_REGIONAL_DOMAIN="$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].Outputs[?OutputKey==`FrontendBucketRegionalDomainName`].OutputValue | [0]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+
+require_output "FrontendBucketName" "$BUCKET_NAME"
+require_output "DistributionId" "$DISTRIBUTION_ID"
+require_output "DistributionDomainName" "$DISTRIBUTION_DOMAIN"
+require_output "FrontendBucketRegionalDomainName" "$FRONTEND_BUCKET_REGIONAL_DOMAIN"
+
+if [[ "$BUCKET_NAME" != "$FRONTEND_BUCKET" ]]; then
+  echo "ERROR: CloudFormation frontend bucket output does not match FRONTEND_BUCKET." >&2
+  exit 1
+fi
+
+if [[ "$DISTRIBUTION_DOMAIN" != *.cloudfront.net ]]; then
+  echo "ERROR: distribution domain must end exactly in .cloudfront.net." >&2
+  exit 1
+fi
+
 FRONTEND_ORIGIN="https://${DISTRIBUTION_DOMAIN}"
 
-aws s3api get-public-access-block --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
-aws s3api get-bucket-encryption --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
-aws s3api get-bucket-ownership-controls --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
-aws s3api get-bucket-versioning --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
-if aws s3api get-bucket-website --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+read -r BLOCK_PUBLIC_ACLS IGNORE_PUBLIC_ACLS BLOCK_PUBLIC_POLICY RESTRICT_PUBLIC_BUCKETS <<< "$(aws s3api get-public-access-block \
+  --bucket "$BUCKET_NAME" \
+  --query '[PublicAccessBlockConfiguration.BlockPublicAcls, PublicAccessBlockConfiguration.IgnorePublicAcls, PublicAccessBlockConfiguration.BlockPublicPolicy, PublicAccessBlockConfiguration.RestrictPublicBuckets]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$BLOCK_PUBLIC_ACLS" != "True" || "$IGNORE_PUBLIC_ACLS" != "True" || "$BLOCK_PUBLIC_POLICY" != "True" || "$RESTRICT_PUBLIC_BUCKETS" != "True" ]]; then
+  echo "ERROR: frontend bucket Public Access Block is not fully enabled." >&2
+  exit 1
+fi
+
+ENCRYPTION_ALGORITHM="$(aws s3api get-bucket-encryption \
+  --bucket "$BUCKET_NAME" \
+  --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$ENCRYPTION_ALGORITHM" != "AES256" ]]; then
+  echo "ERROR: frontend bucket encryption must use AES256." >&2
+  exit 1
+fi
+
+OBJECT_OWNERSHIP="$(aws s3api get-bucket-ownership-controls \
+  --bucket "$BUCKET_NAME" \
+  --query 'OwnershipControls.Rules[0].ObjectOwnership' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$OBJECT_OWNERSHIP" != "BucketOwnerEnforced" ]]; then
+  echo "ERROR: frontend bucket ownership must be BucketOwnerEnforced." >&2
+  exit 1
+fi
+
+VERSIONING_STATUS="$(aws s3api get-bucket-versioning \
+  --bucket "$BUCKET_NAME" \
+  --query 'Status' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$VERSIONING_STATUS" != "Enabled" ]]; then
+  echo "ERROR: frontend bucket versioning must be Enabled." >&2
+  exit 1
+fi
+
+WEBSITE_ERROR_FILE="$(mktemp)"
+set +e
+aws s3api get-bucket-website \
+  --bucket "$BUCKET_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null 2>"$WEBSITE_ERROR_FILE"
+WEBSITE_STATUS=$?
+set -e
+if [[ "$WEBSITE_STATUS" -eq 0 ]]; then
+  rm -f "$WEBSITE_ERROR_FILE"
   echo "ERROR: frontend bucket must not be configured for website hosting." >&2
   exit 1
 fi
-
-aws cloudfront get-distribution --id "$DISTRIBUTION_ID" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
-aws cloudfront get-origin-access-control --id "$(aws cloudfront list-origin-access-controls --query 'OriginAccessControlList.Items[?contains(OriginAccessControlOriginType, `s3`)].Id | [0]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")" >/dev/null 2>&1 || true
-
-if [[ "$DISTRIBUTION_DOMAIN" != *"cloudfront.net" ]]; then
-  echo "ERROR: distribution domain is invalid." >&2
+if ! grep -q "NoSuchWebsiteConfiguration" "$WEBSITE_ERROR_FILE"; then
+  cat "$WEBSITE_ERROR_FILE" >&2
+  rm -f "$WEBSITE_ERROR_FILE"
   exit 1
 fi
+rm -f "$WEBSITE_ERROR_FILE"
+
+DISTRIBUTION_STATUS="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query 'Distribution.Status' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$DISTRIBUTION_STATUS" != "Deployed" ]]; then
+  echo "ERROR: CloudFront distribution is not Deployed." >&2
+  exit 1
+fi
+
+DISTRIBUTION_ENABLED="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query 'Distribution.DistributionConfig.Enabled' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+DEFAULT_ROOT_OBJECT="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query 'Distribution.DistributionConfig.DefaultRootObject' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+VIEWER_PROTOCOL_POLICY="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query 'Distribution.DistributionConfig.DefaultCacheBehavior.ViewerProtocolPolicy' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+CACHE_POLICY_ID="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query 'Distribution.DistributionConfig.DefaultCacheBehavior.CachePolicyId' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+VIEWER_REQUEST_FUNCTION_COUNT="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query "length(Distribution.DistributionConfig.DefaultCacheBehavior.FunctionAssociations.Items[?EventType=='viewer-request'])" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+
+if [[ "$DISTRIBUTION_ENABLED" != "True" || "$DEFAULT_ROOT_OBJECT" != "index.html" || "$VIEWER_PROTOCOL_POLICY" != "redirect-to-https" || "$CACHE_POLICY_ID" != "658327ea-f89d-4fab-a63d-7e88639e58f6" || "$VIEWER_REQUEST_FUNCTION_COUNT" != "1" ]]; then
+  echo "ERROR: CloudFront distribution configuration postconditions failed." >&2
+  exit 1
+fi
+
+ORIGIN_MATCH_COUNT="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query "length(Distribution.DistributionConfig.Origins.Items[?DomainName=='${FRONTEND_BUCKET_REGIONAL_DOMAIN}'])" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$ORIGIN_MATCH_COUNT" != "1" ]]; then
+  echo "ERROR: exactly one CloudFront origin must match the frontend bucket regional domain." >&2
+  exit 1
+fi
+
+ORIGIN_OAC_ID="$(aws cloudfront get-distribution \
+  --id "$DISTRIBUTION_ID" \
+  --query "Distribution.DistributionConfig.Origins.Items[?DomainName=='${FRONTEND_BUCKET_REGIONAL_DOMAIN}'][0].OriginAccessControlId" \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+require_output "OriginAccessControlId" "$ORIGIN_OAC_ID"
+
+read -r OAC_ORIGIN_TYPE OAC_SIGNING_BEHAVIOR OAC_SIGNING_PROTOCOL <<< "$(aws cloudfront get-origin-access-control \
+  --id "$ORIGIN_OAC_ID" \
+  --query '[OriginAccessControl.OriginAccessControlConfig.OriginAccessControlOriginType, OriginAccessControl.OriginAccessControlConfig.SigningBehavior, OriginAccessControl.OriginAccessControlConfig.SigningProtocol]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$OAC_ORIGIN_TYPE" != "s3" || "$OAC_SIGNING_BEHAVIOR" != "always" || "$OAC_SIGNING_PROTOCOL" != "sigv4" ]]; then
+  echo "ERROR: attached CloudFront OAC configuration is invalid." >&2
+  exit 1
+fi
+
+for ERROR_CODE in 403 404; do
+  ERROR_RESPONSE_COUNT="$(aws cloudfront get-distribution \
+    --id "$DISTRIBUTION_ID" \
+    --query "length(Distribution.DistributionConfig.CustomErrorResponses.Items[?ErrorCode==\`${ERROR_CODE}\` && ResponseCode==\`200\` && ResponsePagePath=='/index.html'])" \
+    --output text \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION")"
+  if [[ "$ERROR_RESPONSE_COUNT" != "1" ]]; then
+    echo "ERROR: CloudFront ${ERROR_CODE} SPA fallback is not configured correctly." >&2
+    exit 1
+  fi
+done
 
 printf '%s\n%s\n%s\n%s\n%s\n' "$STACK_NAME" "$BUCKET_NAME" "$DISTRIBUTION_ID" "$DISTRIBUTION_DOMAIN" "$FRONTEND_ORIGIN"

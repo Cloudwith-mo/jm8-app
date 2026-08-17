@@ -73,8 +73,11 @@ class FrontendHostingWiringTests(unittest.TestCase):
 
     def test_only_digest_is_passed_to_cloudformation(self):
         self.assertIn("AuthorizationDigest", self.create_script)
+        self.assertIn("shasum -a 256", self.create_script)
         self.assertIn("sha256sum", self.create_script)
+        self.assertIn("neither shasum nor sha256sum is available", self.create_script)
         self.assertIn("Basic ${AUTH_HEADER}", self.create_script)
+        self.assertIn("unset AUTH_HEADER", self.create_script)
         self.assertNotIn("STAGING_BASIC_AUTH_USERNAME=", self.create_script)
         self.assertNotIn("STAGING_BASIC_AUTH_PASSWORD=", self.create_script)
         self.assertNotIn("Authorization: Basic", self.create_script)
@@ -83,6 +86,54 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertNotIn("-H \"Authorization: Basic", self.deploy_script)
         self.assertIn("curl --config -", self.deploy_script)
         self.assertIn("auth_header=\"Authorization: Basic", self.deploy_script)
+
+    def test_create_post_deploy_state_and_output_validation(self):
+        self.assertIn("CREATE_COMPLETE|UPDATE_COMPLETE", self.create_script)
+        self.assertIn("require_output", self.create_script)
+        self.assertIn('""|None|null', self.create_script)
+        self.assertIn('BUCKET_NAME" != "$FRONTEND_BUCKET', self.create_script)
+        self.assertIn('DISTRIBUTION_DOMAIN" != *.cloudfront.net', self.create_script)
+        self.assertNotIn("stack-create-complete", self.create_script)
+        self.assertNotIn("stack-update-complete", self.create_script)
+
+    def test_create_verifies_actual_s3_settings(self):
+        self.assertIn("BlockPublicAcls", self.create_script)
+        self.assertIn("IgnorePublicAcls", self.create_script)
+        self.assertIn("BlockPublicPolicy", self.create_script)
+        self.assertIn("RestrictPublicBuckets", self.create_script)
+        self.assertIn('!= "True"', self.create_script)
+        self.assertIn('!= "AES256"', self.create_script)
+        self.assertIn('!= "BucketOwnerEnforced"', self.create_script)
+        self.assertIn('!= "Enabled"', self.create_script)
+
+    def test_website_check_accepts_only_missing_configuration(self):
+        self.assertIn("WEBSITE_ERROR_FILE", self.create_script)
+        self.assertIn("NoSuchWebsiteConfiguration", self.create_script)
+        self.assertIn("cat \"$WEBSITE_ERROR_FILE\" >&2", self.create_script)
+        self.assertNotIn("get-bucket-website.*|| true", self.create_script)
+
+    def test_create_inspects_exact_distribution_oac(self):
+        self.assertIn("FrontendBucketRegionalDomainName", self.create_script)
+        self.assertIn("ORIGIN_MATCH_COUNT", self.create_script)
+        self.assertIn("ORIGIN_OAC_ID", self.create_script)
+        self.assertIn("get-origin-access-control", self.create_script)
+        self.assertIn("OAC_ORIGIN_TYPE", self.create_script)
+        self.assertIn("OAC_SIGNING_BEHAVIOR", self.create_script)
+        self.assertIn("OAC_SIGNING_PROTOCOL", self.create_script)
+        self.assertNotIn("list-origin-access-controls", self.create_script)
+        self.assertNotIn("Items[0]", self.create_script)
+
+    def test_create_verifies_cloudfront_postconditions(self):
+        self.assertIn("Distribution.Status", self.create_script)
+        self.assertIn("Deployed", self.create_script)
+        self.assertIn("Distribution.DistributionConfig.Enabled", self.create_script)
+        self.assertIn("DefaultRootObject", self.create_script)
+        self.assertIn("ViewerProtocolPolicy", self.create_script)
+        self.assertIn("CachePolicyId", self.create_script)
+        self.assertIn("viewer-request", self.create_script)
+        self.assertIn("CustomErrorResponses", self.template)
+        self.assertIn("ERROR_CODE", self.create_script)
+        self.assertIn("/index.html", self.create_script)
 
     def test_create_script_has_no_upload_behavior(self):
         self.assertNotIn("aws s3 sync", self.create_script)
@@ -139,6 +190,7 @@ class FrontendHostingWiringTests(unittest.TestCase):
             self.assertIn("exit 1", script_text)
         self.assertNotIn("STRIPE_SECRET_KEY", self.create_script)
         self.assertNotIn("STRIPE_SECRET_KEY", self.deploy_script)
+        self.assertNotIn("|| true", self.create_script)
 
     def test_amplify_files_are_absent(self):
         self.assertFalse(AMPLIFY_FILE.exists())
