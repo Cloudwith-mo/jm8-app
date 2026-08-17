@@ -4,6 +4,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = REPO_ROOT / "infra" / "cloudfront" / "frontend-hosting.yaml"
 CREATE_SCRIPT = REPO_ROOT / "bin" / "create-frontend-hosting"
+DIAGNOSTICS_HELPER = REPO_ROOT / "bin" / "jm8_frontend_hosting_diagnostics.py"
 DEPLOY_SCRIPT = REPO_ROOT / "bin" / "deploy-frontend"
 AMPLIFY_FILE = REPO_ROOT.parent / "amplify.yml"
 LEGACY_TEST_FILE = REPO_ROOT / "tests" / "test_amplify_configuration.py"
@@ -13,7 +14,56 @@ class FrontendHostingWiringTests(unittest.TestCase):
     def setUp(self):
         self.template = TEMPLATE_PATH.read_text(encoding="utf-8")
         self.create_script = CREATE_SCRIPT.read_text(encoding="utf-8")
+        self.diagnostics_helper = DIAGNOSTICS_HELPER.read_text(encoding="utf-8")
         self.deploy_script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    def test_diagnostics_are_timestamped_and_fail_closed(self):
+        for phase in (
+            "Environment contract validation started",
+            "Environment contract validation completed",
+            "Local template preflight started",
+            "Local template preflight completed",
+            "CloudFormation deploy started",
+            "CloudFormation deploy completed",
+            "Resulting stack status",
+            "Output validation started",
+            "Output validation completed",
+            "S3 verification started",
+            "S3 verification completed",
+            "CloudFront/OAC verification started",
+            "CloudFront/OAC verification completed",
+        ):
+            self.assertIn(phase, self.create_script)
+        self.assertIn("log_info", self.create_script)
+        self.assertIn("log_warn", self.create_script)
+        self.assertIn("log_error", self.create_script)
+        self.assertNotIn("set -x", self.create_script)
+        self.assertNotIn("|| true", self.create_script)
+
+    def test_diagnostic_template_and_stack_parsing_is_deterministic(self):
+        self.assertIn("sha256_hex", self.create_script)
+        self.assertIn("get-template", self.create_script)
+        self.assertIn("template-check", self.create_script)
+        self.assertIn("OriginAccessControlId", self.diagnostics_helper)
+        self.assertIn("DEPLOYED_TEMPLATE_OUTPUT_MISSING", self.diagnostics_helper)
+        self.assertIn("DEPLOYED_TEMPLATE_OUTPUT_INVALID", self.diagnostics_helper)
+        self.assertIn("malformed OAC ID", self.diagnostics_helper)
+        self.assertIn("output_keys", self.diagnostics_helper)
+
+    def test_diagnostic_failure_correlation_and_report_are_sanitized(self):
+        self.assertIn("list-stack-resources", self.create_script)
+        self.assertIn("FrontendOriginAccessControl", self.create_script)
+        self.assertIn("PhysicalResourceId", self.diagnostics_helper)
+        self.assertIn("do not substitute a physical ID", self.create_script)
+        self.assertIn("describe-stack-events", self.create_script)
+        self.assertIn("events", self.create_script)
+        self.assertIn(".build/diagnostics", self.create_script)
+        self.assertIn("write-report", self.create_script)
+        self.assertIn("rm -rf \"$TEMP_DIR\"", self.create_script)
+        self.assertNotIn("echo \"$STAGING_BASIC_AUTH_PASSWORD\"", self.create_script)
+        self.assertNotIn("log_info \"$AUTH_DIGEST\"", self.create_script)
+        self.assertNotIn("printenv", self.create_script)
+        self.assertNotIn("env |", self.create_script)
 
     def test_no_s3_website_hosting(self):
         self.assertNotIn("WebsiteConfiguration", self.template)
