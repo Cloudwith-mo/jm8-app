@@ -71,6 +71,9 @@ Resources:
     Properties:
       Name: !Sub "${AWS::StackName}-basic-auth"
       AutoPublish: true
+      FunctionConfig:
+        Comment: JM8 staging basic authentication
+        Runtime: cloudfront-js-2.0
       FunctionCode: !Sub |
         var crypto = require('crypto');
 
@@ -146,7 +149,6 @@ Resources:
             ErrorCachingMinTTL: 0
         ViewerCertificate:
           CloudFrontDefaultCertificate: true
-          MinimumProtocolVersion: TLSv1.2_2021
 
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy

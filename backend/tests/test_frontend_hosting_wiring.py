@@ -49,9 +49,13 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertNotIn("Principal: '*'", self.template)
         self.assertNotIn("PublicAccessBlockConfiguration", self.template.replace("PublicAccessBlockConfiguration", ""))
 
-    def test_distribution_security_and_spa_behavior(self):
+    def test_distribution_security_and_spa_behavior_with_deferred_custom_domain_tls(self):
         self.assertIn("redirect-to-https", self.template)
-        self.assertIn("TLSv1.2_2021", self.template)
+        # Explicit minimum TLS enforcement is deferred until a custom domain
+        # and ACM certificate are configured; the temporary cloudfront.net
+        # hostname uses CloudFrontDefaultCertificate and its AWS-managed policy.
+        self.assertIn("CloudFrontDefaultCertificate: true", self.template)
+        self.assertNotIn("MinimumProtocolVersion", self.template)
         self.assertIn("CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6", self.template)
         self.assertIn("403", self.template)
         self.assertIn("404", self.template)
@@ -62,6 +66,10 @@ class FrontendHostingWiringTests(unittest.TestCase):
     def test_cloudfront_function_basic_auth_is_required(self):
         self.assertIn("viewer-request", self.template)
         self.assertIn("FunctionAssociations", self.template)
+        self.assertIn("FunctionConfig:", self.template)
+        self.assertIn("Comment: JM8 staging basic authentication", self.template)
+        self.assertIn("Runtime: cloudfront-js-2.0", self.template)
+        self.assertIn("AutoPublish: true", self.template)
         self.assertIn("401", self.template)
         self.assertIn('Basic realm="JM8 Staging"', self.template)
         self.assertIn("cache-control", self.template)
