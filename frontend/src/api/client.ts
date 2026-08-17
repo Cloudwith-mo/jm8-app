@@ -1,4 +1,5 @@
 import { getAccessToken } from "../auth/cognito";
+import { frontendEnv } from "../config/env";
 import type {
   AnalysisHistoryResponse,
   JournalEntry,
@@ -37,8 +38,8 @@ import type {
   OcrJobStatusFilter,
 } from "../types/ocrJobs";
 
-const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT;
-const DEMO_USER_ID = import.meta.env.VITE_DEMO_USER_ID || "demo-user";
+const API_ENDPOINT = frontendEnv.apiEndpoint;
+const DEMO_USER_ID = frontendEnv.demoUserId;
 
 type ApiErrorPayload = Record<string, unknown>;
 

@@ -9,11 +9,29 @@ set -euo pipefail
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${ACCOUNT_ID:?ACCOUNT_ID is required. Run: source .env}"
 : "${API_NAME:?API_NAME is required. Run: source .env}"
+: "${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required. Run: source .env}"
 
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="create-api"
 jm8_validate_contract_or_exit
+
+ALLOWED_ORIGINS_JSON="$(python3 "$SCRIPT_DIR/jm8_environment_contract.py" allowed-origins-json)"
+
+CORS_CONFIGURATION="$(python3 - "$ALLOWED_ORIGINS_JSON" <<'PY'
+import json
+import sys
+
+allowed_origins = json.loads(sys.argv[1])
+print(json.dumps({
+  "AllowOrigins": allowed_origins,
+  "AllowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  "AllowHeaders": ["content-type", "x-user-id", "authorization"],
+  "MaxAge": 300,
+}))
+PY
+)"
 
 FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 
@@ -36,12 +54,7 @@ if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
   API_ID=$(aws apigatewayv2 create-api \
     --name "$API_NAME" \
     --protocol-type HTTP \
-    --cors-configuration '{
-      "AllowOrigins": ["*"],
-      "AllowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      "AllowHeaders": ["content-type", "x-user-id", "authorization"],
-      "MaxAge": 300
-    }' \
+    --cors-configuration "$CORS_CONFIGURATION" \
     --query "ApiId" \
     --output text \
     --profile "$AWS_PROFILE" \
@@ -52,12 +65,7 @@ else
   echo "API already exists: $API_ID"
 fi
 
-aws apigatewayv2 update-api   --api-id "$API_ID"   --cors-configuration '{
-    "AllowOrigins": ["*"],
-    "AllowMethods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "AllowHeaders": ["content-type", "x-user-id", "authorization"],
-    "MaxAge": 300
-  }'   --profile "$AWS_PROFILE"   --region "$AWS_REGION"   >/dev/null
+aws apigatewayv2 update-api   --api-id "$API_ID"   --cors-configuration "$CORS_CONFIGURATION"   --profile "$AWS_PROFILE"   --region "$AWS_REGION"   >/dev/null
 
 echo "API CORS configuration updated."
 

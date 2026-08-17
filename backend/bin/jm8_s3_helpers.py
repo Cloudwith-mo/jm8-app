@@ -173,11 +173,11 @@ def merge_tags(existing: Optional[Dict[str, Any]], app_name: str, stage: str) ->
     return out
 
 
-def desired_dev_cors() -> Dict[str, Any]:
+def desired_cors(allowed_origins: List[str]) -> Dict[str, Any]:
     return {
         "CORSRules": [
             {
-                "AllowedOrigins": ["http://localhost:5173", "http://127.0.0.1:5173"],
+                "AllowedOrigins": allowed_origins,
                 "AllowedMethods": ["PUT", "GET", "HEAD"],
                 "AllowedHeaders": ["*"],
                 "ExposeHeaders": ["ETag"],
@@ -187,10 +187,23 @@ def desired_dev_cors() -> Dict[str, Any]:
     }
 
 
-def decide_cors_apply(existing: Optional[Dict[str, Any]], stage: str) -> Optional[Dict[str, Any]]:
-    if stage != "dev":
-        return None
-    desired = desired_dev_cors()
+def parse_allowed_origins_json(raw_json: str) -> List[str]:
+    parsed = json.loads(raw_json)
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError("allowed origins must be a non-empty JSON list")
+    origins: List[str] = []
+    for item in parsed:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("each allowed origin must be a non-empty string")
+        origins.append(item)
+    return origins
+
+
+def decide_cors_apply(
+    existing: Optional[Dict[str, Any]], stage: str, allowed_origins: List[str]
+) -> Optional[Dict[str, Any]]:
+    _ = stage
+    desired = desired_cors(allowed_origins)
     if existing and existing.get("CORSRules") == desired.get("CORSRules"):
         return None
     return desired
@@ -253,9 +266,10 @@ def main(argv: List[str]) -> int:
             return 0
 
         if cmd == "decide-cors":
-            existing_path, stage, out_path = argv[2:5]
+            existing_path, stage, allowed_origins_json, out_path = argv[2:6]
             existing = load_json(existing_path)
-            result = decide_cors_apply(existing, stage)
+            allowed_origins = parse_allowed_origins_json(allowed_origins_json)
+            result = decide_cors_apply(existing, stage, allowed_origins)
             if result is None:
                 try:
                     if os.path.exists(out_path):
@@ -268,7 +282,7 @@ def main(argv: List[str]) -> int:
             return 0
 
         if cmd == "verify-postdeploy":
-            cb_path, desc_path, policy_path, lif_path, tags_path, cors_path, bucket, app_name, stage = argv[2:11]
+            cb_path, desc_path, policy_path, lif_path, tags_path, cors_path, bucket, app_name, stage, allowed_origins_json = argv[2:12]
             errors: List[str] = []
 
             cb = load_json(cb_path) or {}
@@ -331,10 +345,9 @@ def main(argv: List[str]) -> int:
                     errors.append(f'Tag {k} missing or incorrect')
 
             cors = load_json(cors_path) if cors_path and os.path.exists(cors_path) else None
-            if stage == 'dev':
-                desired = desired_dev_cors()
-                if cors != desired:
-                    errors.append('Dev CORS configuration differs from expected')
+            desired = desired_cors(parse_allowed_origins_json(allowed_origins_json))
+            if cors != desired:
+                errors.append('S3 CORS configuration differs from expected ALLOWED_ORIGINS policy')
 
             if errors:
                 for e in errors:

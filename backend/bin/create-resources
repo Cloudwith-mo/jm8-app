@@ -10,11 +10,15 @@ set -euo pipefail
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+: "${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required. Run: source .env}"
 
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="create-resources"
 jm8_validate_contract_or_exit
+
+ALLOWED_ORIGINS_JSON="$(python3 "$SCRIPT_DIR/jm8_environment_contract.py" allowed-origins-json)"
 
 # Fetch actual account ID from STS for use in deployment
 ACCOUNT_ID=$(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text)
@@ -202,8 +206,8 @@ fi
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION"
 
-  # --- CORS: apply only for dev stage, and remove stale generated file before deciding ---
-  echo "Ensuring CORS for local development origins only for STAGE=dev"
+  # --- CORS: enforce explicit ALLOWED_ORIGINS for every stage ---
+  echo "Ensuring CORS from validated ALLOWED_ORIGINS"
   rm -f .build/cors.json
   set +e
   aws s3api get-bucket-cors --bucket "$RAW_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" > .build/existing_cors.json 2>.build/get_cors_err.json
@@ -213,7 +217,7 @@ fi
   if [ "$GET_CORS_RC" -ne 0 ] && [ ! -s .build/existing_cors.json ]; then
     : > .build/existing_cors.json
   fi
-  python3 bin/jm8_s3_helpers.py decide-cors .build/existing_cors.json "$STAGE" .build/cors.json
+  python3 bin/jm8_s3_helpers.py decide-cors .build/existing_cors.json "$STAGE" "$ALLOWED_ORIGINS_JSON" .build/cors.json
   if [ -f .build/cors.json ]; then
     aws s3api put-bucket-cors \
       --bucket "$RAW_BUCKET" \
@@ -246,7 +250,7 @@ fi
   python3 bin/jm8_s3_helpers.py check-error .build/get_cors_err_post.json || exit $?
   set -e
 
-  python3 bin/jm8_s3_helpers.py verify-postdeploy .build/describe_continuous_backups.json .build/describe_table.json .build/effective_policy.json .build/effective_lifecycle.json .build/effective_tags.json .build/effective_cors.json "$RAW_BUCKET" "$APP_NAME" "$STAGE"
+  python3 bin/jm8_s3_helpers.py verify-postdeploy .build/describe_continuous_backups.json .build/describe_table.json .build/effective_policy.json .build/effective_lifecycle.json .build/effective_tags.json .build/effective_cors.json "$RAW_BUCKET" "$APP_NAME" "$STAGE" "$ALLOWED_ORIGINS_JSON"
 
 echo "Creating Lambda app access policy."
 

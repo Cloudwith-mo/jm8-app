@@ -33,6 +33,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 
 class EnvironmentContractError(Exception):
@@ -232,6 +233,107 @@ def validate_confirmation_gate(stage: str) -> None:
             )
 
 
+def _normalize_origin(origin: str) -> str:
+    parsed = urlsplit(origin)
+
+    if parsed.scheme not in {"http", "https"}:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must contain absolute origins with http/https schemes"
+        )
+
+    if not parsed.netloc:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must contain origins with a host"
+        )
+
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must not contain credentials"
+        )
+
+    if parsed.path not in {"", "/"}:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must not contain paths"
+        )
+
+    if parsed.query or parsed.fragment:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must not contain query strings or fragments"
+        )
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must contain valid hostnames"
+        )
+
+    if "*" in host:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must not contain wildcard hosts"
+        )
+
+    try:
+        port = parsed.port
+    except ValueError:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS contains an origin with an invalid port"
+        )
+
+    if port is None:
+        return f"{parsed.scheme}://{host}"
+
+    return f"{parsed.scheme}://{host}:{port}"
+
+
+def validate_allowed_origins(stage: str, allowed_origins_csv: str) -> list[str]:
+    """
+    Validate and normalize ALLOWED_ORIGINS.
+
+    - CSV of absolute origins only
+    - No paths/query/fragments/credentials/wildcards
+    - staging/prod require https and must not use localhost/127.0.0.1
+    - dev may include localhost/127.0.0.1 origins
+    """
+    if not allowed_origins_csv or not allowed_origins_csv.strip():
+        raise EnvironmentContractError("ALLOWED_ORIGINS is required")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for raw_item in allowed_origins_csv.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+
+        origin = _normalize_origin(item)
+        parsed = urlsplit(origin)
+        host = (parsed.hostname or "").lower()
+
+        if stage in {"staging", "prod"}:
+            if parsed.scheme != "https":
+                raise EnvironmentContractError(
+                    "ALLOWED_ORIGINS must use https for STAGE=staging/prod"
+                )
+
+            if host in {"localhost", "127.0.0.1"}:
+                raise EnvironmentContractError(
+                    "ALLOWED_ORIGINS must not include localhost for STAGE=staging/prod"
+                )
+
+        if origin in seen:
+            raise EnvironmentContractError(
+                "ALLOWED_ORIGINS must not contain duplicate origins"
+            )
+
+        normalized.append(origin)
+        seen.add(origin)
+
+    if not normalized:
+        raise EnvironmentContractError("ALLOWED_ORIGINS must contain at least one origin")
+
+    return normalized
+
+
 def validate_environment_contract() -> dict:
     """
     Validate the complete environment contract.
@@ -278,6 +380,11 @@ def validate_environment_contract() -> dict:
     if operation:
         validate_operation_specific(operation, stage)
 
+    # Optional: validate ALLOWED_ORIGINS if provided
+    allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
+    if allowed_origins:
+        validate_allowed_origins(stage, allowed_origins)
+
     # Confirmation gate
     validate_confirmation_gate(stage)
 
@@ -316,6 +423,13 @@ def validate_operation_specific(operation: str, stage: str) -> None:
                 "deploy operation must not use plaintext STRIPE_SECRET_KEY; use STRIPE_SECRET_ARN"
             )
 
+        validate_non_dev_urls(
+            stage,
+            os.environ.get("STRIPE_CHECKOUT_SUCCESS_URL", "").strip(),
+            os.environ.get("STRIPE_CHECKOUT_CANCEL_URL", "").strip(),
+            os.environ.get("STRIPE_PORTAL_RETURN_URL", "").strip(),
+        )
+
     if op in {"provision-stripe-secret", "setup-stripe-catalog"}:
         stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
         if not stripe_secret:
@@ -324,6 +438,17 @@ def validate_operation_specific(operation: str, stage: str) -> None:
             )
         # Reuse existing validation logic for mode checks
         validate_stripe_credentials(stage, stripe_secret)
+
+    if op == "create-auth":
+        validate_non_dev_urls(
+            stage,
+            os.environ.get("CALLBACK_URL", "").strip(),
+            os.environ.get("LOGOUT_URL", "").strip(),
+        )
+
+    if op in {"create-api", "create-resources"}:
+        allowed_origins_csv = os.environ.get("ALLOWED_ORIGINS", "").strip()
+        validate_allowed_origins(stage, allowed_origins_csv)
 
 
 def main(argv: list[str]) -> None:
@@ -341,8 +466,21 @@ def main(argv: list[str]) -> None:
 
     if command == "validate":
         try:
-            config = validate_environment_contract()
+            validate_environment_contract()
             # Exit silently on success (for use in shell scripts)
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "allowed-origins-json":
+        try:
+            stage = os.environ.get("STAGE", "").strip()
+            validate_stage(stage)
+            origins = validate_allowed_origins(
+                stage,
+                os.environ.get("ALLOWED_ORIGINS", "").strip(),
+            )
+            print(json.dumps(origins))
             sys.exit(0)
         except EnvironmentContractError as exc:
             print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)

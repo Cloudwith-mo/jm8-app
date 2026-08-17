@@ -33,6 +33,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_non_dev_urls,
     validate_stripe_credentials,
     validate_confirmation_gate,
+    validate_allowed_origins,
     validate_environment_contract,
     validate_operation_specific,
 )
@@ -81,6 +82,7 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "DEPLOY_CONFIRMATION",
         "STRIPE_SECRET_KEY",
         "STRIPE_SECRET_ARN",
+        "ALLOWED_ORIGINS",
         "ENV_NAME",
         "JM8_OPERATION",
     }
@@ -167,6 +169,46 @@ class TestResourceNamingAndURLs(EnvironmentIsolationTestCase):
         with self.assertRaises(EnvironmentContractError) as ctx:
             validate_non_dev_urls("staging", "http://127.0.0.1:5173/")
         self.assertIn("127.0.0.1", str(ctx.exception))
+
+    def test_allowed_origins_dev_allows_localhost(self):
+        origins = validate_allowed_origins(
+            "dev",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        )
+        self.assertEqual(
+            origins,
+            ["http://localhost:5173", "http://127.0.0.1:5173"],
+        )
+
+    def test_allowed_origins_staging_requires_https(self):
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_allowed_origins("staging", "http://staging.example.com")
+        self.assertIn("https", str(ctx.exception))
+
+    def test_allowed_origins_prod_rejects_localhost(self):
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_allowed_origins("prod", "https://app.example.com,https://localhost")
+        self.assertIn("localhost", str(ctx.exception))
+
+    def test_allowed_origins_rejects_paths_and_wildcards(self):
+        with self.assertRaises(EnvironmentContractError):
+            validate_allowed_origins("dev", "https://example.com/path")
+
+        with self.assertRaises(EnvironmentContractError):
+            validate_allowed_origins("dev", "https://*.example.com")
+
+    def test_allowed_origins_rejects_duplicates(self):
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_allowed_origins(
+                "dev",
+                "https://example.com,https://example.com",
+            )
+        self.assertIn("duplicate", str(ctx.exception))
+
+    def test_allowed_origins_rejects_malformed_port(self):
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_allowed_origins("dev", "https://example.com:abc")
+        self.assertIn("invalid port", str(ctx.exception))
 
 
 class TestStripeValidation(EnvironmentIsolationTestCase):
@@ -384,6 +426,16 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         script_text = self._read("bin/create-resources")
         self._assert_not_requires_var(script_text, "STRIPE_SECRET_KEY")
 
+    def test_create_api_requires_allowed_origins(self):
+        script_text = self._read("bin/create-api")
+        self._assert_requires_var(script_text, "ALLOWED_ORIGINS")
+        self.assertNotIn('"AllowOrigins": ["*"]', script_text)
+
+    def test_create_resources_requires_allowed_origins(self):
+        script_text = self._read("bin/create-resources")
+        self._assert_requires_var(script_text, "ALLOWED_ORIGINS")
+        self.assertIn('allowed-origins-json', script_text)
+
     def test_non_stripe_mutating_scripts_do_not_require_raw_stripe_key(self):
         for script_path in NON_STRIPE_MUTATING_SCRIPTS:
             script_text = script_path.read_text(encoding="utf-8")
@@ -419,6 +471,11 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         script_text = self._read("bin/create-auth")
         self.assertIn('ENV_NAME="$STAGE"', script_text)
         self.assertNotIn('ENV_NAME="${ENV_NAME:-', script_text)
+        self.assertIn('export JM8_OPERATION="create-auth"', script_text)
+
+    def test_deploy_sets_operation_name_for_contract_checks(self):
+        script_text = self._read("bin/deploy")
+        self.assertIn('export JM8_OPERATION="deploy"', script_text)
 
     def test_all_mutating_scripts_call_shared_guard(self):
         for script_path in SCRIPT_PATHS:
@@ -462,8 +519,21 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
         self.assertIn("STRIPE_SECRET_ARN", str(ctx.exception))
 
     def test_unrelated_operations_do_not_require_raw_stripe_key(self):
-        validate_operation_specific("create-resources", "dev")
         validate_operation_specific("deploy-observability", "staging")
+
+    def test_create_resources_requires_allowed_origins_contract(self):
+        os.environ.pop("ALLOWED_ORIGINS", None)
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("create-resources", "dev")
+        self.assertIn("ALLOWED_ORIGINS", str(ctx.exception))
+
+    def test_create_auth_rejects_non_dev_localhost_callback(self):
+        os.environ["CALLBACK_URL"] = "http://localhost:5173/callback"
+        os.environ["LOGOUT_URL"] = "https://staging.example.com"
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("create-auth", "staging")
+        self.assertIn("localhost", str(ctx.exception))
 
 
 class TestTemplatesAndIgnoreRules(EnvironmentIsolationTestCase):

@@ -64,11 +64,20 @@ class TestJM8S3Helpers(unittest.TestCase):
         self.assertEqual(tagmap['App'], 'myapp')
         self.assertEqual(tagmap['Stage'], 'dev')
 
-    def test_decide_cors_dev_and_non_dev(self):
-        self.assertIsNone(helpers.decide_cors_apply(None, 'prod'))
-        desired = helpers.desired_dev_cors()
-        res = helpers.decide_cors_apply(None, 'dev')
+    def test_decide_cors_uses_allowed_origins_for_all_stages(self):
+        allowed = ["https://staging.example.com"]
+        desired = helpers.desired_cors(allowed)
+        res = helpers.decide_cors_apply(None, 'staging', allowed)
         self.assertEqual(res, desired)
+
+    def test_decide_cors_noop_when_existing_matches(self):
+        allowed = ["http://localhost:5173", "http://127.0.0.1:5173"]
+        existing = helpers.desired_cors(allowed)
+        self.assertIsNone(helpers.decide_cors_apply(existing, 'dev', allowed))
+
+    def test_parse_allowed_origins_json_rejects_empty(self):
+        with self.assertRaises(ValueError):
+            helpers.parse_allowed_origins_json('[]')
 
     def test_load_json_empty_file_returns_none(self):
         with tempfile.NamedTemporaryFile('w', delete=False) as tf:

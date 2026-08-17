@@ -14,6 +14,7 @@ set -euo pipefail
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="create-auth"
 jm8_validate_contract_or_exit
 
 # Use STAGE as the environment name (more consistent with deployment)

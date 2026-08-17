@@ -1,8 +1,10 @@
-const COGNITO_ENABLED = import.meta.env.VITE_COGNITO_ENABLED === "true";
-const COGNITO_DOMAIN = import.meta.env.VITE_COGNITO_DOMAIN as string | undefined;
-const COGNITO_CLIENT_ID = import.meta.env.VITE_COGNITO_CLIENT_ID as string | undefined;
-const COGNITO_REDIRECT_URI = import.meta.env.VITE_COGNITO_REDIRECT_URI as string | undefined;
-const COGNITO_LOGOUT_URI = import.meta.env.VITE_COGNITO_LOGOUT_URI as string | undefined;
+import { frontendEnv } from "../config/env";
+
+const COGNITO_ENABLED = frontendEnv.cognitoEnabled;
+const COGNITO_DOMAIN = frontendEnv.cognitoDomain;
+const COGNITO_CLIENT_ID = frontendEnv.cognitoClientId;
+const COGNITO_REDIRECT_URI = frontendEnv.cognitoRedirectUri;
+const COGNITO_LOGOUT_URI = frontendEnv.cognitoLogoutUri;
 
 const ACCESS_TOKEN_KEY = "jm8_access_token";
 const ID_TOKEN_KEY = "jm8_id_token";

@@ -99,6 +99,17 @@ class ApiRoutePostconditionTests(
             self.create_api,
         )
 
+    def test_create_api_uses_allowed_origins_contract(self):
+        self.assertIn(
+            'ALLOWED_ORIGINS',
+            self.create_api,
+        )
+
+        self.assertNotIn(
+            '"AllowOrigins": ["*"]',
+            self.create_api,
+        )
+
     def test_secure_missing_route_fails(
         self,
     ):
