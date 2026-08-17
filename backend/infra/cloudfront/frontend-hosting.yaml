@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: JM8 private S3 + CloudFront hosting for the staging frontend.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: journalm8
+  Stage:
+    Type: String
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+  FrontendBucketName:
+    Type: String
+    Description: Name of the dedicated frontend bucket.
+  AuthorizationDigest:
+    Type: String
+    NoEcho: true
+    Description: SHA-256 digest of the full Basic Authorization header.
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref FrontendBucketName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: RemoveNoncurrentVersionsAfter30Days
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: AbortIncompleteMultipartUploadsAfter7Days
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: App
+          Value: journalm8
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: DataClassification
+          Value: PublicFrontendAssets
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-frontend-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${AWS::StackName}-basic-auth"
+      AutoPublish: true
+      FunctionCode: !Sub |
+        var crypto = require('crypto');
+
+        function handler(event) {
+          var request = event.request;
+          var auth = request.headers.authorization;
+          var expected = "${AuthorizationDigest}";
+
+          if (!auth || !auth.value) {
+            return unauthorized();
+          }
+
+          var hash = crypto
+            .createHash('sha256')
+            .update(auth.value)
+            .digest('hex');
+
+          if (hash !== expected.toLowerCase()) {
+            return unauthorized();
+          }
+
+          return request;
+        }
+
+        function unauthorized() {
+          return {
+            statusCode: 401,
+            statusDescription: "Unauthorized",
+            headers: {
+              "www-authenticate": { value: 'Basic realm="JM8 Staging"' },
+              "cache-control": { value: "no-store" }
+            }
+          };
+        }
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        IPV6Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        DefaultRootObject: index.html
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            Id: S3Origin
+            OriginAccessControlId: !Ref FrontendOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt FrontendAuthFunction.FunctionMetadata.FunctionARN
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !Sub "${FrontendBucket.Arn}"
+              - !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+Outputs:
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  FrontendBucketRegionalDomainName:
+    Value: !GetAtt FrontendBucket.RegionalDomainName
+  DistributionId:
+    Value: !Ref FrontendDistribution
+  DistributionDomainName:
+    Value: !GetAtt FrontendDistribution.DomainName
+  FrontendOrigin:
+    Value: !Sub "https://${FrontendDistribution.DomainName}"

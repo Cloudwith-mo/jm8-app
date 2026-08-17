@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+: "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+: "${DEPLOY_CONFIRMATION:?DEPLOY_CONFIRMATION is required for staging. Run: source .env}"
+: "${FRONTEND_BUCKET:?FRONTEND_BUCKET is required. Run: source .env}"
+: "${STAGING_BASIC_AUTH_USERNAME:?STAGING_BASIC_AUTH_USERNAME is required. Run: source .env}"
+: "${STAGING_BASIC_AUTH_PASSWORD:?STAGING_BASIC_AUTH_PASSWORD is required. Run: source .env}"
+
+if [[ "${STAGE}" != "staging" ]]; then
+  echo "ERROR: create-frontend-hosting is staging-only." >&2
+  exit 1
+fi
+
+if [[ "${FRONTEND_BUCKET}" != "${APP_NAME}-${STAGE}-frontend-${EXPECTED_AWS_ACCOUNT_ID}" ]]; then
+  echo "ERROR: FRONTEND_BUCKET must match ${APP_NAME}-${STAGE}-frontend-${EXPECTED_AWS_ACCOUNT_ID}" >&2
+  exit 1
+fi
+
+if [[ "${FRONTEND_BUCKET}" == "${RAW_BUCKET}" ]]; then
+  echo "ERROR: FRONTEND_BUCKET must be distinct from RAW_BUCKET." >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="create-frontend-hosting"
+
+if ! jm8_validate_contract_or_exit; then
+  exit 1
+fi
+
+STACK_NAME="${APP_NAME}-${STAGE}-frontend-hosting"
+AUTH_HEADER="$(printf '%s:%s' "$STAGING_BASIC_AUTH_USERNAME" "$STAGING_BASIC_AUTH_PASSWORD" | base64)"
+AUTH_DIGEST="$(printf '%s' "Basic ${AUTH_HEADER}" | sha256sum | awk '{print $1}')"
+
+aws cloudformation deploy \
+  --stack-name "$STACK_NAME" \
+  --template-file "$SCRIPT_DIR/../infra/cloudfront/frontend-hosting.yaml" \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    "AppName=${APP_NAME}" \
+    "Stage=${STAGE}" \
+    "FrontendBucketName=${FRONTEND_BUCKET}" \
+    "AuthorizationDigest=${AUTH_DIGEST}" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
+
+if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+else
+  aws cloudformation wait stack-create-complete --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+fi
+
+BUCKET_NAME="$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].Outputs[?OutputKey==`FrontendBucketName`].OutputValue | [0]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+DISTRIBUTION_ID="$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].Outputs[?OutputKey==`DistributionId`].OutputValue | [0]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+DISTRIBUTION_DOMAIN="$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --query 'Stacks[0].Outputs[?OutputKey==`DistributionDomainName`].OutputValue | [0]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+FRONTEND_ORIGIN="https://${DISTRIBUTION_DOMAIN}"
+
+aws s3api get-public-access-block --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+aws s3api get-bucket-encryption --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+aws s3api get-bucket-ownership-controls --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+aws s3api get-bucket-versioning --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+if aws s3api get-bucket-website --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "ERROR: frontend bucket must not be configured for website hosting." >&2
+  exit 1
+fi
+
+aws cloudfront get-distribution --id "$DISTRIBUTION_ID" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+aws cloudfront get-origin-access-control --id "$(aws cloudfront list-origin-access-controls --query 'OriginAccessControlList.Items[?contains(OriginAccessControlOriginType, `s3`)].Id | [0]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")" >/dev/null 2>&1 || true
+
+if [[ "$DISTRIBUTION_DOMAIN" != *"cloudfront.net" ]]; then
+  echo "ERROR: distribution domain is invalid." >&2
+  exit 1
+fi
+
+printf '%s\n%s\n%s\n%s\n%s\n' "$STACK_NAME" "$BUCKET_NAME" "$DISTRIBUTION_ID" "$DISTRIBUTION_DOMAIN" "$FRONTEND_ORIGIN"

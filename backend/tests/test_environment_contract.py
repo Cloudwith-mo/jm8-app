@@ -44,10 +44,12 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "create-api",
     BACKEND_ROOT / "bin" / "create-auth",
+    BACKEND_ROOT / "bin" / "create-frontend-hosting",
     BACKEND_ROOT / "bin" / "create-resources",
     BACKEND_ROOT / "bin" / "deploy",
     BACKEND_ROOT / "bin" / "deploy-analysis-observability",
     BACKEND_ROOT / "bin" / "deploy-bedrock-budget",
+    BACKEND_ROOT / "bin" / "deploy-frontend",
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
@@ -59,9 +61,11 @@ SCRIPT_PATHS = [
 NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "create-api",
     BACKEND_ROOT / "bin" / "create-auth",
+    BACKEND_ROOT / "bin" / "create-frontend-hosting",
     BACKEND_ROOT / "bin" / "create-resources",
     BACKEND_ROOT / "bin" / "deploy-analysis-observability",
     BACKEND_ROOT / "bin" / "deploy-bedrock-budget",
+    BACKEND_ROOT / "bin" / "deploy-frontend",
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
@@ -85,6 +89,11 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "ALLOWED_ORIGINS",
         "ENV_NAME",
         "JM8_OPERATION",
+        "FRONTEND_BUCKET",
+        "FRONTEND_ORIGIN",
+        "CLOUDFRONT_DISTRIBUTION_ID",
+        "STAGING_BASIC_AUTH_USERNAME",
+        "STAGING_BASIC_AUTH_PASSWORD",
     }
 
     def setUp(self) -> None:
@@ -410,6 +419,68 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             validate_environment_contract()
         self.assertIn("ENV_NAME", str(ctx.exception))
 
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_create_frontend_hosting_operation_requires_stage_contract(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "STAGE": "staging",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-staging",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-staging-main",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-staging-frontend-114743615542",
+            "STAGING_BASIC_AUTH_USERNAME": "staging-user",
+            "STAGING_BASIC_AUTH_PASSWORD": "staging-pass",
+            "JM8_OPERATION": "create-frontend-hosting",
+            "DEPLOY_CONFIRMATION": "staging",
+        })
+
+        validate_environment_contract()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_create_frontend_hosting_rejects_raw_bucket_collision(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "STAGE": "staging",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-staging",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-staging-main",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-staging-raw-114743615542",
+            "STAGING_BASIC_AUTH_USERNAME": "staging-user",
+            "STAGING_BASIC_AUTH_PASSWORD": "staging-pass",
+            "JM8_OPERATION": "create-frontend-hosting",
+            "DEPLOY_CONFIRMATION": "staging",
+        })
+
+        with self.assertRaises(EnvironmentContractError):
+            validate_environment_contract()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_deploy_frontend_requires_origin_contract(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "STAGE": "staging",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-staging",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-staging-main",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-staging-frontend-114743615542",
+            "CLOUDFRONT_DISTRIBUTION_ID": "ABC123",
+            "FRONTEND_ORIGIN": "https://abc123.cloudfront.net",
+            "ALLOWED_ORIGINS": "https://abc123.cloudfront.net,https://example.com",
+            "JM8_OPERATION": "deploy-frontend",
+            "DEPLOY_CONFIRMATION": "staging",
+        })
+
+        validate_environment_contract()
+
 
 class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
 
@@ -467,6 +538,31 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         self.assertIn('"staging": "sk_test_"', script_text)
         self.assertIn("sk_live_", script_text)
 
+    def test_create_frontend_hosting_requires_staging_only_contract(self):
+        script_text = self._read("bin/create-frontend-hosting")
+        self.assertIn('export JM8_OPERATION="create-frontend-hosting"', script_text)
+        self.assertIn('source "$SCRIPT_DIR/jm8_deployment_guard.sh"', script_text)
+        self.assertIn('jm8_validate_contract_or_exit', script_text)
+        self.assertIn(': "${STAGE:?STAGE is required', script_text)
+        self.assertIn('FRONTEND_BUCKET', script_text)
+        self.assertIn('STAGING_BASIC_AUTH_USERNAME', script_text)
+        self.assertIn('STAGING_BASIC_AUTH_PASSWORD', script_text)
+        self.assertNotIn('STRIPE_SECRET_KEY', script_text)
+
+    def test_deploy_frontend_requires_cloudfront_contract(self):
+        script_text = self._read("bin/deploy-frontend")
+        self.assertIn('export JM8_OPERATION="deploy-frontend"', script_text)
+        self.assertIn('source "$SCRIPT_DIR/jm8_deployment_guard.sh"', script_text)
+        self.assertIn('jm8_validate_contract_or_exit', script_text)
+        self.assertIn('FRONTEND_BUCKET', script_text)
+        self.assertIn('CLOUDFRONT_DISTRIBUTION_ID', script_text)
+        self.assertIn('FRONTEND_ORIGIN', script_text)
+        self.assertIn('npm run test', script_text)
+        self.assertIn('npm run build:staging', script_text)
+        self.assertIn('aws s3 sync', script_text)
+        self.assertIn('--delete', script_text)
+        self.assertNotIn('STRIPE_SECRET_KEY', script_text)
+
     def test_create_auth_derives_env_name_from_stage(self):
         script_text = self._read("bin/create-auth")
         self.assertIn('ENV_NAME="$STAGE"', script_text)
@@ -502,6 +598,7 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_deploy_operation_specific_validation_requires_arn(self, mock_sts):
         mock_sts.return_value = "114743615542"
+        os.environ.pop("STRIPE_SECRET_ARN", None)
         os.environ.update({
             "APP_NAME": "journalm8",
             "STAGE": "dev",
@@ -512,6 +609,26 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
             "RAW_BUCKET": "journalm8-dev-raw-114743615542",
             "JM8_OPERATION": "deploy",
             "STRIPE_SECRET_KEY": "",
+        })
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_environment_contract()
+        self.assertIn("STRIPE_SECRET_ARN", str(ctx.exception))
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_deploy_missing_arn_not_masked_by_inherited_env(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ["STRIPE_SECRET_ARN"] = "arn:aws:secretsmanager:us-east-1:111111111111:secret:tmp"
+        os.environ.pop("STRIPE_SECRET_ARN", None)
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "STAGE": "dev",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-dev",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-dev-main",
+            "RAW_BUCKET": "journalm8-dev-raw-114743615542",
+            "JM8_OPERATION": "deploy",
         })
 
         with self.assertRaises(EnvironmentContractError) as ctx:

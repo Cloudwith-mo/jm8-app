@@ -166,6 +166,27 @@ def validate_resource_names(
         )
 
 
+def validate_frontend_bucket_name(
+    app_name: str,
+    stage: str,
+    frontend_bucket: str,
+    account_id: str,
+    raw_bucket: str,
+) -> None:
+    """Validate the staging frontend bucket naming contract."""
+    if not frontend_bucket:
+        raise EnvironmentContractError("FRONTEND_BUCKET is required")
+    expected_bucket = f"{app_name}-{stage}-frontend-{account_id}"
+    if frontend_bucket != expected_bucket:
+        raise EnvironmentContractError(
+            f"FRONTEND_BUCKET must be '{expected_bucket}', got '{frontend_bucket}'"
+        )
+    if frontend_bucket == raw_bucket:
+        raise EnvironmentContractError(
+            "FRONTEND_BUCKET must not equal RAW_BUCKET; use a dedicated frontend bucket"
+        )
+
+
 def validate_non_dev_urls(stage: str, *urls: str) -> None:
     """
     For non-dev stages, URLs must not contain localhost or 127.0.0.1.
@@ -449,6 +470,82 @@ def validate_operation_specific(operation: str, stage: str) -> None:
     if op in {"create-api", "create-resources"}:
         allowed_origins_csv = os.environ.get("ALLOWED_ORIGINS", "").strip()
         validate_allowed_origins(stage, allowed_origins_csv)
+
+    if op == "create-frontend-hosting":
+        if stage != "staging":
+            raise EnvironmentContractError("create-frontend-hosting is staging-only")
+
+        app_name = os.environ.get("APP_NAME", "").strip()
+        expected_account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
+        raw_bucket = os.environ.get("RAW_BUCKET", "").strip()
+        frontend_bucket = os.environ.get("FRONTEND_BUCKET", "").strip()
+        basic_auth_user = os.environ.get("STAGING_BASIC_AUTH_USERNAME", "").strip()
+        basic_auth_password = os.environ.get("STAGING_BASIC_AUTH_PASSWORD", "").strip()
+
+        if not frontend_bucket:
+            raise EnvironmentContractError("create-frontend-hosting requires FRONTEND_BUCKET")
+        if not basic_auth_user or not basic_auth_password:
+            raise EnvironmentContractError(
+                "create-frontend-hosting requires STAGING_BASIC_AUTH_USERNAME and STAGING_BASIC_AUTH_PASSWORD"
+            )
+
+        validate_frontend_bucket_name(
+            app_name,
+            stage,
+            frontend_bucket,
+            expected_account_id,
+            raw_bucket,
+        )
+
+    if op == "deploy-frontend":
+        if stage != "staging":
+            raise EnvironmentContractError("deploy-frontend is staging-only")
+
+        app_name = os.environ.get("APP_NAME", "").strip()
+        expected_account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
+        raw_bucket = os.environ.get("RAW_BUCKET", "").strip()
+        frontend_bucket = os.environ.get("FRONTEND_BUCKET", "").strip()
+        cloudfront_distribution_id = os.environ.get("CLOUDFRONT_DISTRIBUTION_ID", "").strip()
+        frontend_origin = os.environ.get("FRONTEND_ORIGIN", "").strip()
+
+        if not frontend_bucket:
+            raise EnvironmentContractError("deploy-frontend requires FRONTEND_BUCKET")
+        if not cloudfront_distribution_id:
+            raise EnvironmentContractError("deploy-frontend requires CLOUDFRONT_DISTRIBUTION_ID")
+        if not frontend_origin:
+            raise EnvironmentContractError("deploy-frontend requires FRONTEND_ORIGIN")
+
+        validate_frontend_bucket_name(
+            app_name,
+            stage,
+            frontend_bucket,
+            expected_account_id,
+            raw_bucket,
+        )
+
+        parsed = urlsplit(frontend_origin)
+        if parsed.scheme != "https":
+            raise EnvironmentContractError("FRONTEND_ORIGIN must use https for STAGE=staging")
+        if not parsed.netloc:
+            raise EnvironmentContractError("FRONTEND_ORIGIN must contain a valid hostname")
+        if parsed.path not in {"", "/"}:
+            raise EnvironmentContractError("FRONTEND_ORIGIN must contain no path, query, or fragment")
+        if parsed.query or parsed.fragment:
+            raise EnvironmentContractError("FRONTEND_ORIGIN must contain no path, query, or fragment")
+
+        allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
+        if not allowed_origins:
+            raise EnvironmentContractError("deploy-frontend requires ALLOWED_ORIGINS")
+        normalized = validate_allowed_origins(stage, allowed_origins)
+        count = sum(1 for value in normalized if value == frontend_origin)
+        if count != 1:
+            raise EnvironmentContractError(
+                "FRONTEND_ORIGIN must appear exactly once in ALLOWED_ORIGINS"
+            )
+
+        if os.environ.get("STRIPE_SECRET_KEY", "").strip():
+            # Intentionally ignored for this frontend-only deployment path.
+            pass
 
 
 def main(argv: list[str]) -> None:
