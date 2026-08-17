@@ -49,6 +49,13 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertNotIn("Principal: '*'", self.template)
         self.assertNotIn("PublicAccessBlockConfiguration", self.template.replace("PublicAccessBlockConfiguration", ""))
 
+    def test_oac_output_is_defined_and_validated_by_create_script(self):
+        self.assertIn("OriginAccessControlId:", self.template)
+        self.assertIn("Description: CloudFront Origin Access Control identifier.", self.template)
+        self.assertIn("Value: !GetAtt FrontendOriginAccessControl.Id", self.template)
+        self.assertIn('require_output "OriginAccessControlId"', self.create_script)
+        self.assertIn("OriginAccessControlId", self.create_script)
+
     def test_distribution_security_and_spa_behavior_with_deferred_custom_domain_tls(self):
         self.assertIn("redirect-to-https", self.template)
         # Explicit minimum TLS enforcement is deferred until a custom domain

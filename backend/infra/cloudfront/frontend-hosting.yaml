@@ -184,6 +184,9 @@ Outputs:
     Value: !GetAtt FrontendBucket.RegionalDomainName
   DistributionId:
     Value: !Ref FrontendDistribution
+  OriginAccessControlId:
+    Description: CloudFront Origin Access Control identifier.
+    Value: !GetAtt FrontendOriginAccessControl.Id
   DistributionDomainName:
     Value: !GetAtt FrontendDistribution.DomainName
   FrontendOrigin:
