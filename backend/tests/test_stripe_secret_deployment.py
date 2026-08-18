@@ -105,9 +105,20 @@ class StripeSecretDeploymentTests(
         self.assertIn("NamedTemporaryFile", self.setup)
         self.assertIn("temporary_path.replace(output_path)", self.setup)
         self.assertIn("temporary_path.chmod(0o600)", self.setup)
+        self.assertIn('"STRIPE_SECRET_KEY": secret_key', self.setup)
+        self.assertIn('load_stripe_checkout_config({', self.setup)
         self.assertNotIn('path = Path(".env")', self.setup)
-        self.assertNotIn('"STRIPE_SECRET_KEY":', self.setup.split("def update_environment", 1)[1])
         self.assertNotIn('"STRIPE_WEBHOOK_SECRET":', self.setup.split("def update_environment", 1)[1])
+
+    def test_catalog_validates_before_atomic_publication_and_preserves_arn(self):
+        validation_index = self.setup.index('load_stripe_checkout_config({')
+        temp_index = self.setup.index('NamedTemporaryFile', validation_index)
+        replace_index = self.setup.index('temporary_path.replace(output_path)', temp_index)
+        self.assertLess(validation_index, temp_index)
+        self.assertLess(temp_index, replace_index)
+        self.assertIn('managed_keys = set(updates)', self.setup)
+        self.assertIn('rendered_lines.append(line)', self.setup)
+        self.assertIn('if output_path.exists()', self.setup)
 
     def test_catalog_requires_caller_urls_and_no_localhost_fallback(self):
         for name in (
