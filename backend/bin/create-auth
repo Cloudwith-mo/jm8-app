@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # === Environment Contract Validation ===
 # create-auth must validate stage and account before proceeding
@@ -21,6 +22,27 @@ jm8_validate_contract_or_exit
 ENV_NAME="$STAGE"
 APP_NAME="${APP_NAME:-journalm8}"
 
+case "$STAGE" in
+  dev|staging|prod) ;;
+  *)
+    echo "Invalid STAGE: use dev, staging, or prod." >&2
+    exit 1
+    ;;
+esac
+
+COGNITO_ENV_FILE="$SCRIPT_DIR/../infra/environments/generated/${STAGE}.cognito.env"
+COGNITO_ENV_DIR="$(dirname "$COGNITO_ENV_FILE")"
+COGNITO_ENV_TEMP=""
+
+cleanup_cognito_env_temp() {
+  if [ -n "$COGNITO_ENV_TEMP" ]; then
+    rm -f -- "$COGNITO_ENV_TEMP"
+  fi
+}
+
+trap cleanup_cognito_env_temp EXIT HUP INT TERM
+mkdir -p "$COGNITO_ENV_DIR"
+
 USER_POOL_NAME="${APP_NAME}-${ENV_NAME}-users"
 APP_CLIENT_NAME="${APP_NAME}-${ENV_NAME}-web"
 
@@ -31,8 +53,6 @@ AWS_ACCOUNT_ID="$(aws sts get-caller-identity \
   --output text)"
 
 COGNITO_DOMAIN_PREFIX="${APP_NAME}-${ENV_NAME}-${AWS_ACCOUNT_ID}"
-
-mkdir -p infra
 
 echo "Checking Cognito user pool: $USER_POOL_NAME"
 
@@ -125,21 +145,20 @@ fi
 COGNITO_ISSUER="https://cognito-idp.${AWS_REGION}.amazonaws.com/${USER_POOL_ID}"
 COGNITO_DOMAIN="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com"
 
-cat > infra/cognito.env <<CONFIG
-export COGNITO_USER_POOL_ID=${USER_POOL_ID}
-export COGNITO_APP_CLIENT_ID=${APP_CLIENT_ID}
-export COGNITO_DOMAIN=${COGNITO_DOMAIN}
-export COGNITO_ISSUER=${COGNITO_ISSUER}
-export COGNITO_CALLBACK_URL=${CALLBACK_URL}
-export COGNITO_LOGOUT_URL=${LOGOUT_URL}
-CONFIG
+COGNITO_ENV_TEMP="$(mktemp "$COGNITO_ENV_DIR/.${STAGE}.cognito.env.XXXXXX")"
+{
+  printf 'export COGNITO_USER_POOL_ID=%q\n' "$USER_POOL_ID"
+  printf 'export COGNITO_APP_CLIENT_ID=%q\n' "$APP_CLIENT_ID"
+  printf 'export COGNITO_DOMAIN=%q\n' "$COGNITO_DOMAIN"
+  printf 'export COGNITO_ISSUER=%q\n' "$COGNITO_ISSUER"
+  printf 'export COGNITO_CALLBACK_URL=%q\n' "$CALLBACK_URL"
+  printf 'export COGNITO_LOGOUT_URL=%q\n' "$LOGOUT_URL"
+} > "$COGNITO_ENV_TEMP"
+chmod 600 "$COGNITO_ENV_TEMP"
+mv -f -- "$COGNITO_ENV_TEMP" "$COGNITO_ENV_FILE"
+COGNITO_ENV_TEMP=""
 
 echo
 echo "Cognito auth foundation ready:"
-echo "User Pool ID: $USER_POOL_ID"
-echo "App Client ID: $APP_CLIENT_ID"
-echo "Hosted UI: $COGNITO_DOMAIN"
-echo "Issuer: $COGNITO_ISSUER"
-echo
 echo "Saved local config:"
-echo "backend/infra/cognito.env"
+echo "$COGNITO_ENV_FILE"

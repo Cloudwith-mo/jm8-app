@@ -13,6 +13,7 @@ Validates that:
 from __future__ import annotations
 
 import os
+from fnmatch import fnmatch
 import subprocess
 import sys
 import unittest
@@ -568,6 +569,47 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         self.assertIn('ENV_NAME="$STAGE"', script_text)
         self.assertNotIn('ENV_NAME="${ENV_NAME:-', script_text)
         self.assertIn('export JM8_OPERATION="create-auth"', script_text)
+
+    def test_create_auth_writes_stage_specific_cognito_file_safely(self):
+        script_text = self._read("bin/create-auth")
+        self.assertIn('case "$STAGE" in', script_text)
+        self.assertIn('dev|staging|prod)', script_text)
+        self.assertIn('COGNITO_ENV_FILE="$SCRIPT_DIR/../infra/environments/generated/${STAGE}.cognito.env"', script_text)
+        self.assertIn('mkdir -p "$COGNITO_ENV_DIR"', script_text)
+        self.assertIn('mktemp "$COGNITO_ENV_DIR/.${STAGE}.cognito.env.XXXXXX"', script_text)
+        self.assertIn('mv -f -- "$COGNITO_ENV_TEMP" "$COGNITO_ENV_FILE"', script_text)
+        self.assertIn('chmod 600 "$COGNITO_ENV_TEMP"', script_text)
+        self.assertIn('umask 077', script_text)
+        self.assertIn('trap cleanup_cognito_env_temp EXIT HUP INT TERM', script_text)
+        self.assertNotIn('cat > infra/cognito.env', script_text)
+        self.assertNotIn('echo "backend/infra/cognito.env"', script_text)
+        for export_name in (
+            "COGNITO_USER_POOL_ID",
+            "COGNITO_APP_CLIENT_ID",
+            "COGNITO_DOMAIN",
+            "COGNITO_ISSUER",
+            "COGNITO_CALLBACK_URL",
+            "COGNITO_LOGOUT_URL",
+        ):
+            self.assertIn(f"export {export_name}=", script_text)
+
+    def test_cognito_documentation_is_stage_specific(self):
+        readme = (BACKEND_ROOT.parent / "README.md").read_text(encoding="utf-8")
+        self.assertIn('infra/environments/generated/${STAGE}.cognito.env', readme)
+        self.assertIn('infra/environments/generated/dev.cognito.env', readme)
+        self.assertNotIn('source infra/cognito.env', readme)
+
+    def test_generated_cognito_files_are_ignored_but_templates_are_not(self):
+        gitignore = (BACKEND_ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("infra/cognito.env", gitignore)
+        self.assertIn("infra/environments/generated/*.cognito.env", gitignore)
+        generated_pattern = "infra/environments/generated/*.cognito.env"
+        self.assertTrue(fnmatch("infra/environments/generated/staging.cognito.env", generated_pattern))
+        for stage in ("dev", "staging", "prod"):
+            template = BACKEND_ROOT / "infra" / "environments" / f"{stage}.env.example"
+            with self.subTest(template=template.name):
+                self.assertTrue(template.exists())
+                self.assertFalse(fnmatch(template.relative_to(BACKEND_ROOT).as_posix(), generated_pattern))
 
     def test_deploy_sets_operation_name_for_contract_checks(self):
         script_text = self._read("bin/deploy")
