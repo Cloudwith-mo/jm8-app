@@ -20,11 +20,105 @@ jm8_validate_contract_or_exit
 
 ALLOWED_ORIGINS_JSON="$(python3 "$SCRIPT_DIR/jm8_environment_contract.py" allowed-origins-json)"
 
+mkdir -p .build
+
 # Fetch actual account ID from STS for use in deployment
 ACCOUNT_ID=$(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text)
 
 ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 POLICY_NAME="${APP_NAME}-${STAGE}-app-access-policy"
+LAMBDA_TRUST_POLICY="$SCRIPT_DIR/../infra/lambda-trust-policy.json"
+
+ensure_lambda_role() {
+  local role_lookup_rc
+  local role_lookup_error
+
+  echo "Resolving Lambda IAM role: $ROLE_NAME"
+  set +e
+  aws iam get-role \
+    --role-name "$ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    > .build/lambda-role.json \
+    2> .build/lambda-role-error.txt
+  role_lookup_rc=$?
+  set -e
+
+  if [ "$role_lookup_rc" -eq 0 ]; then
+    echo "Lambda IAM role already exists; preserving role identity."
+  else
+    role_lookup_error="$(<.build/lambda-role-error.txt)"
+    case "$role_lookup_error" in
+      *NoSuchEntity*)
+        echo "Lambda IAM role is missing; creating $ROLE_NAME."
+        aws iam create-role \
+          --role-name "$ROLE_NAME" \
+          --description "JournalM8 Lambda basic execution role" \
+          --assume-role-policy-document "file://${LAMBDA_TRUST_POLICY}" \
+          --profile "$AWS_PROFILE" \
+          --region "$AWS_REGION" \
+          >/dev/null
+        aws iam wait role-exists \
+          --role-name "$ROLE_NAME" \
+          --profile "$AWS_PROFILE" \
+          --region "$AWS_REGION"
+        ;;
+      *)
+        echo "Unable to resolve Lambda IAM role: IAM lookup failed."
+        return "$role_lookup_rc"
+        ;;
+    esac
+  fi
+
+  aws iam update-assume-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-document "file://${LAMBDA_TRUST_POLICY}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws iam attach-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  aws iam get-role \
+    --role-name "$ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+
+  local trust_services
+  trust_services="$(aws iam get-role \
+    --role-name "$ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query 'Role.AssumeRolePolicyDocument.Statement[?Effect==`Allow`].Principal.Service' \
+    --output text)"
+  case "$trust_services" in
+    *lambda.amazonaws.com*) ;;
+    *)
+      echo "Lambda IAM role trust policy does not contain lambda.amazonaws.com."
+      return 1
+      ;;
+  esac
+
+  local attached_basic_policy
+  attached_basic_policy="$(aws iam list-attached-role-policies \
+    --role-name "$ROLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "AttachedPolicies[?PolicyArn=='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'].PolicyArn | [0]" \
+    --output text)"
+  if [ "$attached_basic_policy" != "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" ]; then
+    echo "Required Lambda basic execution policy is not attached."
+    return 1
+  fi
+
+  echo "Lambda IAM role and required basic execution policy verified."
+}
 
 echo "Creating DynamoDB table if missing: $TABLE_NAME"
 
@@ -152,9 +246,6 @@ fi
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" >/dev/null
 
-  # Prepare build dir for policy/lifecycle/tag files
-  mkdir -p .build
-
   # --- HTTPS-only bucket policy (deny when aws:SecureTransport is false) ---
   echo "Merging HTTPS-only deny with any existing bucket policy (preserve unrelated statements)"
   set +e
@@ -254,7 +345,7 @@ fi
 
 echo "Creating Lambda app access policy."
 
-mkdir -p .build
+ensure_lambda_role
 
 cat > .build/lambda-app-policy.json <<POLICY
 {
@@ -303,6 +394,13 @@ aws iam put-role-policy \
   --policy-name "$POLICY_NAME" \
   --policy-document file://.build/lambda-app-policy.json \
   --profile "$AWS_PROFILE"
+
+aws iam get-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$POLICY_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null
 
 echo "Phase 2 resources ready."
 echo "Table: $TABLE_NAME"

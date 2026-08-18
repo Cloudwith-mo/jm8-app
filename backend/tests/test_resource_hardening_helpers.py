@@ -176,6 +176,29 @@ class TestCreateResourcesScriptSafety(unittest.TestCase):
             normalized_script,
         )
 
+    def test_resolves_or_creates_role_before_application_policy(self):
+        self.assertIn('aws iam get-role', self.script)
+        self.assertIn('*NoSuchEntity*)', self.script)
+        self.assertIn('aws iam create-role', self.script)
+        self.assertIn('aws iam wait role-exists', self.script)
+        self.assertLess(self.script.index('ensure_lambda_role'), self.script.index('aws iam put-role-policy'))
+
+    def test_role_creation_is_fail_closed_and_idempotent(self):
+        self.assertNotIn('|| true', self.script)
+        self.assertIn('update-assume-role-policy', self.script)
+        self.assertIn('attach-role-policy', self.script)
+        self.assertNotIn('delete-role', self.script)
+        self.assertNotIn('AdministratorAccess', self.script)
+
+    def test_role_uses_canonical_trust_and_basic_policy(self):
+        self.assertIn('infra/lambda-trust-policy.json', self.script)
+        self.assertIn('arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole', self.script)
+
+    def test_application_policy_remains_stage_scoped(self):
+        self.assertIn('arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}', self.script)
+        self.assertIn('arn:aws:s3:::${RAW_BUCKET}/*', self.script)
+        self.assertIn('POLICY_NAME="${APP_NAME}-${STAGE}-app-access-policy"', self.script)
+
 
 if __name__ == '__main__':
     unittest.main()
