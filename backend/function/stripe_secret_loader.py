@@ -19,6 +19,8 @@ from botocore.exceptions import (
 from billing_policy import (
     STRIPE_SECRET_KEY_ENV,
     STRIPE_SECRET_KEY_PATTERN,
+    STRIPE_WEBHOOK_SECRET_ENV,
+    STRIPE_WEBHOOK_SECRET_PATTERN,
 )
 
 
@@ -53,10 +55,7 @@ RETRYABLE_SECRET_ERRORS = {
     "TooManyRequestsException",
 }
 
-_SECRET_CACHE: dict[
-    str,
-    tuple[str, float],
-] = {}
+_SECRET_CACHE: dict[str, tuple[dict[str, str], float]] = {}
 
 _SECRET_CACHE_LOCK = (
     threading.RLock()
@@ -155,9 +154,20 @@ def _validate_secret_key(
     return normalized
 
 
-def _parse_secret_string(
-    secret_string: Any,
-) -> str:
+def _validate_webhook_secret(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if not STRIPE_WEBHOOK_SECRET_PATTERN.fullmatch(normalized):
+        raise StripeSecretLoadError(
+            "InvalidStripeWebhookSecret",
+            "The Stripe webhook secret is invalid.",
+            retryable=False,
+        )
+    return normalized
+
+
+def _parse_secret_string(secret_string: Any) -> dict[str, str]:
     if not isinstance(
         secret_string,
         str,
@@ -199,18 +209,17 @@ def _parse_secret_string(
             retryable=False,
         )
 
-    return _validate_secret_key(
-        payload.get(
-            STRIPE_SECRET_FIELD
-        )
-    )
+    return {
+        STRIPE_SECRET_KEY_ENV: _validate_secret_key(payload.get(STRIPE_SECRET_FIELD)),
+        STRIPE_WEBHOOK_SECRET_ENV: _validate_webhook_secret(payload.get(STRIPE_WEBHOOK_SECRET_ENV)),
+    }
 
 
 def _cached_secret(
     secret_arn: str,
     *,
     now: float,
-) -> str | None:
+) -> dict[str, str] | None:
     cached = _SECRET_CACHE.get(
         secret_arn
     )
@@ -218,7 +227,7 @@ def _cached_secret(
     if cached is None:
         return None
 
-    secret_key, expires_at = cached
+    secrets, expires_at = cached
 
     if expires_at <= now:
         _SECRET_CACHE.pop(
@@ -228,7 +237,7 @@ def _cached_secret(
 
         return None
 
-    return secret_key
+    return secrets
 
 
 def _secret_region(
@@ -257,6 +266,18 @@ def retrieve_stripe_secret_key(
     *,
     client_resource=None,
 ) -> str:
+    return retrieve_stripe_secrets(
+        secret_arn,
+        client_resource=client_resource,
+    )[STRIPE_SECRET_KEY_ENV]
+
+
+def retrieve_stripe_secrets(
+    secret_arn: Any,
+    *,
+    client_resource=None,
+    refresh: bool = False,
+) -> dict[str, str]:
     normalized_arn = (
         normalize_stripe_secret_arn(
             secret_arn
@@ -266,13 +287,10 @@ def retrieve_stripe_secret_key(
     now = time.monotonic()
 
     with _SECRET_CACHE_LOCK:
-        cached = _cached_secret(
-            normalized_arn,
-            now=now,
-        )
+        cached = None if refresh else _cached_secret(normalized_arn, now=now)
 
         if cached is not None:
-            return cached
+            return dict(cached)
 
         client = (
             client_resource
@@ -323,18 +341,12 @@ def retrieve_stripe_secret_key(
                 retryable=True,
             ) from error
 
-        secret_key = (
-            _parse_secret_string(
-                result.get(
-                    "SecretString"
-                )
-            )
-        )
+        secrets = _parse_secret_string(result.get("SecretString"))
 
         _SECRET_CACHE[
             normalized_arn
         ] = (
-            secret_key,
+            secrets,
             (
                 now
                 + (
@@ -343,7 +355,7 @@ def retrieve_stripe_secret_key(
             ),
         )
 
-        return secret_key
+        return dict(secrets)
 
 
 def load_stripe_runtime_environment(
@@ -352,6 +364,7 @@ def load_stripe_runtime_environment(
     ) = None,
     *,
     client_resource=None,
+    refresh: bool = False,
 ) -> dict[str, str]:
     source = dict(
         environ
@@ -377,13 +390,12 @@ def load_stripe_runtime_environment(
         )
     )
 
-    source[
-        STRIPE_SECRET_KEY_ENV
-    ] = retrieve_stripe_secret_key(
+    source.update(retrieve_stripe_secrets(
         secret_arn,
         client_resource=(
             client_resource
         ),
-    )
+        refresh=refresh,
+    ))
 
     return source

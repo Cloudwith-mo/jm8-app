@@ -18,6 +18,12 @@ PROVISION_SCRIPT = (
     / "provision-stripe-secret"
 )
 
+SETUP_SCRIPT = (
+    BACKEND_ROOT
+    / "bin"
+    / "setup-stripe-catalog"
+)
+
 DEPLOY_SCRIPT = (
     BACKEND_ROOT
     / "bin"
@@ -25,7 +31,7 @@ DEPLOY_SCRIPT = (
 )
 
 GITIGNORE = (
-    REPOSITORY_ROOT
+    BACKEND_ROOT
     / ".gitignore"
 )
 
@@ -41,6 +47,8 @@ class StripeSecretDeploymentTests(
             PROVISION_SCRIPT
             .read_text()
         )
+
+        cls.setup = SETUP_SCRIPT.read_text()
 
         cls.deploy = (
             DEPLOY_SCRIPT
@@ -89,6 +97,27 @@ class StripeSecretDeploymentTests(
             'export JM8_OPERATION="provision-stripe-secret"',
             self.provision,
         )
+
+    def test_catalog_uses_stage_specific_non_secret_output(self):
+        self.assertIn('f"{stage}.stripe.env"', self.setup)
+        self.assertIn('Path(os.environ["SCRIPT_DIR"])', self.setup)
+        self.assertIn("mkdir(parents=True, exist_ok=True)", self.setup)
+        self.assertIn("NamedTemporaryFile", self.setup)
+        self.assertIn("temporary_path.replace(output_path)", self.setup)
+        self.assertIn("temporary_path.chmod(0o600)", self.setup)
+        self.assertNotIn('path = Path(".env")', self.setup)
+        self.assertNotIn('"STRIPE_SECRET_KEY":', self.setup.split("def update_environment", 1)[1])
+        self.assertNotIn('"STRIPE_WEBHOOK_SECRET":', self.setup.split("def update_environment", 1)[1])
+
+    def test_catalog_requires_caller_urls_and_no_localhost_fallback(self):
+        for name in (
+            "STRIPE_CHECKOUT_SUCCESS_URL",
+            "STRIPE_CHECKOUT_CANCEL_URL",
+            "STRIPE_PORTAL_RETURN_URL",
+        ):
+            self.assertIn(f': "${{{name}:?{name} is required.', self.setup)
+        self.assertNotIn("http://localhost:5173/", self.setup)
+        self.assertIn("validate_non_dev_urls", self.setup)
 
     def test_provision_can_create_secret(
         self,
@@ -144,6 +173,18 @@ class StripeSecretDeploymentTests(
             "os.replace",
             self.provision,
         )
+        self.assertIn("infra/environments/generated/${STAGE}.stripe.env", self.provision)
+        self.assertNotIn('Path(\n    ".env"', self.provision)
+
+    def test_secret_update_preserves_existing_webhook(self):
+        self.assertIn("get-secret-value", self.provision)
+        self.assertIn('existing.get("STRIPE_WEBHOOK_SECRET")', self.provision)
+        self.assertIn('payload["STRIPE_WEBHOOK_SECRET"] = existing_webhook', self.provision)
+
+    def test_production_requires_complete_payload_but_bootstrap_does_not(self):
+        self.assertIn('os.environ.get("STAGE") == "prod"', self.provision)
+        self.assertIn("Production requires STRIPE_WEBHOOK_SECRET.", self.provision)
+        self.assertIn('STRIPE_WEBHOOK_SECRET="${STRIPE_WEBHOOK_SECRET:-}"', self.provision)
 
     def test_temporary_secret_file_is_cleaned(
         self,
@@ -261,6 +302,18 @@ class StripeSecretDeploymentTests(
             "${STRIPE_SECRET_KEY}",
             self.deploy,
         )
+        self.assertNotIn("export STRIPE_WEBHOOK_SECRET", self.deploy)
+        self.assertNotIn('"STRIPE_WEBHOOK_SECRET",', environment_block)
+
+    def test_deploy_allows_staging_bootstrap_and_checks_prod_secret(self):
+        self.assertIn("get-secret-value", self.deploy)
+        self.assertIn('stage == "prod"', self.deploy)
+        self.assertIn("Production Stripe webhook secret is missing or invalid.", self.deploy)
+
+    def test_stripe_generated_config_is_ignored_and_non_secret(self):
+        self.assertIn("infra/environments/generated/*.stripe.env", self.gitignore)
+        self.assertIn("STRIPE_ENV_FILE", self.provision)
+        self.assertIn("STRIPE_ENV_FILE", self.provision)
 
     def test_billing_values_enter_managed_environment(
         self,
@@ -281,7 +334,7 @@ class StripeSecretDeploymentTests(
         self,
     ):
         self.assertIn(
-            "backend/.build/",
+            ".build/",
             self.gitignore,
         )
 

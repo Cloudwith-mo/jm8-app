@@ -16,6 +16,7 @@ from stripe_secret_loader import (
     load_stripe_runtime_environment,
     normalize_stripe_secret_arn,
     retrieve_stripe_secret_key,
+    retrieve_stripe_secrets,
 )
 
 
@@ -23,6 +24,8 @@ TEST_SECRET = (
     "sk_test_"
     "secretloader123456"
 )
+
+TEST_WEBHOOK_SECRET = "whsec_loader12345678"
 
 TEST_SECRET_ARN = (
     "arn:aws:secretsmanager:"
@@ -234,6 +237,30 @@ class StripeSecretLoaderTests(
             len(client.calls),
             1,
         )
+
+    def test_loader_returns_both_secret_fields(self):
+        client = FakeSecretsClient(result={
+            "SecretString": json.dumps({
+                "STRIPE_SECRET_KEY": TEST_SECRET,
+                "STRIPE_WEBHOOK_SECRET": TEST_WEBHOOK_SECRET,
+            })
+        })
+        result = retrieve_stripe_secrets(TEST_SECRET_ARN, client_resource=client)
+        self.assertEqual(result["STRIPE_SECRET_KEY"], TEST_SECRET)
+        self.assertEqual(result["STRIPE_WEBHOOK_SECRET"], TEST_WEBHOOK_SECRET)
+
+    def test_refresh_bypasses_cached_secret(self):
+        first_client = FakeSecretsClient()
+        retrieve_stripe_secrets(TEST_SECRET_ARN, client_resource=first_client)
+        second_client = FakeSecretsClient(result={
+            "SecretString": json.dumps({
+                "STRIPE_SECRET_KEY": TEST_SECRET,
+                "STRIPE_WEBHOOK_SECRET": TEST_WEBHOOK_SECRET,
+            })
+        })
+        result = retrieve_stripe_secrets(TEST_SECRET_ARN, client_resource=second_client, refresh=True)
+        self.assertEqual(result["STRIPE_WEBHOOK_SECRET"], TEST_WEBHOOK_SECRET)
+        self.assertEqual(len(second_client.calls), 1)
 
     def test_environment_is_augmented(
         self,

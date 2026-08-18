@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # === Environment Contract Validation ===
 : "${AWS_PROFILE:?AWS_PROFILE is required.}"
@@ -8,14 +9,18 @@ set -euo pipefail
 : "${STAGE:?STAGE is required (dev|staging|prod)}"
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required.}"
 : "${STRIPE_SECRET_KEY:?A Stripe secret key is required.}"
+: "${STRIPE_CHECKOUT_SUCCESS_URL:?STRIPE_CHECKOUT_SUCCESS_URL is required.}"
+: "${STRIPE_CHECKOUT_CANCEL_URL:?STRIPE_CHECKOUT_CANCEL_URL is required.}"
+: "${STRIPE_PORTAL_RETURN_URL:?STRIPE_PORTAL_RETURN_URL is required.}"
 
 # Use shared operation-specific validation for Stripe mode checks.
 export JM8_OPERATION="setup-stripe-catalog"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SCRIPT_DIR
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
 jm8_validate_contract_or_exit
 
-PYTHONPATH=function \
+PYTHONPATH=function:bin \
 python3 - <<'PY'
 from __future__ import annotations
 
@@ -50,6 +55,7 @@ from billing_policy import (
     STRIPE_PRO_MONTHLY_LOOKUP_KEY,
     load_stripe_checkout_config,
 )
+from jm8_environment_contract import validate_non_dev_urls
 from usage_policy import (
     PLAN_PRO,
 )
@@ -108,6 +114,16 @@ if not secret_key.startswith(
         "Stripe secret key mode "
         "does not match STAGE."
     )
+
+try:
+    validate_non_dev_urls(
+        stage,
+        os.environ["STRIPE_CHECKOUT_SUCCESS_URL"],
+        os.environ["STRIPE_CHECKOUT_CANCEL_URL"],
+        os.environ["STRIPE_PORTAL_RETURN_URL"],
+    )
+except Exception as error:
+    raise SystemExit("Stripe return URLs are invalid for STAGE.") from error
 
 
 class CatalogSetupError(
@@ -598,157 +614,53 @@ def update_environment(
     *,
     price_id: str,
 ) -> None:
-    path = Path(".env")
+    if stage not in {"dev", "staging", "prod"}:
+        raise CatalogSetupError("Invalid STAGE for Stripe configuration.")
 
-    if not path.exists():
-        raise CatalogSetupError(
-            "backend/.env was not found."
-        )
+    output_path = (
+        Path(os.environ["SCRIPT_DIR"])
+        / ".."
+        / "infra"
+        / "environments"
+        / "generated"
+        / f"{stage}.stripe.env"
+    ).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     updates = {
-        "STRIPE_SECRET_KEY":
-            secret_key,
-
         "STRIPE_PRO_MONTHLY_PRICE_ID":
             price_id,
-
-        "STRIPE_CHECKOUT_SUCCESS_URL":
-            (
-                "http://localhost:5173/"
-                "?checkout=success"
-                "&session_id="
-                "{CHECKOUT_SESSION_ID}"
-            ),
-
-        "STRIPE_CHECKOUT_CANCEL_URL":
-            (
-                "http://localhost:5173/"
-                "?checkout=cancelled"
-            ),
-
-        "STRIPE_PORTAL_RETURN_URL":
-            "http://localhost:5173/",
+        "STRIPE_CHECKOUT_SUCCESS_URL": os.environ["STRIPE_CHECKOUT_SUCCESS_URL"],
+        "STRIPE_CHECKOUT_CANCEL_URL": os.environ["STRIPE_CHECKOUT_CANCEL_URL"],
+        "STRIPE_PORTAL_RETURN_URL": os.environ["STRIPE_PORTAL_RETURN_URL"],
     }
 
-    lines = path.read_text().splitlines()
+    rendered = "\n".join(
+        f"export {key}={shell_quote(value)}"
+        for key, value in updates.items()
+    ) + "\n"
 
-    found = {
-        key: False
-        for key in updates
-    }
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output_path.parent,
+            prefix=f".{stage}.stripe.env.", delete=False,
+        ) as temporary:
+            temporary.write(rendered)
+            temporary_path = Path(temporary.name)
 
-    rendered = []
-
-    for line in lines:
-        match = re.match(
-            (
-                r"^([A-Z0-9_]+)"
-                r"="
-            ),
-            line,
-        )
-
-        key = (
-            match.group(1)
-            if match
-            else None
-        )
-
-        if key in updates:
-            rendered.append(
-                (
-                    f"{key}="
-                    + shell_quote(
-                        updates[key]
-                    )
-                )
-            )
-
-            found[key] = True
-        else:
-            rendered.append(line)
-
-    missing = [
-        key
-        for key, present
-        in found.items()
-        if not present
-    ]
-
-    if missing:
-        if (
-            rendered
-            and rendered[-1].strip()
-        ):
-            rendered.append("")
-
-        rendered.append(
-            "# Stripe billing"
-        )
-
-        for key in missing:
-            rendered.append(
-                (
-                    f"{key}="
-                    + shell_quote(
-                        updates[key]
-                    )
-                )
-            )
-
-    final_content = (
-        "\n".join(rendered)
-        + "\n"
-    )
-
-    existing_mode = (
-        path.stat().st_mode
-    )
-
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=".env.",
-        delete=False,
-    ) as temporary:
-        temporary.write(
-            final_content
-        )
-
-        temporary_path = Path(
-            temporary.name
-        )
-
-    temporary_path.chmod(
-        existing_mode
-    )
-
-    temporary_path.replace(
-        path
-    )
+        temporary_path.chmod(0o600)
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
     load_stripe_checkout_config({
-        "STRIPE_SECRET_KEY":
-            secret_key,
-
         "STRIPE_PRO_MONTHLY_PRICE_ID":
             price_id,
-
-        "STRIPE_CHECKOUT_SUCCESS_URL":
-            updates[
-                "STRIPE_CHECKOUT_SUCCESS_URL"
-            ],
-
-        "STRIPE_CHECKOUT_CANCEL_URL":
-            updates[
-                "STRIPE_CHECKOUT_CANCEL_URL"
-            ],
-
-        "STRIPE_PORTAL_RETURN_URL":
-            updates[
-                "STRIPE_PORTAL_RETURN_URL"
-            ],
+        "STRIPE_CHECKOUT_SUCCESS_URL": updates["STRIPE_CHECKOUT_SUCCESS_URL"],
+        "STRIPE_CHECKOUT_CANCEL_URL": updates["STRIPE_CHECKOUT_CANCEL_URL"],
+        "STRIPE_PORTAL_RETURN_URL": updates["STRIPE_PORTAL_RETURN_URL"],
     })
 
 

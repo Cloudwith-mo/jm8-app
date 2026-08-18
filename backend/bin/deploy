@@ -13,7 +13,6 @@ set -euo pipefail
 : "${ANALYSIS_SCHEMA_VERSION:?ANALYSIS_SCHEMA_VERSION is required.}"
 : "${ANALYSIS_PROMPT_VERSION:?ANALYSIS_PROMPT_VERSION is required.}"
 : "${STRIPE_SECRET_ARN:?STRIPE_SECRET_ARN is required.}"
-: "${STRIPE_WEBHOOK_SECRET:?STRIPE_WEBHOOK_SECRET is required.}"
 : "${STRIPE_PRO_MONTHLY_PRICE_ID:?STRIPE_PRO_MONTHLY_PRICE_ID is required.}"
 : "${STRIPE_CHECKOUT_SUCCESS_URL:?STRIPE_CHECKOUT_SUCCESS_URL is required.}"
 : "${STRIPE_CHECKOUT_CANCEL_URL:?STRIPE_CHECKOUT_CANCEL_URL is required.}"
@@ -197,6 +196,31 @@ aws secretsmanager describe-secret \
 
 echo "Stripe secret reference verified."
 
+echo "Verifying Stripe secret payload completeness."
+aws secretsmanager get-secret-value \
+  --secret-id "$STRIPE_SECRET_ARN" \
+  --query SecretString \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  | python3 -c '
+from __future__ import annotations
+
+import json
+import re
+import sys
+
+payload = json.load(sys.stdin)
+if not isinstance(payload, dict):
+  raise SystemExit("Stripe secret payload is invalid.")
+stage = sys.argv[1]
+expected_prefix = "sk_live_" if stage == "prod" else "sk_test_"
+if not str(payload.get("STRIPE_SECRET_KEY") or "").startswith(expected_prefix) or not re.fullmatch(r"sk_(test|live)_[A-Za-z0-9_]{8,}", str(payload.get("STRIPE_SECRET_KEY") or "")):
+  raise SystemExit("Stripe API secret is invalid.")
+if stage == "prod" and not re.fullmatch(r"whsec_[A-Za-z0-9_]{8,}", str(payload.get("STRIPE_WEBHOOK_SECRET") or "")):
+  raise SystemExit("Production Stripe webhook secret is missing or invalid.")
+' "$STAGE"
+
 python3 - "$STRIPE_SECRET_ARN" \
   > .build/api-stripe-secret-policy.json <<'PY_STRIPE_POLICY'
 import json
@@ -242,7 +266,6 @@ export FREE_MONTHLY_ENTRY_ANALYSES
 export PRO_MONTHLY_ASK_QUESTIONS
 export PRO_MONTHLY_ENTRY_ANALYSES
 export STRIPE_SECRET_ARN
-export STRIPE_WEBHOOK_SECRET
 export STRIPE_PRO_MONTHLY_PRICE_ID
 export STRIPE_CHECKOUT_SUCCESS_URL
 export STRIPE_CHECKOUT_CANCEL_URL
@@ -271,7 +294,6 @@ environment_keys = [
     "PRO_MONTHLY_ASK_QUESTIONS",
     "PRO_MONTHLY_ENTRY_ANALYSES",
     "STRIPE_SECRET_ARN",
-    "STRIPE_WEBHOOK_SECRET",
     "STRIPE_PRO_MONTHLY_PRICE_ID",
     "STRIPE_CHECKOUT_SUCCESS_URL",
     "STRIPE_CHECKOUT_CANCEL_URL",

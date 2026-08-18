@@ -281,23 +281,24 @@ class BillingWebhookTests(unittest.TestCase):
 
         serialized = json.dumps(payloads)
         for forbidden in (
-            "Authorization",
-            "Stripe-Signature",
-            "customer_email",
-            "alice@example.com",
-            "customer_id",
-            "customer",
-            "subscription_id",
-            "sub_test_123",
-            "secret",
-            "sk_test",
-            "whsec",
-            "JWT",
-            "journal",
-            "content",
-            "eyJhbGci",
+            "Authorization", "Stripe-Signature", "customer_email",
+            "alice@example.com", "customer_id", "customer",
+            "subscription_id", "sub_test_123", "secret", "sk_test",
+            "whsec", "JWT", "journal", "content", "eyJhbGci",
         ):
             self.assertNotIn(forbidden, serialized)
+
+    def test_missing_webhook_secret_fails_closed(self):
+        with self.assertRaises(BillingWebhookError) as captured:
+            process_billing_webhook(
+                signed_event(checkout_payload()),
+                secret_loader=lambda _environment: {
+                    "STRIPE_SECRET_KEY": "sk_test_loader12345678",
+                },
+            )
+        self.assertEqual(captured.exception.code, "InvalidStripeWebhookSecret")
+        self.assertEqual(captured.exception.status_code, 500)
+        self.assertNotIn(SECRET, captured.exception.message)
 
 
 class ObservabilityDeploymentWiringTests(unittest.TestCase):

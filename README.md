@@ -60,26 +60,28 @@ listed among secure-api routes.
 
 ## Configure Stripe before deploying
 
-Create a Stripe webhook endpoint for:
+Staging Stripe bootstrap is intentionally two-phase:
 
-```text
-https://u06tdrfsua.execute-api.us-east-1.amazonaws.com/billing/webhook
-```
+1. Source the staging base environment.
+2. Set the staging Stripe test key and staging HTTPS return URLs:
+  `STRIPE_CHECKOUT_SUCCESS_URL`, `STRIPE_CHECKOUT_CANCEL_URL`, and
+  `STRIPE_PORTAL_RETURN_URL`.
+3. Run `./bin/setup-stripe-catalog`.
+4. Run `./bin/provision-stripe-secret` without a webhook secret for staging
+  bootstrap.
+5. Source `infra/environments/generated/staging.stripe.env`.
+6. Run `./bin/deploy`.
+7. Run `./bin/create-api` and `./bin/secure-api`.
+8. Create the Stripe webhook endpoint for:
+  `${API_ENDPOINT}/billing/webhook`.
+9. Rerun `./bin/provision-stripe-secret` with the real webhook signing secret.
+10. Verify webhook readiness and redeploy only if actually required.
 
-Subscribe it to the four events listed above. Copy its signing secret (starts
-with `whsec_`) into the same AWS Secrets Manager JSON object referenced by
-`STRIPE_SECRET_ARN`, using this key:
-
-```json
-{
-  "STRIPE_SECRET_KEY": "existing value",
-  "STRIPE_WEBHOOK_SECRET": "whsec_..."
-}
-```
-
-Do not place either secret in `.env`, source control, terminal output, or the
-Lambda environment. The existing secret loader should retrieve both at
-runtime.
+The staging bootstrap secret contains only `STRIPE_SECRET_KEY` until the real
+Stripe endpoint exists. Production requires both secret fields before deploy.
+Neither secret belongs in `.env`, generated environment files, source control,
+terminal output, or the Lambda environment. The ARN-backed runtime loader
+retrieves both fields from Secrets Manager.
 
 ## Deploy and secure routes
 

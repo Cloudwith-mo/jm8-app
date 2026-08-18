@@ -38,3 +38,4 @@ test-assets/
 # Local Cognito outputs
 infra/cognito.env
 infra/environments/generated/*.cognito.env
+infra/environments/generated/*.stripe.env
