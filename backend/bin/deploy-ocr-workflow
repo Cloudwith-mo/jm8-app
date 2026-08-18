@@ -48,13 +48,22 @@ TABLE_ARN="$(
 
 mkdir -p .build
 
-if ! aws logs describe-log-groups \
+set +e
+aws logs describe-log-groups \
   --log-group-name-prefix "$STATE_LOG_GROUP" \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION" \
   --query "logGroups[?logGroupName=='${STATE_LOG_GROUP}'].logGroupName | [0]" \
-  --output text | grep -Fxq "$STATE_LOG_GROUP"
-then
+  --output text > .build/ocr-log-group-lookup.txt 2> .build/ocr-log-group-lookup.err
+LOG_GROUP_LOOKUP_STATUS=$?
+set -e
+
+if [ "$LOG_GROUP_LOOKUP_STATUS" -ne 0 ]; then
+  echo "CloudWatch log group lookup failed; refusing to create it." >&2
+  exit "$LOG_GROUP_LOOKUP_STATUS"
+fi
+
+if ! grep -Fxq "$STATE_LOG_GROUP" .build/ocr-log-group-lookup.txt; then
   aws logs create-log-group \
     --log-group-name "$STATE_LOG_GROUP" \
     --profile "$AWS_PROFILE" \
@@ -75,6 +84,14 @@ STATE_LOG_GROUP_ARN="$(
     --query "logGroups[?logGroupName=='${STATE_LOG_GROUP}'].arn | [0]" \
     --output text
 )"
+
+if [ -z "$STATE_LOG_GROUP_ARN" ] || [ "$STATE_LOG_GROUP_ARN" = "None" ]; then
+  echo "CloudWatch log group ARN could not be resolved." >&2
+  exit 1
+fi
+
+# Step Functions expects the log-group ARN with the trailing resource suffix.
+STATE_LOG_GROUP_ARN="${STATE_LOG_GROUP_ARN}:*"
 
 cat > .build/lambda-worker-trust.json <<'JSON'
 {
@@ -394,7 +411,10 @@ policy = {
     "Version": "2012-10-17",
     "Statement": [
         {
+          "Sid": "StepFunctionsLogDelivery",
             "Effect": "Allow",
+          # CloudWatch Logs delivery APIs do not support resource-level
+          # authorization, so AWS requires Resource "*" for this statement.
             "Action": [
                 "lambda:InvokeFunction"
             ],
@@ -413,7 +433,14 @@ policy = {
                 "logs:ListLogDeliveries",
                 "logs:PutResourcePolicy",
                 "logs:DescribeResourcePolicies",
-                "logs:DescribeLogGroups",
+                "logs:DescribeLogGroups"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "StepFunctionsTracing",
+              "Effect": "Allow",
+              "Action": [
                 "xray:PutTraceSegments",
                 "xray:PutTelemetryRecords",
                 "xray:GetSamplingRules",
@@ -429,18 +456,22 @@ PY
 
 echo "Checking Step Functions IAM role: $STATE_ROLE_NAME"
 
-if aws iam get-role \
+set +e
+aws iam get-role \
   --role-name "$STATE_ROLE_NAME" \
   --profile "$AWS_PROFILE" \
-  >/dev/null 2>&1
-then
+  >/dev/null 2> .build/step-functions-role-lookup.err
+STATE_ROLE_LOOKUP_STATUS=$?
+set -e
+
+if [ "$STATE_ROLE_LOOKUP_STATUS" -eq 0 ]; then
   echo "Step Functions role already exists."
 
   aws iam update-assume-role-policy \
     --role-name "$STATE_ROLE_NAME" \
     --policy-document file://.build/step-functions-trust.json \
     --profile "$AWS_PROFILE"
-else
+elif grep -q "NoSuchEntity" .build/step-functions-role-lookup.err; then
   aws iam create-role \
     --role-name "$STATE_ROLE_NAME" \
     --description "JournalM8 Step Functions execution role" \
@@ -450,6 +481,9 @@ else
 
   echo "Created Step Functions role."
   sleep 10
+else
+  echo "Step Functions role lookup failed; refusing to create it." >&2
+  exit "$STATE_ROLE_LOOKUP_STATUS"
 fi
 
 aws iam put-role-policy \
@@ -457,6 +491,12 @@ aws iam put-role-policy \
   --policy-name "$STATE_POLICY_NAME" \
   --policy-document file://.build/step-functions-policy.json \
   --profile "$AWS_PROFILE"
+
+aws iam get-role-policy \
+  --role-name "$STATE_ROLE_NAME" \
+  --policy-name "$STATE_POLICY_NAME" \
+  --profile "$AWS_PROFILE" \
+  >/dev/null
 
 STATE_ROLE_ARN="$(
   aws iam get-role \
@@ -485,7 +525,7 @@ if [ -z "$STATE_MACHINE_ARN" ] || [ "$STATE_MACHINE_ARN" = "None" ]; then
       --role-arn "$STATE_ROLE_ARN" \
       --type STANDARD \
       --logging-configuration \
-        "level=ERROR,includeExecutionData=true,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
+        "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
       --tracing-configuration enabled=true \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
@@ -502,7 +542,7 @@ else
     --definition "file://${RESOLVED_DEFINITION}" \
     --role-arn "$STATE_ROLE_ARN" \
     --logging-configuration \
-      "level=ERROR,includeExecutionData=true,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
+      "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
     --tracing-configuration enabled=true \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
@@ -510,6 +550,36 @@ else
 
   echo "State machine updated."
 fi
+
+  STATE_MACHINE_DESCRIPTION="$({
+    aws stepfunctions describe-state-machine \
+    --state-machine-arn "$STATE_MACHINE_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json
+  })"
+
+  python3 - "$STATE_MACHINE_DESCRIPTION" "$STATE_ROLE_ARN" "$STATE_LOG_GROUP_ARN" <<'PY_VERIFY'
+  from __future__ import annotations
+
+  import json
+  import sys
+
+  description = json.loads(sys.argv[1])
+  if description.get("status") != "ACTIVE":
+    raise SystemExit("OCR state machine is not ACTIVE.")
+  if description.get("roleArn") != sys.argv[2]:
+    raise SystemExit("OCR state machine role ARN is incorrect.")
+  logging = description.get("loggingConfiguration") or {}
+  if logging.get("level") != "ERROR" or logging.get("includeExecutionData") is not False:
+    raise SystemExit("OCR state machine logging configuration is incorrect.")
+  destinations = logging.get("destinations") or []
+  if len(destinations) != 1:
+    raise SystemExit("OCR state machine logging destination is incorrect.")
+  actual = ((destinations[0].get("cloudWatchLogsLogGroup") or {}).get("logGroupArn"))
+  if actual != sys.argv[3]:
+    raise SystemExit("OCR state machine logging destination ARN is incorrect.")
+  PY_VERIFY
 
 echo
 echo "OCR workflow ready."
