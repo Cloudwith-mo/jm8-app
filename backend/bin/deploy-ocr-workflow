@@ -87,45 +87,45 @@ STATE_LOG_GROUP_FIELDS="$(
     --output json
 )"
 
-  STATE_LOG_GROUP_ARN="$(python3 - \
+STATE_LOG_GROUP_ARN="$(python3 - \
     "$STATE_LOG_GROUP_FIELDS" \
     "$STATE_LOG_GROUP" \
     "$AWS_REGION" \
     "$ACCOUNT_ID" <<'PY_LOG_GROUP'
-  from __future__ import annotations
+from __future__ import annotations
 
-  import json
-  import re
-  import sys
+import json
+import re
+import sys
 
-  fields = json.loads(sys.argv[1])
-  expected_name = sys.argv[2]
-  expected_region = sys.argv[3]
-  expected_account = sys.argv[4]
+fields = json.loads(sys.argv[1])
+expected_name = sys.argv[2]
+expected_region = sys.argv[3]
+expected_account = sys.argv[4]
 
-  if not isinstance(fields, dict) or fields.get("logGroupName") != expected_name:
+if not isinstance(fields, dict) or fields.get("logGroupName") != expected_name:
     raise SystemExit("Expected OCR CloudWatch log group was not resolved.")
 
-  raw_arn = fields.get("logGroupArn") or fields.get("arn")
-  if not isinstance(raw_arn, str) or not raw_arn:
+raw_arn = fields.get("logGroupArn") or fields.get("arn")
+if not isinstance(raw_arn, str) or not raw_arn:
     raise SystemExit("OCR CloudWatch log group ARN was not resolved.")
 
-  canonical_arn = raw_arn[:-2] if raw_arn.endswith(":*") else raw_arn
-  arn_pattern = re.compile(
+canonical_arn = raw_arn[:-2] if raw_arn.endswith(":*") else raw_arn
+arn_pattern = re.compile(
     r"^arn:(?P<partition>[^:]+):logs:(?P<region>[^:]+):"
     r"(?P<account>[^:]+):log-group:(?P<name>[^:]+)$"
   )
-  match = arn_pattern.fullmatch(canonical_arn)
-  if not match:
+match = arn_pattern.fullmatch(canonical_arn)
+if not match:
     raise SystemExit("OCR CloudWatch log group ARN has an invalid format.")
-  if match.group("region") != expected_region or match.group("account") != expected_account:
+if match.group("region") != expected_region or match.group("account") != expected_account:
     raise SystemExit("OCR CloudWatch log group ARN account or region is incorrect.")
-  if match.group("name") != expected_name or ":" in match.group("name") or "*" in match.group("name"):
+if match.group("name") != expected_name or ":" in match.group("name") or "*" in match.group("name"):
     raise SystemExit("OCR CloudWatch log group ARN name is incorrect.")
 
-  print(canonical_arn)
-  PY_LOG_GROUP
-  )"
+print(canonical_arn)
+PY_LOG_GROUP
+)"
 
 cat > .build/lambda-worker-trust.json <<'JSON'
 {
@@ -585,35 +585,35 @@ else
   echo "State machine updated."
 fi
 
-  STATE_MACHINE_DESCRIPTION="$({
+STATE_MACHINE_DESCRIPTION="$({
     aws stepfunctions describe-state-machine \
     --state-machine-arn "$STATE_MACHINE_ARN" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     --output json
-  })"
+})"
 
-  python3 - "$STATE_MACHINE_DESCRIPTION" "$STATE_ROLE_ARN" "$STATE_LOG_GROUP_ARN" <<'PY_VERIFY'
-  from __future__ import annotations
+python3 - "$STATE_MACHINE_DESCRIPTION" "$STATE_ROLE_ARN" "$STATE_LOG_GROUP_ARN" <<'PY_VERIFY'
+from __future__ import annotations
 
-  import json
-  import sys
+import json
+import sys
 
-  description = json.loads(sys.argv[1])
-  if description.get("status") != "ACTIVE":
+description = json.loads(sys.argv[1])
+if description.get("status") != "ACTIVE":
     raise SystemExit("OCR state machine is not ACTIVE.")
-  if description.get("roleArn") != sys.argv[2]:
+if description.get("roleArn") != sys.argv[2]:
     raise SystemExit("OCR state machine role ARN is incorrect.")
-  logging = description.get("loggingConfiguration") or {}
-  if logging.get("level") != "ERROR" or logging.get("includeExecutionData") is not False:
+logging = description.get("loggingConfiguration") or {}
+if logging.get("level") != "ERROR" or logging.get("includeExecutionData") is not False:
     raise SystemExit("OCR state machine logging configuration is incorrect.")
-  destinations = logging.get("destinations") or []
-  if len(destinations) != 1:
+destinations = logging.get("destinations") or []
+if len(destinations) != 1:
     raise SystemExit("OCR state machine logging destination is incorrect.")
-  actual = ((destinations[0].get("cloudWatchLogsLogGroup") or {}).get("logGroupArn"))
-  if actual != sys.argv[3]:
+actual = ((destinations[0].get("cloudWatchLogsLogGroup") or {}).get("logGroupArn"))
+if actual != sys.argv[3]:
     raise SystemExit("OCR state machine logging destination ARN is incorrect.")
-  PY_VERIFY
+PY_VERIFY
 
 echo
 echo "OCR workflow ready."

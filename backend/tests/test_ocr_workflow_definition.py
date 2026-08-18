@@ -1,4 +1,8 @@
 import json
+import contextlib
+import io
+import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -90,6 +94,75 @@ class OcrWorkflowDefinitionTests(unittest.TestCase):
         self.assertIn("CloudWatch log group lookup failed", self.script)
         self.assertIn("STATE_ROLE_LOOKUP_STATUS", self.script)
         self.assertNotIn("|| true", self.script)
+
+    def test_every_python_heredoc_compiles_at_column_zero(self):
+        blocks = re.findall(
+            r"<<'(?P<tag>PY[0-9A-Z_]*)'\n(?P<body>.*?)\n(?P=tag)",
+            self.script,
+            flags=re.DOTALL,
+        )
+        self.assertEqual(
+            [tag for tag, _ in blocks],
+            ["PY_LOG_GROUP", "PY", "PY", "PY", "PY_VERIFY"],
+        )
+        for tag, body in blocks:
+            with self.subTest(heredoc=tag):
+                compile(body, f"deploy-ocr-workflow:{tag}", "exec")
+                first_line = next(line for line in body.splitlines() if line.strip())
+                self.assertFalse(first_line[0].isspace())
+
+    def _run_log_group_parser(self, fields):
+        match = re.search(
+            r"<<'PY_LOG_GROUP'\n(?P<body>.*?)\nPY_LOG_GROUP",
+            self.script,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        body = match.group("body")
+        original_argv = sys.argv
+        output = io.StringIO()
+        sys.argv = [
+            "deploy-ocr-workflow:PY_LOG_GROUP",
+            json.dumps(fields),
+            "/aws/vendedlogs/states/journalm8-staging-ocr-workflow",
+            "us-east-1",
+            "111122223333",
+        ]
+        try:
+            with contextlib.redirect_stdout(output):
+                exec(compile(body, "PY_LOG_GROUP", "exec"), {})
+        finally:
+            sys.argv = original_argv
+        return output.getvalue().strip()
+
+    def test_log_group_parser_prefers_log_group_arn(self):
+        expected = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/vendedlogs/states/journalm8-staging-ocr-workflow"
+        actual = self._run_log_group_parser({
+            "logGroupName": "/aws/vendedlogs/states/journalm8-staging-ocr-workflow",
+            "logGroupArn": expected,
+            "arn": expected + ":unrelated",
+        })
+        self.assertEqual(actual, expected)
+        self.assertFalse(actual.endswith(":*"))
+
+    def test_log_group_parser_canonicalizes_legacy_arn_suffix_only(self):
+        expected = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/vendedlogs/states/journalm8-staging-ocr-workflow"
+        self.assertEqual(
+            self._run_log_group_parser({
+                "logGroupName": "/aws/vendedlogs/states/journalm8-staging-ocr-workflow",
+                "arn": expected + ":*",
+            }),
+            expected,
+        )
+
+    def test_log_group_parser_rejects_missing_group_and_malformed_arn(self):
+        cases = (
+            {"logGroupName": "/other", "arn": "arn:aws:logs:us-east-1:111122223333:log-group:/other"},
+            {"logGroupName": "/aws/vendedlogs/states/journalm8-staging-ocr-workflow", "arn": "not-an-arn"},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields), self.assertRaises(SystemExit):
+                self._run_log_group_parser(fields)
 
 
 if __name__ == "__main__":
