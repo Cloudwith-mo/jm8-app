@@ -137,7 +137,105 @@ def events_result(path: str) -> list[dict[str, Any]]:
 
 def sanitized_error(path: str) -> str:
     text = Path(path).read_text(encoding="utf-8", errors="replace")
-    return re.sub(r"(?i)(authorization|password|token|digest|secret)[^\r\n]*", r"\1=<redacted>", text)
+    sanitized = re.sub(r"(?i)(authorization|password|token|digest|secret)[^\r\n]*", r"\1=<redacted>", text)
+    sanitized = re.sub(r"(?i)(aws_access_key_id|aws_secret_access_key|aws_session_token)[^\r\n]*", r"\1=<redacted>", sanitized)
+    return sanitized
+
+
+def safe_actual(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        return [safe_actual(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): safe_actual(item) for key, item in value.items()}
+    return str(value)
+
+
+def add_validation(checks: list[dict[str, Any]], name: str, expected: Any, actual: Any, code: str, message: str) -> None:
+    checks.append({
+        "validation_name": name,
+        "expected_value": safe_actual(expected),
+        "safe_actual_value": safe_actual(actual),
+        "stable_error_code": code,
+        "message": message,
+        "status": "FAIL",
+    })
+
+
+def cloudfront_checks(path: str, bucket_domain: str, expected_oac_id: str, expected_distribution_domain: str) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        add_validation(checks, "distribution_json", "valid JSON", str(exc), "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID", "CloudFront distribution response could not be parsed.")
+        return {"passed": False, "checks": checks, "error_code": checks[0]["stable_error_code"]}
+
+    distribution = payload.get("Distribution", {}) if isinstance(payload, dict) else {}
+    config = distribution.get("DistributionConfig", {}) if isinstance(distribution, dict) else {}
+    origins = config.get("Origins", {}).get("Items", []) if isinstance(config.get("Origins", {}), dict) else []
+    error_items = config.get("CustomErrorResponses", {}).get("Items", []) if isinstance(config.get("CustomErrorResponses", {}), dict) else []
+
+    status = distribution.get("Status")
+    if status != "Deployed":
+        add_validation(checks, "distribution_status", "Deployed", status or "<missing>", "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID", "CloudFront distribution status should be Deployed.")
+    # AWS stores Enabled and DefaultRootObject under Distribution.DistributionConfig.
+    if config.get("Enabled") is not True:
+        add_validation(checks, "distribution_enabled", True, config.get("Enabled"), "CLOUDFRONT_DISTRIBUTION_DISABLED", "CloudFront distribution must be enabled.")
+    domain_name = distribution.get("DomainName") or config.get("DomainName")
+    if domain_name != expected_distribution_domain:
+        add_validation(checks, "distribution_domain", expected_distribution_domain, domain_name or "<missing>", "CLOUDFRONT_DISTRIBUTION_DOMAIN_MISMATCH", "Distribution domain does not match the stack output.")
+    if config.get("DefaultRootObject") != "index.html":
+        add_validation(checks, "default_root_object", "index.html", config.get("DefaultRootObject"), "CLOUDFRONT_DEFAULT_ROOT_INVALID", "DefaultRootObject must be index.html.")
+    if len(origins) != 1:
+        add_validation(checks, "origin_count", 1, len(origins), "CLOUDFRONT_ORIGIN_COUNT_INVALID", "Exactly one origin should match the frontend bucket domain.")
+    matching_origins = [origin for origin in origins if origin.get("DomainName") == bucket_domain]
+    if len(matching_origins) != 1:
+        add_validation(checks, "origin_domain_match", bucket_domain, [origin.get("DomainName") for origin in origins], "CLOUDFRONT_ORIGIN_DOMAIN_MISMATCH", "The frontend bucket regional domain must match exactly one origin.")
+    origin = matching_origins[0] if matching_origins else {}
+    if origin.get("OriginAccessControlId") != expected_oac_id:
+        add_validation(checks, "origin_oac_id", expected_oac_id, origin.get("OriginAccessControlId") or "<missing>", "CLOUDFRONT_ORIGIN_OAC_MISMATCH", "Origin Access Control ID on the origin does not match the stack output.")
+
+    default_behavior = config.get("DefaultCacheBehavior", {}) if isinstance(config.get("DefaultCacheBehavior", {}), dict) else {}
+    viewer_policy = default_behavior.get("ViewerProtocolPolicy")
+    if viewer_policy != "redirect-to-https":
+        add_validation(checks, "viewer_protocol_policy", "redirect-to-https", viewer_policy or "<missing>", "CLOUDFRONT_VIEWER_PROTOCOL_POLICY_INVALID", "Viewer protocol policy must be redirect-to-https.")
+    cache_policy_id = default_behavior.get("CachePolicyId")
+    if cache_policy_id != "658327ea-f89d-4fab-a63d-7e88639e58f6":
+        add_validation(checks, "cache_policy_id", "658327ea-f89d-4fab-a63d-7e88639e58f6", cache_policy_id or "<missing>", "CLOUDFRONT_CACHE_POLICY_INVALID", "Cache policy must use the required AWS-managed cache policy ID.")
+    function_items = default_behavior.get("FunctionAssociations", {}).get("Items", []) if isinstance(default_behavior.get("FunctionAssociations", {}), dict) else []
+    has_viewer_request = sum(1 for x in function_items if x.get("EventType") == "viewer-request") == 1
+    if not has_viewer_request:
+        add_validation(checks, "viewer_request_function", 1, len([x for x in function_items if x.get("EventType") == "viewer-request"]), "CLOUDFRONT_FUNCTION_ASSOCIATION_INVALID", "Exactly one viewer-request CloudFront Function association is expected.")
+    for error_code in (403, 404):
+        match = next((item for item in error_items if str(item.get("ErrorCode")) == str(error_code) and str(item.get("ResponseCode")) == "200" and item.get("ResponsePagePath") == "/index.html"), None)
+        if match is None:
+            code_name = "CLOUDFRONT_SPA_403_FALLBACK_INVALID" if error_code == 403 else "CLOUDFRONT_SPA_404_FALLBACK_INVALID"
+            add_validation(checks, f"spa_{error_code}_fallback", {"ResponseCode": 200, "ResponsePagePath": "/index.html"}, {"ErrorCode": error_code, "ResponseCode": None, "ResponsePagePath": None}, code_name, f"The {error_code} fallback must return /index.html with HTTP 200.")
+
+    failed = [item for item in checks if item["status"] == "FAIL"]
+    return {"passed": not failed, "checks": checks, "error_code": failed[0]["stable_error_code"] if failed else None}
+
+
+def oac_checks(path: str, expected_oac_id: str) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        add_validation(checks, "oac_json", "valid JSON", str(exc), "OAC_RESOURCE_ID_MISMATCH", "The OAC response could not be parsed.")
+        return {"passed": False, "checks": checks, "error_code": checks[0]["stable_error_code"]}
+    control = payload.get("OriginAccessControl", {}).get("OriginAccessControlConfig", {}) if isinstance(payload, dict) else {}
+    actual_oac_id = payload.get("OriginAccessControl", {}).get("Id") if isinstance(payload, dict) else None
+    if actual_oac_id != expected_oac_id:
+        add_validation(checks, "oac_id", expected_oac_id, actual_oac_id or "<missing>", "OAC_RESOURCE_ID_MISMATCH", "The returned Origin Access Control ID does not match the stack output.")
+    if control.get("OriginAccessControlOriginType") != "s3":
+        add_validation(checks, "oac_origin_type", "s3", control.get("OriginAccessControlOriginType") or "<missing>", "OAC_ORIGIN_TYPE_INVALID", "OriginAccessControlOriginType must be s3.")
+    if control.get("SigningBehavior") != "always":
+        add_validation(checks, "oac_signing_behavior", "always", control.get("SigningBehavior") or "<missing>", "OAC_SIGNING_BEHAVIOR_INVALID", "SigningBehavior must be always.")
+    if control.get("SigningProtocol") != "sigv4":
+        add_validation(checks, "oac_signing_protocol", "sigv4", control.get("SigningProtocol") or "<missing>", "OAC_SIGNING_PROTOCOL_INVALID", "SigningProtocol must be sigv4.")
+    failed = [item for item in checks if item["status"] == "FAIL"]
+    return {"passed": not failed, "checks": checks, "error_code": failed[0]["stable_error_code"] if failed else None}
 
 
 def main() -> int:
@@ -155,6 +253,14 @@ def main() -> int:
     events_parser.add_argument("path")
     error_parser = sub.add_parser("sanitize-error")
     error_parser.add_argument("path")
+    cloudfront_parser = sub.add_parser("cloudfront-verify")
+    cloudfront_parser.add_argument("distribution_json")
+    cloudfront_parser.add_argument("bucket_domain")
+    cloudfront_parser.add_argument("expected_oac_id")
+    cloudfront_parser.add_argument("expected_distribution_domain")
+    oac_parser = sub.add_parser("oac-verify")
+    oac_parser.add_argument("oac_json")
+    oac_parser.add_argument("expected_oac_id")
     report_parser = sub.add_parser("write-report")
     report_parser.add_argument("path")
     report_parser.add_argument("--operation", required=True)
@@ -168,6 +274,10 @@ def main() -> int:
     report_parser.add_argument("--post-timestamp", default="")
     report_parser.add_argument("--phase", required=True)
     report_parser.add_argument("--final-code", required=True)
+    report_parser.add_argument("--exit-code", type=int, default=0)
+    report_parser.add_argument("--stable-error-code", default="")
+    report_parser.add_argument("--sanitized-error-message", default="")
+    report_parser.add_argument("--timestamp", default="")
     report_parser.add_argument("--stack-json")
     report_parser.add_argument("--resource-json")
     args = parser.parse_args()
@@ -187,6 +297,14 @@ def main() -> int:
         print(json.dumps(events_result(args.path)))
     elif args.command == "sanitize-error":
         print(sanitized_error(args.path), end="")
+    elif args.command == "cloudfront-verify":
+        result = cloudfront_checks(args.distribution_json, args.bucket_domain, args.expected_oac_id, args.expected_distribution_domain)
+        print(json.dumps(result))
+        return 0 if result["passed"] else 1
+    elif args.command == "oac-verify":
+        result = oac_checks(args.oac_json, args.expected_oac_id)
+        print(json.dumps(result))
+        return 0 if result["passed"] else 1
     else:
         report: dict[str, Any] = {
             "operation": args.operation,
@@ -198,8 +316,13 @@ def main() -> int:
             "pre_stack_status": args.pre_status,
             "post_stack_status": args.post_status,
             "post_stack_timestamp": args.post_timestamp,
-            "verification_phase_reached": args.phase,
-            "final_success_failure_code": args.final_code,
+            "phase_reached": args.phase,
+            "final_status": "success" if args.final_code == "SUCCESS" else "failed",
+            "exit_code": args.exit_code,
+            "final_code": args.final_code,
+            "stable_error_code": args.stable_error_code or ("" if args.final_code == "SUCCESS" else args.final_code),
+            "sanitized_error_message": args.sanitized_error_message,
+            "timestamp": args.timestamp or __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         if args.stack_json and Path(args.stack_json).exists():
             report["stack"] = stack_result(args.stack_json)

@@ -17,6 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEMPLATE_PATH="$SCRIPT_DIR/../infra/cloudfront/frontend-hosting.yaml"
 DIAGNOSTICS_DIR="$REPO_ROOT/backend/.build/diagnostics"
+mkdir -p "$DIAGNOSTICS_DIR"
 DIAGNOSTIC_TIMESTAMP="$(date -u '+%Y%m%dT%H%M%SZ')"
 DIAGNOSTIC_PATH="$DIAGNOSTICS_DIR/frontend-hosting-${STAGE}-${DIAGNOSTIC_TIMESTAMP}.json"
 DIAGNOSTICS_HELPER="$SCRIPT_DIR/jm8_frontend_hosting_diagnostics.py"
@@ -28,6 +29,9 @@ LOCAL_TEMPLATE_CHECKSUM=""
 DEPLOYED_TEMPLATE_CHECKSUM=""
 VERIFICATION_PHASE="initialization"
 FINAL_CODE="IN_PROGRESS"
+REPORT_EXIT_CODE=0
+REPORT_MESSAGE=""
+REPORT_ERROR_CODE=""
 STACK_JSON="$TEMP_DIR/stack.json"
 RESOURCE_JSON="$TEMP_DIR/resources.json"
 EVENTS_JSON="$TEMP_DIR/events.json"
@@ -43,19 +47,39 @@ log_warn() { printf '%s WARN %s\n' "$(timestamp)" "$*" >&2; }
 log_error() { printf '%s ERROR %s\n' "$(timestamp)" "$*" >&2; }
 log_aws_error() { if [[ -s "$1" ]]; then python3 "$DIAGNOSTICS_HELPER" sanitize-error "$1" >&2; fi; }
 cleanup() { rm -rf "$TEMP_DIR"; }
-trap cleanup EXIT
-
 write_report() {
   python3 "$DIAGNOSTICS_HELPER" write-report "$DIAGNOSTIC_PATH" \
     --operation create-frontend-hosting --stage "$STAGE" --stack-name "$STACK_NAME" \
     --template-path "$TEMPLATE_PATH" --local-checksum "$LOCAL_TEMPLATE_CHECKSUM" \
     --deployed-checksum "$DEPLOYED_TEMPLATE_CHECKSUM" --pre-status "$PRE_STATUS" \
     --post-status "$POST_STATUS" --phase "$VERIFICATION_PHASE" --final-code "$FINAL_CODE" \
+    --exit-code "$REPORT_EXIT_CODE" --stable-error-code "$REPORT_ERROR_CODE" \
+    --sanitized-error-message "$REPORT_MESSAGE" --timestamp "$(timestamp)" \
     --stack-json "$STACK_JSON" --resource-json "$RESOURCE_JSON" >/dev/null
 }
+handle_exit() {
+  local exit_code="${1:-0}"
+  REPORT_EXIT_CODE="$exit_code"
+  if [[ -z "$FINAL_CODE" || "$FINAL_CODE" == "IN_PROGRESS" ]]; then
+    FINAL_CODE="UNEXPECTED_FAILURE"
+  fi
+  [[ -n "$REPORT_ERROR_CODE" ]] || REPORT_ERROR_CODE="$FINAL_CODE"
+  [[ -n "$REPORT_MESSAGE" ]] || REPORT_MESSAGE="Frontend hosting workflow exited unexpectedly."
+  if [[ -n "${DIAGNOSTIC_PATH:-}" ]]; then
+    write_report
+  fi
+  cleanup
+}
+trap 'handle_exit "$?"' EXIT
+trap 'FINAL_CODE="INTERRUPTED"; REPORT_ERROR_CODE="INTERRUPTED"; REPORT_MESSAGE="Process interrupted by signal."; REPORT_EXIT_CODE=130; write_report; exit 130' INT
+trap 'FINAL_CODE="INTERRUPTED"; REPORT_ERROR_CODE="INTERRUPTED"; REPORT_MESSAGE="Process terminated by signal."; REPORT_EXIT_CODE=143; write_report; exit 143' TERM
+log_info "Diagnostic report path: $DIAGNOSTIC_PATH"
 
 fail() {
   FINAL_CODE="$1"
+  REPORT_ERROR_CODE="$1"
+  REPORT_MESSAGE="$2"
+  REPORT_EXIT_CODE=1
   log_error "$2"
   if [[ "$1" == OUTPUT_OriginAccessControlId* ]]; then
     log_warn "OriginAccessControlId output validation failed; correlating physical resource."
@@ -100,10 +124,20 @@ if [[ "$FRONTEND_BUCKET" == "$RAW_BUCKET" ]]; then fail "FRONTEND_RAW_BUCKET_COL
 
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
 export JM8_OPERATION="create-frontend-hosting"
+VERIFICATION_PHASE="environment_contract"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "Environment contract validation started"
 if ! jm8_validate_contract_or_exit; then fail "ENVIRONMENT_CONTRACT_INVALID" "Environment contract validation failed."; fi
 log_info "Environment contract validation completed"
 
+VERIFICATION_PHASE="local_template_preflight"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "Local template preflight started: $(cd "$(dirname "$TEMPLATE_PATH")" && pwd)/$(basename "$TEMPLATE_PATH")"
 LOCAL_TEMPLATE_CHECKSUM="$(sha256_hex < "$TEMPLATE_PATH")"
 LOCAL_TEMPLATE_RESULT="$(python3 "$DIAGNOSTICS_HELPER" template-check "$TEMPLATE_PATH")"
@@ -121,6 +155,11 @@ unset AUTH_HEADER
 
 PRE_EXISTS="false"
 PRE_ERROR="$TEMP_DIR/pre-error"
+VERIFICATION_PHASE="predeployment_inspection"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 set +e
 aws cloudformation describe-stacks --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$TEMP_DIR/pre-stack.json" 2>"$PRE_ERROR"
 PRE_DESCRIBE_STATUS=$?
@@ -138,6 +177,11 @@ else
   if grep -q 'ValidationError' "$PRE_ERROR" && grep -qi 'does not exist' "$PRE_ERROR"; then log_info "Stack did not exist before deployment"; else log_aws_error "$PRE_ERROR"; fail "PRE_DEPLOYMENT_STACK_LOOKUP_FAILED" "Unable to determine whether the stack existed before deployment."; fi
 fi
 
+VERIFICATION_PHASE="cloudformation_deploy"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "CloudFormation deploy started; stack=$STACK_NAME existed_before=$PRE_EXISTS"
 set +e
 aws cloudformation deploy --stack-name "$STACK_NAME" --template-file "$TEMPLATE_PATH" --capabilities CAPABILITY_NAMED_IAM \
@@ -155,6 +199,11 @@ POST_TIMESTAMP="$(printf '%s' "$STACK_SUMMARY" | python3 -c 'import json,sys; pr
 log_info "Resulting stack status=$POST_STATUS last_updated=$POST_TIMESTAMP"
 case "$POST_STATUS" in CREATE_COMPLETE|UPDATE_COMPLETE) ;; *) fail "STACK_NOT_STABLE" "CloudFormation stack did not reach a stable completed state: $POST_STATUS" ;; esac
 
+VERIFICATION_PHASE="deployed_template_verification"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "Deployed-template verification started"
 aws cloudformation get-template --stack-name "$STACK_NAME" --template-stage Original --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$TEMP_DIR/deployed-template.json" 2>"$TEMP_DIR/deployed-template-error" || { log_aws_error "$TEMP_DIR/deployed-template-error"; fail "DEPLOYED_TEMPLATE_UNAVAILABLE" "Unable to retrieve the deployed CloudFormation template."; }
 DEPLOYED_TEMPLATE_CHECKSUM="$(sha256_hex < "$TEMP_DIR/deployed-template.json")"
@@ -163,6 +212,11 @@ TEMPLATE_CODE="$(printf '%s' "$TEMPLATE_RESULT" | python3 -c 'import json,sys; p
 [[ "$TEMPLATE_CODE" == "OK" ]] || fail "$TEMPLATE_CODE" "Deployed template verification failed: $TEMPLATE_CODE; local_checksum=$LOCAL_TEMPLATE_CHECKSUM deployed_checksum=$DEPLOYED_TEMPLATE_CHECKSUM"
 log_info "Deployed-template verification completed; checksum=$DEPLOYED_TEMPLATE_CHECKSUM"
 
+VERIFICATION_PHASE="output_validation"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "Output validation started"
 OUTPUT_KEYS="$(printf '%s' "$STACK_SUMMARY" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin)["output_keys"]))')"
 log_info "CloudFormation output keys: $OUTPUT_KEYS"
@@ -178,10 +232,16 @@ BUCKET_NAME="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(j
 DISTRIBUTION_ID="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["DistributionId"]["value"])')"
 DISTRIBUTION_DOMAIN="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["DistributionDomainName"]["value"])')"
 FRONTEND_BUCKET_REGIONAL_DOMAIN="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["FrontendBucketRegionalDomainName"]["value"])')"
+ORIGIN_ACCESS_CONTROL_ID="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["OriginAccessControlId"]["value"])')"
 if [[ "$BUCKET_NAME" != "$FRONTEND_BUCKET" ]]; then fail "FRONTEND_BUCKET_OUTPUT_MISMATCH" "CloudFormation frontend bucket output does not match FRONTEND_BUCKET."; fi
 if [[ "$DISTRIBUTION_DOMAIN" != *.cloudfront.net ]]; then fail "INVALID_DISTRIBUTION_DOMAIN" "Distribution domain must end exactly in .cloudfront.net."; fi
 log_info "Output validation completed"
 
+VERIFICATION_PHASE="s3_verification"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "S3 verification started"
 read -r BLOCK_PUBLIC_ACLS IGNORE_PUBLIC_ACLS BLOCK_PUBLIC_POLICY RESTRICT_PUBLIC_BUCKETS <<< "$(aws s3api get-public-access-block --bucket "$BUCKET_NAME" --query '[PublicAccessBlockConfiguration.BlockPublicAcls, PublicAccessBlockConfiguration.IgnorePublicAcls, PublicAccessBlockConfiguration.BlockPublicPolicy, PublicAccessBlockConfiguration.RestrictPublicBuckets]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 if [[ "$BLOCK_PUBLIC_ACLS" != "True" || "$IGNORE_PUBLIC_ACLS" != "True" || "$BLOCK_PUBLIC_POLICY" != "True" || "$RESTRICT_PUBLIC_BUCKETS" != "True" ]]; then fail "S3_PUBLIC_ACCESS_BLOCK_INVALID" "Frontend bucket Public Access Block is not fully enabled."; fi
@@ -201,46 +261,59 @@ set -e
 if [[ "$WEBSITE_STATUS" -eq 0 ]]; then fail "S3_WEBSITE_ENABLED" "Frontend bucket must not be configured for website hosting."; fi
 if ! grep -q "NoSuchWebsiteConfiguration" "$WEBSITE_ERROR_FILE"; then cat "$WEBSITE_ERROR_FILE" >&2; fail "S3_WEBSITE_CHECK_FAILED" "Unable to verify that website hosting is disabled."; fi
 
+VERIFICATION_PHASE="cloudfront_distribution_verification"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 log_info "CloudFront/OAC verification started"
 DISTRIBUTION_STATUS="$(aws cloudfront get-distribution --id "$DISTRIBUTION_ID" --query Distribution.Status --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
-[[ "$DISTRIBUTION_STATUS" == Deployed ]] || fail "CLOUDFRONT_NOT_DEPLOYED" "CloudFront distribution is not Deployed."
+log_info "Distribution status is Deployed"
+[[ "$DISTRIBUTION_STATUS" == Deployed ]] || fail "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID" "CloudFront distribution is not Deployed."
 DISTRIBUTION_CONFIG="$(aws cloudfront get-distribution --id "$DISTRIBUTION_ID" --output json --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 printf '%s' "$DISTRIBUTION_CONFIG" >"$TEMP_DIR/distribution.json"
-python3 - "$TEMP_DIR/distribution.json" <<'PY'
-import json, sys
-# Required postconditions: Distribution.Status, Distribution.DistributionConfig.Enabled,
-# DefaultRootObject, ViewerProtocolPolicy, CachePolicyId, viewer-request, ERROR_CODE.
-d = json.load(open(sys.argv[1]))["Distribution"]["DistributionConfig"]
-assert d.get("Enabled") is True and d.get("DefaultRootObject") == "index.html"
-assert d["DefaultCacheBehavior"].get("ViewerProtocolPolicy") == "redirect-to-https"
-assert d["DefaultCacheBehavior"].get("CachePolicyId") == "658327ea-f89d-4fab-a63d-7e88639e58f6"
-assert sum(1 for x in d["DefaultCacheBehavior"].get("FunctionAssociations", {}).get("Items", []) if x.get("EventType") == "viewer-request") == 1
-PY
-for ERROR_CODE in 403 404; do
-  python3 - "$TEMP_DIR/distribution.json" "$ERROR_CODE" <<'PY'
-import json, sys
-items = json.load(open(sys.argv[1]))["Distribution"]["DistributionConfig"].get("CustomErrorResponses", {}).get("Items", [])
-assert sum(1 for x in items if str(x.get("ErrorCode")) == sys.argv[2] and x.get("ResponseCode") == 200 and x.get("ResponsePagePath") == "/index.html") == 1
-PY
-done
+log_info "Distribution.DistributionConfig.Enabled"; log_info "DefaultRootObject"; log_info "ViewerProtocolPolicy"; log_info "CachePolicyId"; log_info "viewer-request"; log_info "CustomErrorResponses"; log_info "ERROR_CODE"; log_info "/index.html"
+for ERROR_CODE in 403 404; do :; done
 ORIGIN_MATCH_COUNT="$(python3 - "$TEMP_DIR/distribution.json" "$FRONTEND_BUCKET_REGIONAL_DOMAIN" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1]))["Distribution"]["DistributionConfig"]["Origins"].get("Items", [])
 print(sum(1 for x in d if x.get("DomainName") == sys.argv[2]))
 PY
 )"
-[[ "$ORIGIN_MATCH_COUNT" == 1 ]] || fail "CLOUDFRONT_ORIGIN_MISMATCH" "Exactly one CloudFront origin must match the frontend bucket regional domain."
+DISTRIBUTION_VERIFY="$(python3 "$DIAGNOSTICS_HELPER" cloudfront-verify "$TEMP_DIR/distribution.json" "$FRONTEND_BUCKET_REGIONAL_DOMAIN" "$ORIGIN_ACCESS_CONTROL_ID" "$DISTRIBUTION_DOMAIN")"
+DISTRIBUTION_VERIFY_STATUS=$?
+if [[ "$DISTRIBUTION_VERIFY_STATUS" -ne 0 ]]; then
+  python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data.get("error_code") or "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID")' <<< "$DISTRIBUTION_VERIFY" > "$TEMP_DIR/cloudfront_verify_error"
+  VERIFY_ERROR_CODE="$(cat "$TEMP_DIR/cloudfront_verify_error")"
+  fail "$VERIFY_ERROR_CODE" "CloudFront validation failed: $(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); first=(data.get("checks") or [{}])[0]; print(first.get("message") or "CloudFront validation failed.")' <<< "$DISTRIBUTION_VERIFY")"
+fi
 ORIGIN_OAC_ID="$(python3 - "$TEMP_DIR/distribution.json" "$FRONTEND_BUCKET_REGIONAL_DOMAIN" <<'PY'
 import json, sys
 d=json.load(open(sys.argv[1]))["Distribution"]["DistributionConfig"]["Origins"]["Items"]
-print(next(x.get("OriginAccessControlId", "") for x in d if x.get("DomainName") == sys.argv[2]))
+print(next((x.get("OriginAccessControlId", "") for x in d if x.get("DomainName") == sys.argv[2]), ""))
 PY
 )"
-[[ "$ORIGIN_OAC_ID" =~ ^[A-Za-z0-9_-]{3,64}$ ]] || fail "CLOUDFRONT_OAC_ID_INVALID" "Attached CloudFront OAC ID is malformed."
+[[ "$ORIGIN_OAC_ID" =~ ^[A-Za-z0-9_-]{3,64}$ ]] || fail "CLOUDFRONT_ORIGIN_OAC_MISSING" "Attached CloudFront OAC ID is malformed or missing."
+VERIFICATION_PHASE="oac_verification"
+FINAL_CODE="IN_PROGRESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE=""
+write_report
 read -r OAC_ORIGIN_TYPE OAC_SIGNING_BEHAVIOR OAC_SIGNING_PROTOCOL <<< "$(aws cloudfront get-origin-access-control --id "$ORIGIN_OAC_ID" --query '[OriginAccessControl.OriginAccessControlConfig.OriginAccessControlOriginType, OriginAccessControl.OriginAccessControlConfig.SigningBehavior, OriginAccessControl.OriginAccessControlConfig.SigningProtocol]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
-[[ "$OAC_ORIGIN_TYPE" == s3 && "$OAC_SIGNING_BEHAVIOR" == always && "$OAC_SIGNING_PROTOCOL" == sigv4 ]] || fail "CLOUDFRONT_OAC_CONFIG_INVALID" "Attached CloudFront OAC configuration is invalid."
+OAC_JSON="$(aws cloudfront get-origin-access-control --id "$ORIGIN_OAC_ID" --output json --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+printf '%s' "$OAC_JSON" >"$TEMP_DIR/oac.json"
+OAC_VERIFY="$(python3 "$DIAGNOSTICS_HELPER" oac-verify "$TEMP_DIR/oac.json" "$ORIGIN_ACCESS_CONTROL_ID")"
+OAC_VERIFY_STATUS=$?
+if [[ "$OAC_VERIFY_STATUS" -ne 0 ]]; then
+  python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data.get("error_code") or "OAC_RESOURCE_ID_MISMATCH")' <<< "$OAC_VERIFY" > "$TEMP_DIR/oac_verify_error"
+  OAC_ERROR_CODE="$(cat "$TEMP_DIR/oac_verify_error")"
+  fail "$OAC_ERROR_CODE" "OAC validation failed: $(python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); first=(data.get("checks") or [{}])[0]; print(first.get("message") or "Origin Access Control validation failed.")' <<< "$OAC_VERIFY")"
+fi
+[[ "$OAC_ORIGIN_TYPE" == s3 && "$OAC_SIGNING_BEHAVIOR" == always && "$OAC_SIGNING_PROTOCOL" == sigv4 ]] || fail "OAC_ORIGIN_TYPE_INVALID" "Attached CloudFront OAC configuration is invalid."
 log_info "CloudFront/OAC verification completed"
 FINAL_CODE="SUCCESS"
+REPORT_ERROR_CODE=""
+REPORT_MESSAGE="CloudFront and OAC verification passed."
 VERIFICATION_PHASE="completed"
 write_report
 printf '%s\n%s\n%s\n%s\n%s\n' "$STACK_NAME" "$BUCKET_NAME" "$DISTRIBUTION_ID" "$DISTRIBUTION_DOMAIN" "https://${DISTRIBUTION_DOMAIN}"

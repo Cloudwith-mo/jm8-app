@@ -1,3 +1,7 @@
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -260,6 +264,141 @@ class FrontendHostingWiringTests(unittest.TestCase):
     def test_amplify_files_are_absent(self):
         self.assertFalse(AMPLIFY_FILE.exists())
         self.assertFalse(LEGACY_TEST_FILE.exists())
+
+    def test_cloudfront_helper_reports_named_validation_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dist_path = Path(tmpdir) / "distribution.json"
+            dist_path.write_text(json.dumps({
+                "Distribution": {
+                    "Status": "InProgress",
+                    "DomainName": "example.cloudfront.net",
+                    "DistributionConfig": {
+                        "Enabled": False,
+                        "DefaultRootObject": "index.html",
+                        "Origins": {"Items": [{"DomainName": "bucket.s3.amazonaws.com", "OriginAccessControlId": "bad-oac"}]},
+                        "DefaultCacheBehavior": {
+                            "ViewerProtocolPolicy": "allow-all",
+                            "CachePolicyId": "wrong",
+                            "FunctionAssociations": {"Items": [{"EventType": "viewer-request"}]},
+                        },
+                        "CustomErrorResponses": {"Items": [{"ErrorCode": 403, "ResponseCode": 404, "ResponsePagePath": "/index.html"}]},
+                    },
+                }
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(DIAGNOSTICS_HELPER),
+                    "cloudfront-verify",
+                    str(dist_path),
+                    "bucket.s3.amazonaws.com",
+                    "GOOD_OAC_123",
+                    "d2m5h45dzf3zij.cloudfront.net",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["error_code"], "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID")
+            self.assertIn("validation_name", payload["checks"][0])
+            self.assertIn("expected_value", payload["checks"][0])
+            self.assertIn("safe_actual_value", payload["checks"][0])
+            self.assertIn("stable_error_code", payload["checks"][0])
+
+    def test_cloudfront_helper_accepts_string_response_codes_for_error_fallbacks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dist_path = Path(tmpdir) / "distribution.json"
+            dist_path.write_text(json.dumps({
+                "Distribution": {
+                    "Status": "Deployed",
+                    "DomainName": "d2m5h45dzf3zij.cloudfront.net",
+                    "DistributionConfig": {
+                        "Enabled": True,
+                        "DefaultRootObject": "index.html",
+                        "Origins": {"Items": [{"DomainName": "bucket.s3.amazonaws.com", "OriginAccessControlId": "GOOD_OAC_123"}]},
+                        "DefaultCacheBehavior": {
+                            "ViewerProtocolPolicy": "redirect-to-https",
+                            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                            "FunctionAssociations": {"Items": [{"EventType": "viewer-request"}]},
+                        },
+                        "CustomErrorResponses": {"Items": [
+                            {"ErrorCode": 403, "ResponsePagePath": "/index.html", "ResponseCode": "200", "ErrorCachingMinTTL": 0},
+                            {"ErrorCode": 404, "ResponsePagePath": "/index.html", "ResponseCode": "200", "ErrorCachingMinTTL": 0},
+                        ]},
+                    },
+                }
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(DIAGNOSTICS_HELPER),
+                    "cloudfront-verify",
+                    str(dist_path),
+                    "bucket.s3.amazonaws.com",
+                    "GOOD_OAC_123",
+                    "d2m5h45dzf3zij.cloudfront.net",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["passed"])
+            self.assertIsNone(payload["error_code"])
+
+    def test_create_script_reports_and_sanitizes_diagnostics(self):
+        self.assertIn('mkdir -p "$DIAGNOSTICS_DIR"', self.create_script)
+        self.assertIn('Diagnostic report path: $DIAGNOSTIC_PATH', self.create_script)
+        self.assertIn('trap \'handle_exit "$?"\' EXIT', self.create_script)
+        self.assertIn('REPORT_EXIT_CODE', self.create_script)
+        self.assertIn('write-report', self.create_script)
+        self.assertIn('--stable-error-code', self.create_script)
+        self.assertIn('--sanitized-error-message', self.create_script)
+        self.assertIn('rm -rf "$TEMP_DIR"', self.create_script)
+        self.assertIn('final_status', self.diagnostics_helper)
+        self.assertIn('stable_error_code', self.diagnostics_helper)
+        self.assertNotIn('assert ', self.create_script)
+        self.assertNotIn('assert ', self.diagnostics_helper)
+        self.assertNotIn('Traceback', self.diagnostics_helper)
+        self.assertNotIn('Authorization: Basic', self.create_script)
+        self.assertNotIn('aws_secret_access_key', self.create_script)
+
+    def test_helper_redacts_credentials_and_preserves_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            error_path = Path(tmpdir) / "aws-error.txt"
+            error_path.write_text("Authorization: Basic abc123\naws_secret_access_key=supersecret\n", encoding="utf-8")
+            sanitized = subprocess.run(
+                [sys.executable, str(DIAGNOSTICS_HELPER), "sanitize-error", str(error_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(sanitized.returncode, 0)
+            self.assertNotIn("abc123", sanitized.stdout)
+            self.assertNotIn("supersecret", sanitized.stdout)
+            self.assertIn("Authorization=<redacted>", sanitized.stdout)
+            self.assertIn("aws_secret=<redacted>", sanitized.stdout)
+
+    def test_script_tracks_required_phases_and_cleanup(self):
+        for phase in (
+            "environment_contract",
+            "local_template_preflight",
+            "predeployment_inspection",
+            "cloudformation_deploy",
+            "deployed_template_verification",
+            "output_validation",
+            "s3_verification",
+            "cloudfront_distribution_verification",
+            "oac_verification",
+            "completed",
+        ):
+            self.assertIn(phase, self.create_script)
+        self.assertIn('mkdir -p "$DIAGNOSTICS_DIR"', self.create_script)
+        self.assertIn('trap \'handle_exit "$?"\' EXIT', self.create_script)
+        self.assertIn('rm -rf "$TEMP_DIR"', self.create_script)
 
 
 if __name__ == "__main__":
