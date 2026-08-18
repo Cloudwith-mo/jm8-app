@@ -49,8 +49,14 @@ class OcrWorkflowDefinitionTests(unittest.TestCase):
         self.assertNotIn('"logs:*"', self.script)
         self.assertNotIn("AdministratorAccess", self.script)
 
-    def test_log_group_arn_uses_step_functions_suffix(self):
-        self.assertIn('STATE_LOG_GROUP_ARN="${STATE_LOG_GROUP_ARN}:*"', self.script)
+    def test_log_group_arn_is_canonical_for_step_functions(self):
+        self.assertIn("logGroupArn:logGroupArn", self.script)
+        self.assertIn('fields.get("logGroupArn") or fields.get("arn")', self.script)
+        self.assertIn('raw_arn[:-2] if raw_arn.endswith(":*") else raw_arn', self.script)
+        self.assertIn('match.group("name") != expected_name', self.script)
+        self.assertIn('match.group("region") != expected_region', self.script)
+        self.assertIn('match.group("account") != expected_account', self.script)
+        self.assertNotIn('STATE_LOG_GROUP_ARN="${STATE_LOG_GROUP_ARN}:*"', self.script)
         self.assertIn("logGroupArn=${STATE_LOG_GROUP_ARN}", self.script)
 
     def test_execution_data_logging_is_disabled(self):
@@ -59,6 +65,7 @@ class OcrWorkflowDefinitionTests(unittest.TestCase):
         self.assertIn('logging.get("level") != "ERROR"', self.script)
         self.assertIn('logging.get("includeExecutionData") is not False', self.script)
         self.assertIn('actual != sys.argv[3]', self.script)
+        self.assertNotIn(":*]" , self.script)
 
     def test_sensitive_workflow_data_is_not_configured_for_logging(self):
         self.assertNotIn("includeExecutionData=true", self.script)
