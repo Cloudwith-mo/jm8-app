@@ -87,12 +87,17 @@ runtime.
 cd ~/jm8-app/backend
 source .venv/bin/activate
 source .env
-source infra/cognito.env
+source "infra/environments/generated/${STAGE}.cognito.env"
 
 ./bin/deploy
 ./bin/create-api
 ./bin/secure-api
 ```
+
+For an existing local dev configuration, manually move it once from
+`infra/cognito.env` to `infra/environments/generated/dev.cognito.env` before
+sourcing the stage-specific file. The provisioning script does not read or
+migrate the legacy file automatically.
 
 Verify the webhook remains public while Checkout remains JWT-protected:
 
