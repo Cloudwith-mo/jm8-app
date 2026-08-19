@@ -229,7 +229,10 @@ class FrontendHostingWiringTests(unittest.TestCase):
 
     def test_invalidation_and_health_checks_exist(self):
         self.assertIn("create-invalidation", self.deploy_script)
-        self.assertIn("invalidation-deployed", self.deploy_script)
+        self.assertIn("aws cloudfront wait invalidation-completed", self.deploy_script)
+        self.assertNotIn("invalidation-deployed", self.deploy_script)
+        self.assertIn('--distribution-id "$CLOUDFRONT_DISTRIBUTION_ID"', self.deploy_script)
+        self.assertIn('--id "$INVALIDATION_ID"', self.deploy_script)
         self.assertIn("curl", self.deploy_script)
         self.assertIn("mktemp -d", self.deploy_script)
         self.assertIn("trap cleanup EXIT", self.deploy_script)

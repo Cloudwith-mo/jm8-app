@@ -155,7 +155,7 @@ INVALIDATION_ID="$(aws cloudfront create-invalidation \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION")"
 
-aws cloudfront wait invalidation-deployed \
+aws cloudfront wait invalidation-completed \
   --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
   --id "$INVALIDATION_ID" \
   --profile "$AWS_PROFILE" \
