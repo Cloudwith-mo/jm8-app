@@ -87,7 +87,7 @@ STATE_LOG_GROUP_FIELDS="$(
     --output json
 )"
 
-STATE_LOG_GROUP_ARN="$(python3 - \
+STATE_LOG_GROUP_BASE_ARN="$(python3 - \
     "$STATE_LOG_GROUP_FIELDS" \
     "$STATE_LOG_GROUP" \
     "$AWS_REGION" \
@@ -126,6 +126,8 @@ if match.group("name") != expected_name or ":" in match.group("name") or "*" in 
 print(canonical_arn)
 PY_LOG_GROUP
 )"
+
+STATE_LOG_GROUP_DESTINATION_ARN="${STATE_LOG_GROUP_BASE_ARN}:*"
 
 cat > .build/lambda-worker-trust.json <<'JSON'
 {
@@ -559,7 +561,7 @@ if [ -z "$STATE_MACHINE_ARN" ] || [ "$STATE_MACHINE_ARN" = "None" ]; then
       --role-arn "$STATE_ROLE_ARN" \
       --type STANDARD \
       --logging-configuration \
-        "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
+        "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_DESTINATION_ARN}}}]" \
       --tracing-configuration enabled=true \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
@@ -576,7 +578,7 @@ else
     --definition "file://${RESOLVED_DEFINITION}" \
     --role-arn "$STATE_ROLE_ARN" \
     --logging-configuration \
-      "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_ARN}}}]" \
+      "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_DESTINATION_ARN}}}]" \
     --tracing-configuration enabled=true \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
@@ -593,7 +595,7 @@ STATE_MACHINE_DESCRIPTION="$({
     --output json
 })"
 
-python3 - "$STATE_MACHINE_DESCRIPTION" "$STATE_ROLE_ARN" "$STATE_LOG_GROUP_ARN" <<'PY_VERIFY'
+python3 - "$STATE_MACHINE_DESCRIPTION" "$STATE_ROLE_ARN" "$STATE_LOG_GROUP_DESTINATION_ARN" <<'PY_VERIFY'
 from __future__ import annotations
 
 import json

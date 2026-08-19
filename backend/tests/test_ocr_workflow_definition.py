@@ -60,8 +60,9 @@ class OcrWorkflowDefinitionTests(unittest.TestCase):
         self.assertIn('match.group("name") != expected_name', self.script)
         self.assertIn('match.group("region") != expected_region', self.script)
         self.assertIn('match.group("account") != expected_account', self.script)
-        self.assertNotIn('STATE_LOG_GROUP_ARN="${STATE_LOG_GROUP_ARN}:*"', self.script)
-        self.assertIn("logGroupArn=${STATE_LOG_GROUP_ARN}", self.script)
+        self.assertIn('STATE_LOG_GROUP_DESTINATION_ARN="${STATE_LOG_GROUP_BASE_ARN}:*"', self.script)
+        self.assertIn("logGroupArn=${STATE_LOG_GROUP_DESTINATION_ARN}", self.script)
+        self.assertNotIn("STATE_LOG_GROUP_DESTINATION_ARN=\"${STATE_LOG_GROUP_DESTINATION_ARN}:*\"", self.script)
 
     def test_execution_data_logging_is_disabled(self):
         self.assertIn("level=ERROR,includeExecutionData=false", self.script)
@@ -69,7 +70,7 @@ class OcrWorkflowDefinitionTests(unittest.TestCase):
         self.assertIn('logging.get("level") != "ERROR"', self.script)
         self.assertIn('logging.get("includeExecutionData") is not False', self.script)
         self.assertIn('actual != sys.argv[3]', self.script)
-        self.assertNotIn(":*]" , self.script)
+        self.assertIn('"$STATE_MACHINE_DESCRIPTION" "$STATE_ROLE_ARN" "$STATE_LOG_GROUP_DESTINATION_ARN"', self.script)
 
     def test_sensitive_workflow_data_is_not_configured_for_logging(self):
         self.assertNotIn("includeExecutionData=true", self.script)
@@ -154,6 +155,14 @@ class OcrWorkflowDefinitionTests(unittest.TestCase):
             }),
             expected,
         )
+
+    def test_step_functions_destination_reconstructs_exactly_one_suffix(self):
+        base = "arn:aws:logs:us-east-1:111122223333:log-group:/aws/vendedlogs/states/journalm8-staging-ocr-workflow"
+        destination = base + ":*"
+        self.assertTrue(destination.endswith(":*"))
+        self.assertFalse(destination.endswith(":*:*") )
+        self.assertEqual(destination.count(":*"), 1)
+        self.assertIn('STATE_LOG_GROUP_DESTINATION_ARN="${STATE_LOG_GROUP_BASE_ARN}:*"', self.script)
 
     def test_log_group_parser_rejects_missing_group_and_malformed_arn(self):
         cases = (
