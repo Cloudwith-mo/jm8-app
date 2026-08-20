@@ -35,9 +35,9 @@ API_ACCESS_LOG_GROUP="/aws/apigateway/${API_GATEWAY_NAME}"
 
 DASHBOARD_NAME="${APP_NAME}-${STAGE}-operations"
 TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
-METRIC_NAMESPACE="JM8/OCR"
-REANALYSIS_METRIC_NAMESPACE="JM8/HistoricalReanalysis"
-BILLING_METRIC_NAMESPACE="JM8/Billing"
+METRIC_NAMESPACE="JM8/${STAGE}/OCR"
+REANALYSIS_METRIC_NAMESPACE="JM8/${STAGE}/HistoricalReanalysis"
+BILLING_METRIC_NAMESPACE="JM8/${STAGE}/Billing"
 
 API_ERRORS_ALARM="${APP_NAME}-${STAGE}-api-errors"
 API_THROTTLES_ALARM="${APP_NAME}-${STAGE}-api-throttles"
@@ -694,6 +694,7 @@ python3 - \
   "$HISTORICAL_WORKER_LOG_GROUP" \
   "$HISTORICAL_COORDINATOR_LOG_GROUP" \
   "$REANALYSIS_METRIC_NAMESPACE" \
+  "$BILLING_METRIC_NAMESPACE" \
   > .build/operations-dashboard.json <<'PY'
 import json
 import sys
@@ -716,6 +717,7 @@ historical_state_machine_arn = sys.argv[15]
 historical_worker_log_group = sys.argv[16]
 historical_coordinator_log_group = sys.argv[17]
 reanalysis_metric_namespace = sys.argv[18]
+billing_metric_namespace = sys.argv[19]
 
 alarm_names = [
     f"{app_name}-{stage}-api-errors",
@@ -1444,7 +1446,7 @@ dashboard["widgets"].extend([
             "period": 300,
             "metrics": [
                 [
-                    "JM8/Billing",
+                    billing_metric_namespace,
                     "BillingWebhookFailures",
                     {
                         "stat": "Sum",

@@ -335,7 +335,7 @@ class HistoricalReanalysisObservabilityTests(
         self.assertIn(
             (
                 'REANALYSIS_METRIC_NAMESPACE='
-                '"JM8/HistoricalReanalysis"'
+                '"JM8/${STAGE}/HistoricalReanalysis"'
             ),
             script,
         )

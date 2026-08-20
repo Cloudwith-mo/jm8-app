@@ -16,7 +16,7 @@ jm8_validate_contract_or_exit
 API_FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"
 
-AI_METRIC_NAMESPACE="JM8/AI"
+AI_METRIC_NAMESPACE="JM8/${STAGE}/AI"
 DASHBOARD_NAME="${APP_NAME}-${STAGE}-ai-operations"
 TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
 
