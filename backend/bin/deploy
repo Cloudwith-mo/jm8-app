@@ -21,6 +21,7 @@ set -euo pipefail
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_bedrock_analysis_policy.sh"
 export JM8_OPERATION="deploy"
 jm8_validate_contract_or_exit
 
@@ -41,6 +42,8 @@ PRO_MONTHLY_ENTRY_ANALYSES="${PRO_MONTHLY_ENTRY_ANALYSES:-250}"
 
 ./bin/package
 
+mkdir -p .build
+
 echo "Checking AWS identity..."
 aws sts get-caller-identity \
   --profile "$AWS_PROFILE" \
@@ -56,6 +59,10 @@ ROLE_ARN=$(aws iam get-role \
   --query "Role.Arn" \
   --output text \
   --profile "$AWS_PROFILE")
+
+jm8_reconcile_bedrock_analysis_policy \
+  "$BEDROCK_ANALYSIS_MODEL_ID" \
+  ".build/bedrock"
 
 echo "Resolving OCR workflow: $OCR_WORKFLOW_NAME"
 
@@ -86,8 +93,6 @@ if [ -z "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" ] \
   echo "Run: ./bin/deploy-historical-reanalysis-workflow"
   exit 1
 fi
-
-mkdir -p .build
 
 TABLE_ARN="$(
   aws dynamodb describe-table \

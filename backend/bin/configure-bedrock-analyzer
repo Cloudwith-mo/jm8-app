@@ -5,113 +5,26 @@ set -euo pipefail
 : "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
 : "${APP_NAME:?APP_NAME is required. Run: source .env}"
 : "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+: "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_bedrock_analysis_policy.sh"
+export JM8_OPERATION="configure-bedrock-analyzer"
+jm8_validate_contract_or_exit
 
 MODEL_ID="${BEDROCK_ANALYSIS_MODEL_ID:-us.anthropic.claude-haiku-4-5-20251001-v1:0}"
 
 MODEL_ID="$(printf '%s' "$MODEL_ID" | tr -d '[:space:]')"
 
-ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
-POLICY_NAME="${APP_NAME}-${STAGE}-bedrock-analysis"
-
 SCHEMA_VERSION="${ANALYSIS_SCHEMA_VERSION:-2.0}"
 PROMPT_VERSION="${ANALYSIS_PROMPT_VERSION:-journal-analysis-v1}"
 
-mkdir -p .build/bedrock
-
-echo "Resolving Bedrock inference profile..."
-
-aws bedrock get-inference-profile \
-  --inference-profile-identifier "$MODEL_ID" \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION" \
-  --output json \
-  > .build/bedrock/inference-profile.json
-
-python3 - \
-  .build/bedrock/inference-profile.json \
-  .build/bedrock/bedrock-analysis-policy.json <<'PY'
-import json
-import sys
-from pathlib import Path
-
-profile_path = Path(sys.argv[1])
-policy_path = Path(sys.argv[2])
-
-profile = json.loads(profile_path.read_text())
-
-profile_arn = str(
-    profile.get("inferenceProfileArn") or ""
-).strip()
-
-model_arns = sorted({
-    str(model.get("modelArn") or "").strip()
-    for model in profile.get("models", [])
-    if str(model.get("modelArn") or "").strip()
-})
-
-if not profile_arn:
-    raise SystemExit(
-        "The Bedrock inference profile ARN was not returned."
-    )
-
-if not model_arns:
-    raise SystemExit(
-        "The inference profile returned no destination models."
-    )
-
-policy = {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "ReadJM8AnalysisInferenceProfile",
-            "Effect": "Allow",
-            "Action": [
-                "bedrock:GetInferenceProfile",
-            ],
-            "Resource": profile_arn,
-        },
-        {
-            "Sid": "InvokeJM8AnalysisInferenceProfile",
-            "Effect": "Allow",
-            "Action": [
-                "bedrock:InvokeModel",
-            ],
-            "Resource": profile_arn,
-        },
-        {
-            "Sid": "InvokeJM8AnalysisDestinationModels",
-            "Effect": "Allow",
-            "Action": [
-                "bedrock:InvokeModel",
-            ],
-            "Resource": model_arns,
-            "Condition": {
-                "StringEquals": {
-                    "bedrock:InferenceProfileArn": profile_arn,
-                },
-            },
-        },
-    ],
-}
-
-policy_path.write_text(
-    json.dumps(policy, indent=2) + "\n"
-)
-
-print(
-    "Destination model resources:",
-    len(model_arns),
-)
-PY
-
-echo "Attaching Bedrock policy to the JM8 Lambda role..."
-
-aws iam put-role-policy \
-  --role-name "$ROLE_NAME" \
-  --policy-name "$POLICY_NAME" \
-  --policy-document \
-    file://.build/bedrock/bedrock-analysis-policy.json \
-  --profile "$AWS_PROFILE"
+jm8_reconcile_bedrock_analysis_policy \
+  "$MODEL_ID" \
+  ".build/bedrock"
 
 python3 - \
   .env \
@@ -161,6 +74,6 @@ echo "Bedrock analyzer foundation configured."
 echo "Model ID: $MODEL_ID"
 echo "Schema version: $SCHEMA_VERSION"
 echo "Prompt version: $PROMPT_VERSION"
-echo "Lambda role policy attached: $POLICY_NAME"
+echo "Lambda role policy attached: $JM8_BEDROCK_ANALYSIS_POLICY_NAME"
 echo
 echo "Run: source .env"
