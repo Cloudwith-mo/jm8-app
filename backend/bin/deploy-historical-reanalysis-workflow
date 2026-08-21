@@ -63,6 +63,8 @@ STATE_POLICY_NAME="$(
     "${APP_NAME}-${STAGE}-invoke-historical-reanalysis"
 )"
 
+STATE_LOG_GROUP="/aws/vendedlogs/states/${STATE_MACHINE_NAME}"
+
 ZIP_FILE="dist/function.zip"
 
 DEFINITION_TEMPLATE=\
@@ -88,6 +90,15 @@ COORDINATOR_POLICY_FILE=\
 STATE_POLICY_FILE=\
 "${BUILD_DIR}/state-policy.json"
 
+STATE_POLICY_APPLIED_FILE=\
+"${BUILD_DIR}/state-policy-applied.json"
+
+STATE_LOG_GROUP_LOOKUP_FILE=\
+"${BUILD_DIR}/state-log-group-lookup.json"
+
+STATE_LOG_GROUP_LOOKUP_ERROR_FILE=\
+"${BUILD_DIR}/state-log-group-lookup.err"
+
 INFERENCE_PROFILE_FILE=\
 "${BUILD_DIR}/inference-profile.json"
 
@@ -98,12 +109,157 @@ echo "Packaging backend functions..."
 mkdir -p "$BUILD_DIR"
 
 echo "Checking AWS identity..."
-aws sts get-caller-identity \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION" \
-  >/dev/null
+
+CALLER_ARN="$(
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "Arn" \
+    --output text
+)"
+
+if [[ ! "$CALLER_ARN" =~ ^arn:([a-z0-9-]+):(iam|sts)::([0-9]{12}): ]]; then
+  echo "AWS caller ARN is malformed." >&2
+  exit 1
+fi
+
+AWS_PARTITION="${BASH_REMATCH[1]}"
+ACCOUNT_ID="${BASH_REMATCH[3]}"
+
+if [ "$ACCOUNT_ID" != "$EXPECTED_AWS_ACCOUNT_ID" ]; then
+  echo "AWS caller account does not match the deployment contract." >&2
+  exit 1
+fi
 
 echo "AWS identity verified."
+
+set +e
+aws logs describe-log-groups \
+  --log-group-name-prefix "$STATE_LOG_GROUP" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$STATE_LOG_GROUP_LOOKUP_FILE" \
+  2> "$STATE_LOG_GROUP_LOOKUP_ERROR_FILE"
+LOG_GROUP_LOOKUP_STATUS=$?
+set -e
+
+if [ "$LOG_GROUP_LOOKUP_STATUS" -ne 0 ]; then
+  cat "$STATE_LOG_GROUP_LOOKUP_ERROR_FILE" >&2
+  echo "CloudWatch log group lookup failed; refusing to create it." >&2
+  exit "$LOG_GROUP_LOOKUP_STATUS"
+fi
+
+STATE_LOG_GROUP_STATUS="$(
+  python3 - \
+    "$STATE_LOG_GROUP_LOOKUP_FILE" \
+    "$STATE_LOG_GROUP" <<'PY_LOG_GROUP_LOOKUP'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text())
+expected_name = sys.argv[2]
+
+if not isinstance(response, dict):
+    raise SystemExit("CloudWatch log group lookup response is malformed.")
+
+log_groups = response.get("logGroups")
+if not isinstance(log_groups, list):
+    raise SystemExit("CloudWatch log group lookup response is malformed.")
+
+matches = []
+for log_group in log_groups:
+    if not isinstance(log_group, dict):
+        raise SystemExit("CloudWatch log group lookup response is malformed.")
+    name = log_group.get("logGroupName")
+    if not isinstance(name, str) or not name:
+        raise SystemExit("CloudWatch log group lookup response is malformed.")
+    if name == expected_name:
+        matches.append(log_group)
+
+if len(matches) > 1:
+    raise SystemExit("CloudWatch log group lookup returned duplicates.")
+
+print("PRESENT" if matches else "ABSENT")
+PY_LOG_GROUP_LOOKUP
+)"
+
+if [ "$STATE_LOG_GROUP_STATUS" = "ABSENT" ]; then
+  aws logs create-log-group \
+    --log-group-name "$STATE_LOG_GROUP" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+elif [ "$STATE_LOG_GROUP_STATUS" != "PRESENT" ]; then
+  echo "CloudWatch log group lookup returned an unexpected status." >&2
+  exit 1
+fi
+
+aws logs put-retention-policy \
+  --log-group-name "$STATE_LOG_GROUP" \
+  --retention-in-days 30 \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+STATE_LOG_GROUP_FIELDS="$(
+  aws logs describe-log-groups \
+    --log-group-name-prefix "$STATE_LOG_GROUP" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query \
+      "logGroups[?logGroupName=='${STATE_LOG_GROUP}'] | [0] | {logGroupName:logGroupName,arn:arn,logGroupArn:logGroupArn}" \
+    --output json
+)"
+
+STATE_LOG_GROUP_BASE_ARN="$(
+  python3 - \
+    "$STATE_LOG_GROUP_FIELDS" \
+    "$STATE_LOG_GROUP" \
+    "$AWS_PARTITION" \
+    "$AWS_REGION" \
+    "$ACCOUNT_ID" <<'PY_LOG_GROUP'
+import json
+import re
+import sys
+
+fields = json.loads(sys.argv[1])
+expected_name = sys.argv[2]
+expected_partition = sys.argv[3]
+expected_region = sys.argv[4]
+expected_account = sys.argv[5]
+
+if not isinstance(fields, dict) or fields.get("logGroupName") != expected_name:
+    raise SystemExit("Expected historical CloudWatch log group was not resolved.")
+
+raw_arn = fields.get("logGroupArn") or fields.get("arn")
+if not isinstance(raw_arn, str) or not raw_arn:
+    raise SystemExit("Historical CloudWatch log group ARN was not resolved.")
+
+canonical_arn = raw_arn[:-2] if raw_arn.endswith(":*") else raw_arn
+arn_pattern = re.compile(
+    r"^arn:(?P<partition>[a-z0-9-]+):(?P<service>[^:]+):"
+    r"(?P<region>[^:]+):(?P<account>[0-9]{12}):"
+    r"log-group:(?P<name>[^:*]+)$"
+)
+match = arn_pattern.fullmatch(canonical_arn)
+if not match:
+    raise SystemExit("Historical CloudWatch log group ARN has an invalid format.")
+if match.group("partition") != expected_partition:
+    raise SystemExit("Historical CloudWatch log group ARN partition is incorrect.")
+if match.group("service") != "logs":
+    raise SystemExit("Historical CloudWatch log group ARN service is incorrect.")
+if match.group("region") != expected_region:
+    raise SystemExit("Historical CloudWatch log group ARN region is incorrect.")
+if match.group("account") != expected_account:
+    raise SystemExit("Historical CloudWatch log group ARN account is incorrect.")
+if match.group("name") != expected_name:
+    raise SystemExit("Historical CloudWatch log group ARN name is incorrect.")
+
+print(canonical_arn)
+PY_LOG_GROUP
+)"
+
+STATE_LOG_GROUP_DESTINATION_ARN="${STATE_LOG_GROUP_BASE_ARN}:*"
 
 TABLE_ARN="$(
   aws dynamodb describe-table \
@@ -645,6 +801,36 @@ policy = {
                 coordinator_arn,
             ],
         },
+        {
+            "Sid": "StepFunctionsLogDelivery",
+            "Effect": "Allow",
+            # CloudWatch Logs delivery APIs do not support resource-level
+            # authorization, so AWS requires Resource "*" here.
+            "Action": [
+                "logs:CreateLogDelivery",
+                "logs:GetLogDelivery",
+                "logs:UpdateLogDelivery",
+                "logs:DeleteLogDelivery",
+                "logs:ListLogDeliveries",
+                "logs:PutResourcePolicy",
+                "logs:DescribeResourcePolicies",
+                "logs:DescribeLogGroups",
+            ],
+            "Resource": "*",
+        },
+        {
+            "Sid": "StepFunctionsTracing",
+            "Effect": "Allow",
+            # Step Functions X-Ray integration actions do not support
+            # resource-level authorization.
+            "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+                "xray:GetSamplingRules",
+                "xray:GetSamplingTargets",
+            ],
+            "Resource": "*",
+        },
     ],
 }
 
@@ -693,6 +879,39 @@ aws iam put-role-policy \
   --profile "$AWS_PROFILE" \
   >/dev/null
 
+aws iam get-role-policy \
+  --role-name "$STATE_ROLE_NAME" \
+  --policy-name "$STATE_POLICY_NAME" \
+  --profile "$AWS_PROFILE" \
+  --query "PolicyDocument" \
+  --output json \
+  > "$STATE_POLICY_APPLIED_FILE"
+
+python3 - \
+  "$STATE_POLICY_FILE" \
+  "$STATE_POLICY_APPLIED_FILE" <<'PY_POLICY_VERIFY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import unquote
+
+
+def load_policy(path_value):
+    value = json.loads(Path(path_value).read_text())
+    if isinstance(value, str):
+        value = json.loads(unquote(value))
+    if not isinstance(value, dict):
+        raise SystemExit("Step Functions inline role policy is malformed.")
+    return value
+
+
+expected_policy = load_policy(sys.argv[1])
+applied_policy = load_policy(sys.argv[2])
+
+if applied_policy != expected_policy:
+    raise SystemExit("Step Functions inline role policy was not applied exactly.")
+PY_POLICY_VERIFY
+
 STATE_ROLE_ARN="$(
   aws iam get-role \
     --role-name "$STATE_ROLE_NAME" \
@@ -716,19 +935,25 @@ if (
 ); then
   echo "Creating historical re-analysis state machine."
 
-  aws stepfunctions create-state-machine \
-    --name "$STATE_MACHINE_NAME" \
-    --definition \
-      "file://${RESOLVED_DEFINITION}" \
-    --role-arn "$STATE_ROLE_ARN" \
-    --type STANDARD \
-    --tags \
-      "key=App,value=${APP_NAME}" \
-      "key=Stage,value=${STAGE}" \
-      "key=ManagedBy,value=aws-cli" \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    >/dev/null
+  STATE_MACHINE_ARN="$(
+    aws stepfunctions create-state-machine \
+      --name "$STATE_MACHINE_NAME" \
+      --definition \
+        "file://${RESOLVED_DEFINITION}" \
+      --role-arn "$STATE_ROLE_ARN" \
+      --type STANDARD \
+      --logging-configuration \
+        "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_DESTINATION_ARN}}}]" \
+      --tracing-configuration enabled=true \
+      --tags \
+        "key=App,value=${APP_NAME}" \
+        "key=Stage,value=${STAGE}" \
+        "key=ManagedBy,value=aws-cli" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query "stateMachineArn" \
+      --output text
+  )"
 else
   echo "Updating historical re-analysis state machine."
 
@@ -737,10 +962,72 @@ else
     --definition \
       "file://${RESOLVED_DEFINITION}" \
     --role-arn "$STATE_ROLE_ARN" \
+    --logging-configuration \
+      "level=ERROR,includeExecutionData=false,destinations=[{cloudWatchLogsLogGroup={logGroupArn=${STATE_LOG_GROUP_DESTINATION_ARN}}}]" \
+    --tracing-configuration enabled=true \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null
 fi
+
+STATE_MACHINE_DESCRIPTION="$(
+  aws stepfunctions describe-state-machine \
+    --state-machine-arn "$STATE_MACHINE_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json
+)"
+
+python3 - \
+  "$STATE_MACHINE_DESCRIPTION" \
+  "$STATE_ROLE_ARN" \
+  "$STATE_LOG_GROUP_DESTINATION_ARN" <<'PY_VERIFY'
+import json
+import sys
+
+description = json.loads(sys.argv[1])
+expected_role_arn = sys.argv[2]
+expected_destination_arn = sys.argv[3]
+
+if not isinstance(description, dict):
+    raise SystemExit("Historical state machine description is malformed.")
+if description.get("status") != "ACTIVE":
+    raise SystemExit("Historical state machine is not ACTIVE.")
+if description.get("roleArn") != expected_role_arn:
+    raise SystemExit("Historical state machine role ARN is incorrect.")
+
+logging = description.get("loggingConfiguration")
+if not isinstance(logging, dict):
+    raise SystemExit("Historical state machine logging configuration is missing.")
+if logging.get("level") != "ERROR":
+    raise SystemExit("Historical state machine logging level is incorrect.")
+if logging.get("includeExecutionData") is not False:
+    raise SystemExit("Historical state machine execution-data logging is enabled.")
+
+destinations = logging.get("destinations")
+if not isinstance(destinations, list) or len(destinations) != 1:
+    raise SystemExit("Historical state machine must have exactly one log destination.")
+
+destination = destinations[0]
+if not isinstance(destination, dict):
+    raise SystemExit("Historical state machine log destination is malformed.")
+log_group = destination.get("cloudWatchLogsLogGroup")
+if not isinstance(log_group, dict):
+    raise SystemExit("Historical state machine log destination is malformed.")
+actual_destination_arn = log_group.get("logGroupArn")
+if actual_destination_arn != expected_destination_arn:
+    raise SystemExit("Historical state machine log destination ARN is incorrect.")
+if (
+    not actual_destination_arn.endswith(":*")
+    or actual_destination_arn.endswith(":*:*")
+    or actual_destination_arn.count(":*") != 1
+):
+    raise SystemExit("Historical state machine log destination ARN is not canonical.")
+
+tracing = description.get("tracingConfiguration")
+if not isinstance(tracing, dict) or tracing.get("enabled") is not True:
+    raise SystemExit("Historical state machine tracing is not enabled.")
+PY_VERIFY
 
 echo
 echo "Historical re-analysis workflow ready."
