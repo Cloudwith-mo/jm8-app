@@ -1,5 +1,11 @@
 # JM8 Stripe webhook patch
 
+## Documentation
+
+- [JM8 cloud architecture](docs/JM8_CLOUD_ARCHITECTURE.md)
+- [JM8 staging operations runbook](docs/JM8_STAGING_OPERATIONS_RUNBOOK.md)
+- [JM8 production promotion checklist](docs/JM8_PRODUCTION_PROMOTION_CHECKLIST.md)
+
 This patch adds the public `POST /billing/webhook` route and processes these
 Stripe events:
 
