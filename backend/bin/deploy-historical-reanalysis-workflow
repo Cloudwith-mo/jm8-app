@@ -93,6 +93,9 @@ STATE_POLICY_FILE=\
 STATE_POLICY_APPLIED_FILE=\
 "${BUILD_DIR}/state-policy-applied.json"
 
+STATE_MACHINE_WRITE_ERROR_FILE=\
+"${BUILD_DIR}/state-machine-write.err"
+
 STATE_LOG_GROUP_LOOKUP_FILE=\
 "${BUILD_DIR}/state-log-group-lookup.json"
 
@@ -912,6 +915,66 @@ if applied_policy != expected_policy:
     raise SystemExit("Step Functions inline role policy was not applied exactly.")
 PY_POLICY_VERIFY
 
+run_stepfunctions_write_with_iam_propagation_retry() {
+  local operation="$1"
+  local error_file="$2"
+  shift 2
+
+  local max_attempts=5
+  local retry_waits=(5 10 20 30)
+  local attempt=1
+  local command_status
+  local wait_seconds
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    echo \
+      "Step Functions ${operation} attempt ${attempt}/${max_attempts}." \
+      >&2
+
+    if "$@" 2> "$error_file"; then
+      rm -f "$error_file"
+      echo \
+        "Step Functions ${operation} succeeded on attempt ${attempt}/${max_attempts}." \
+        >&2
+      return 0
+    else
+      command_status=$?
+    fi
+
+    if (
+      grep -Fq \
+        "AccessDeniedException" \
+        "$error_file" &&
+      grep -Fq \
+        "state machine IAM Role is not authorized to access the Log Destination" \
+        "$error_file"
+    ); then
+      if [ "$attempt" -eq "$max_attempts" ]; then
+        echo \
+          "Step Functions ${operation} exhausted ${max_attempts} IAM propagation attempts." \
+          >&2
+        cat "$error_file" >&2
+        return "$command_status"
+      fi
+
+      wait_seconds="${retry_waits[$((attempt - 1))]}"
+      echo \
+        "Known IAM log-destination propagation delay; waiting ${wait_seconds} seconds before retry." \
+        >&2
+      sleep "$wait_seconds"
+      attempt=$((attempt + 1))
+    else
+      echo \
+        "Step Functions ${operation} failed with a non-retryable AWS error." \
+        >&2
+      cat "$error_file" >&2
+      return "$command_status"
+    fi
+  done
+
+  return 1
+}
+
 STATE_ROLE_ARN="$(
   aws iam get-role \
     --role-name "$STATE_ROLE_NAME" \
@@ -936,7 +999,10 @@ if (
   echo "Creating historical re-analysis state machine."
 
   STATE_MACHINE_ARN="$(
-    aws stepfunctions create-state-machine \
+    run_stepfunctions_write_with_iam_propagation_retry \
+      "create-state-machine" \
+      "$STATE_MACHINE_WRITE_ERROR_FILE" \
+      aws stepfunctions create-state-machine \
       --name "$STATE_MACHINE_NAME" \
       --definition \
         "file://${RESOLVED_DEFINITION}" \
@@ -957,7 +1023,10 @@ if (
 else
   echo "Updating historical re-analysis state machine."
 
-  aws stepfunctions update-state-machine \
+  run_stepfunctions_write_with_iam_propagation_retry \
+    "update-state-machine" \
+    "$STATE_MACHINE_WRITE_ERROR_FILE" \
+    aws stepfunctions update-state-machine \
     --state-machine-arn "$STATE_MACHINE_ARN" \
     --definition \
       "file://${RESOLVED_DEFINITION}" \

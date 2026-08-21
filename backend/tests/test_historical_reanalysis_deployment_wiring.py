@@ -3,6 +3,7 @@ import io
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -133,6 +134,126 @@ class HistoricalReanalysisDeploymentTests(
     @classmethod
     def setUpClass(cls):
         cls.script = HISTORICAL_DEPLOY_SCRIPT.read_text()
+
+    def _retry_function(self):
+        marker = (
+            "run_stepfunctions_write_with_iam_propagation_retry() {"
+        )
+        start = self.script.index(marker)
+        end = self.script.index(
+            "\n}\n\nSTATE_ROLE_ARN",
+            start,
+        ) + 2
+        return self.script[start:end]
+
+    def _run_retry_scenario(self, scenario):
+        harness = "\n\n".join((
+            "#!/usr/bin/env bash\nset -u",
+            self._retry_function(),
+            r'''
+scenario="$1"
+events_file="$2"
+attempt_file="$3"
+error_file="$4"
+
+sleep() {
+  printf 'sleep:%s\n' "$1" >> "$events_file"
+}
+
+fake_stepfunctions_write() {
+  local requested_scenario="$1"
+  local current_attempt=0
+
+  if [ -f "$attempt_file" ]; then
+    IFS= read -r current_attempt < "$attempt_file"
+  fi
+
+  current_attempt=$((current_attempt + 1))
+  printf '%s\n' "$current_attempt" > "$attempt_file"
+  printf 'attempt:%s\n' "$current_attempt" >> "$events_file"
+
+  case "$requested_scenario" in
+    propagation_then_success)
+      if [ "$current_attempt" -eq 1 ]; then
+        printf '%s\n' \
+          'An error occurred (AccessDeniedException): The state machine IAM Role is not authorized to access the Log Destination' \
+          >&2
+        return 42
+      fi
+      printf '%s\n' 'arn:aws:states:us-east-1:111122223333:stateMachine:test'
+      return 0
+      ;;
+    propagation_exhausted)
+      printf '%s\n' \
+        'An error occurred (AccessDeniedException): The state machine IAM Role is not authorized to access the Log Destination' \
+        >&2
+      return 42
+      ;;
+    unrelated_access_denied)
+      printf '%s\n' \
+        'An error occurred (AccessDeniedException): not authorized to call UpdateStateMachine' \
+        >&2
+      return 43
+      ;;
+    validation_error)
+      printf '%s\n' \
+        'An error occurred (ValidationException): Invalid State Machine Definition' \
+        >&2
+      return 44
+      ;;
+    credential_error)
+      printf '%s\n' 'Unable to locate credentials' >&2
+      return 45
+      ;;
+    network_error)
+      printf '%s\n' 'Could not connect to the endpoint URL' >&2
+      return 47
+      ;;
+    *)
+      printf '%s\n' 'Unexpected test scenario' >&2
+      return 46
+      ;;
+  esac
+}
+
+set +e
+run_stepfunctions_write_with_iam_propagation_retry \
+  "test-write" \
+  "$error_file" \
+  fake_stepfunctions_write \
+  "$scenario"
+status=$?
+set -e
+
+printf 'status:%s\n' "$status" >> "$events_file"
+exit "$status"
+'''.strip(),
+        ))
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            harness_path = directory_path / "retry-harness.sh"
+            events_path = directory_path / "events.txt"
+            attempt_path = directory_path / "attempt.txt"
+            error_path = directory_path / "aws-error.txt"
+            harness_path.write_text(harness)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(harness_path),
+                    scenario,
+                    str(events_path),
+                    str(attempt_path),
+                    str(error_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            events = events_path.read_text().splitlines()
+
+        return result, events
 
     def _heredoc(self, tag):
         match = re.search(
@@ -321,6 +442,139 @@ class HistoricalReanalysisDeploymentTests(
             2,
         )
         self.assertNotIn("includeExecutionData=true", self.script)
+
+    def test_exact_propagation_error_retries_then_reaches_verification(self):
+        result, events = self._run_retry_scenario(
+            "propagation_then_success"
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            events,
+            ["attempt:1", "sleep:5", "attempt:2", "status:0"],
+        )
+        self.assertIn("attempt 1/5", result.stderr)
+        self.assertIn("waiting 5 seconds", result.stderr)
+        self.assertIn("succeeded on attempt 2/5", result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "arn:aws:states:us-east-1:111122223333:stateMachine:test",
+        )
+
+        update_retry = self.script.index(
+            '"update-state-machine" \\\n'
+            '    "$STATE_MACHINE_WRITE_ERROR_FILE"'
+        )
+        final_verification = self.script.index(
+            "aws stepfunctions describe-state-machine"
+        )
+        self.assertLess(update_retry, final_verification)
+
+    def test_unrelated_failures_are_not_retried(self):
+        cases = (
+            (
+                "unrelated_access_denied",
+                43,
+                "not authorized to call UpdateStateMachine",
+            ),
+            (
+                "validation_error",
+                44,
+                "ValidationException",
+            ),
+            (
+                "credential_error",
+                45,
+                "Unable to locate credentials",
+            ),
+            (
+                "network_error",
+                47,
+                "Could not connect to the endpoint URL",
+            ),
+        )
+
+        for scenario, status, expected_error in cases:
+            with self.subTest(scenario=scenario):
+                result, events = self._run_retry_scenario(scenario)
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(events, ["attempt:1", f"status:{status}"])
+                self.assertNotIn("sleep:", "\n".join(events))
+                self.assertIn("non-retryable AWS error", result.stderr)
+                self.assertIn(expected_error, result.stderr)
+
+    def test_propagation_retries_are_bounded_and_exhaustion_fails(self):
+        result, events = self._run_retry_scenario(
+            "propagation_exhausted"
+        )
+
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(
+            [event for event in events if event.startswith("attempt:")],
+            [
+                "attempt:1",
+                "attempt:2",
+                "attempt:3",
+                "attempt:4",
+                "attempt:5",
+            ],
+        )
+        self.assertEqual(
+            [event for event in events if event.startswith("sleep:")],
+            ["sleep:5", "sleep:10", "sleep:20", "sleep:30"],
+        )
+        self.assertEqual(sum((5, 10, 20, 30)), 65)
+        self.assertEqual(events[-1], "status:42")
+        self.assertIn("exhausted 5 IAM propagation attempts", result.stderr)
+        self.assertIn("AccessDeniedException", result.stderr)
+        self.assertIn(
+            (
+                "state machine IAM Role is not authorized to access "
+                "the Log Destination"
+            ),
+            result.stderr,
+        )
+
+    def test_create_and_update_both_use_the_retry_helper(self):
+        for operation in (
+            "create-state-machine",
+            "update-state-machine",
+        ):
+            command_index = self.script.index(
+                f"aws stepfunctions {operation}"
+            )
+            prefix = self.script[
+                max(0, command_index - 220):command_index
+            ]
+            with self.subTest(operation=operation):
+                self.assertIn(
+                    "run_stepfunctions_write_with_iam_propagation_retry",
+                    prefix,
+                )
+                self.assertIn(f'"{operation}"', prefix)
+
+    def test_retry_helper_does_not_log_sensitive_inputs_or_weaken_shell(self):
+        retry_function = self._retry_function()
+        self.assertIn("AccessDeniedException", retry_function)
+        self.assertIn(
+            (
+                "state machine IAM Role is not authorized to access "
+                "the Log Destination"
+            ),
+            retry_function,
+        )
+        for sensitive_name in (
+            "AWS_PROFILE",
+            "STATE_POLICY",
+            "RESOLVED_DEFINITION",
+            "CALLER_ARN",
+            "STATE_LOG_GROUP_DESTINATION_ARN",
+        ):
+            self.assertNotIn(sensitive_name, retry_function)
+        self.assertNotIn('echo "$@"', retry_function)
+        self.assertNotIn("|| true", self.script)
+        self.assertNotRegex(self.script, r"\beval\b")
+        self.assertNotIn("set -x", self.script)
 
     def test_state_role_policy_is_least_privilege(self):
         policy, worker_arn, coordinator_arn = self._state_policy()
