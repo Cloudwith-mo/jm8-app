@@ -12,6 +12,9 @@ export function validateFrontendEnv(
   options?: {
     mode?: string;
     hasLegacyEnvLocal?: boolean;
+    hasProductionLocal?: boolean;
+    hasProductionEnv?: boolean;
+    hasGenericEnv?: boolean;
   }
 ): { mode: string; stage: string };
 
@@ -20,5 +23,8 @@ export function assertFrontendEnv(
   options?: {
     mode?: string;
     hasLegacyEnvLocal?: boolean;
+    hasProductionLocal?: boolean;
+    hasProductionEnv?: boolean;
+    hasGenericEnv?: boolean;
   }
 ): void;

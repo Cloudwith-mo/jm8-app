@@ -3,6 +3,7 @@
 .env.*
 .env.local
 .env.*.local
+!frontend/.env.production.example
 
 # Python
 .venv/

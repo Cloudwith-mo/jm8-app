@@ -8,10 +8,8 @@ set -euo pipefail
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
-: "${DEPLOY_CONFIRMATION:?DEPLOY_CONFIRMATION is required for staging. Run: source .env}"
+: "${DEPLOY_CONFIRMATION:?DEPLOY_CONFIRMATION is required. Run: source .env}"
 : "${FRONTEND_BUCKET:?FRONTEND_BUCKET is required. Run: source .env}"
-: "${STAGING_BASIC_AUTH_USERNAME:?STAGING_BASIC_AUTH_USERNAME is required. Run: source .env}"
-: "${STAGING_BASIC_AUTH_PASSWORD:?STAGING_BASIC_AUTH_PASSWORD is required. Run: source .env}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -118,9 +116,30 @@ require_output() {
   [[ "$output_status" == "PRESENT" ]] || fail "OUTPUT_${output_name}_${output_reason}" "CloudFormation output $output_name failed validation: $output_reason; output_keys=${OUTPUT_KEYS:-<unavailable>}."
 }
 
-if [[ "$STAGE" != "staging" ]]; then fail "INVALID_STAGE" "create-frontend-hosting is staging-only."; fi
-if [[ "$FRONTEND_BUCKET" != "$APP_NAME-$STAGE-frontend-$EXPECTED_AWS_ACCOUNT_ID" ]]; then fail "INVALID_FRONTEND_BUCKET" "FRONTEND_BUCKET does not match the staging contract."; fi
+case "$STAGE" in
+  staging|prod) ;;
+  *) fail "INVALID_STAGE" "create-frontend-hosting supports only staging or prod." ;;
+esac
+if [[ "$FRONTEND_BUCKET" != "$APP_NAME-$STAGE-frontend-$EXPECTED_AWS_ACCOUNT_ID" ]]; then fail "INVALID_FRONTEND_BUCKET" "FRONTEND_BUCKET does not match the stage contract."; fi
 if [[ "$FRONTEND_BUCKET" == "$RAW_BUCKET" ]]; then fail "FRONTEND_RAW_BUCKET_COLLISION" "FRONTEND_BUCKET must be distinct from RAW_BUCKET."; fi
+
+AUTH_DIGEST=""
+if [[ "$STAGE" == "staging" ]]; then
+  : "${STAGING_BASIC_AUTH_USERNAME:?STAGING_BASIC_AUTH_USERNAME is required for staging.}"
+  : "${STAGING_BASIC_AUTH_PASSWORD:?STAGING_BASIC_AUTH_PASSWORD is required for staging.}"
+  set +x
+  AUTH_HEADER="$(printf '%s:%s' "$STAGING_BASIC_AUTH_USERNAME" "$STAGING_BASIC_AUTH_PASSWORD" | base64)"
+  AUTH_DIGEST="$(printf '%s' "Basic ${AUTH_HEADER}" | sha256_hex)"
+  unset AUTH_HEADER
+else
+  if [[ "$AWS_PROFILE" != "jm8-prod" ]] ||
+     [[ "$EXPECTED_AWS_ACCOUNT_ID" != "114743615542" ]] ||
+     [[ "$DEPLOY_CONFIRMATION" != "prod" ]] ||
+     [[ "${PRODUCTION_ISOLATION_MODE:-}" != "stage-scoped-same-account" ]] ||
+     [[ "$FRONTEND_BUCKET" != "journalm8-prod-frontend-114743615542" ]]; then
+    fail "PRODUCTION_HOSTING_CONTRACT_INVALID" "Production frontend hosting controls do not match the approved contract."
+  fi
+fi
 
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
 export JM8_OPERATION="create-frontend-hosting"
@@ -147,11 +166,6 @@ LOCAL_TEMPLATE_CODE="$(printf '%s' "$LOCAL_TEMPLATE_RESULT" | python3 -c 'import
 if [[ "$LOCAL_HAS_OUTPUTS" != "True" || "$LOCAL_HAS_OAC_OUTPUT" != "True" ]]; then fail "LOCAL_TEMPLATE_OUTPUT_MISSING" "Local template output contract is missing; local_checksum=$LOCAL_TEMPLATE_CHECKSUM"; fi
 if [[ "$LOCAL_TEMPLATE_CODE" != "OK" ]]; then fail "LOCAL_TEMPLATE_OUTPUT_INVALID" "Local template OriginAccessControlId intrinsic is invalid; local_checksum=$LOCAL_TEMPLATE_CHECKSUM"; fi
 log_info "Local template preflight completed; checksum=$LOCAL_TEMPLATE_CHECKSUM"
-
-set +x
-AUTH_HEADER="$(printf '%s:%s' "$STAGING_BASIC_AUTH_USERNAME" "$STAGING_BASIC_AUTH_PASSWORD" | base64)"
-AUTH_DIGEST="$(printf '%s' "Basic ${AUTH_HEADER}" | sha256_hex)"
-unset AUTH_HEADER
 
 PRE_EXISTS="false"
 PRE_ERROR="$TEMP_DIR/pre-error"
@@ -183,9 +197,18 @@ REPORT_ERROR_CODE=""
 REPORT_MESSAGE=""
 write_report
 log_info "CloudFormation deploy started; stack=$STACK_NAME existed_before=$PRE_EXISTS"
+PARAMETER_OVERRIDES=(
+  "AppName=$APP_NAME"
+  "Stage=$STAGE"
+  "FrontendBucketName=$FRONTEND_BUCKET"
+)
+if [[ "$STAGE" == "staging" ]]; then
+  PARAMETER_OVERRIDES+=("AuthorizationDigest=$AUTH_DIGEST")
+fi
 set +e
 aws cloudformation deploy --stack-name "$STACK_NAME" --template-file "$TEMPLATE_PATH" --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides "AppName=$APP_NAME" "Stage=$STAGE" "FrontendBucketName=$FRONTEND_BUCKET" "AuthorizationDigest=$AUTH_DIGEST" \
+  --parameter-overrides "${PARAMETER_OVERRIDES[@]}" \
+  --tags "App=$APP_NAME" "Stage=$STAGE" "ManagedBy=aws-cli" \
   --profile "$AWS_PROFILE" --region "$AWS_REGION" >"$TEMP_DIR/deploy-output" 2>"$TEMP_DIR/deploy-error"
 DEPLOY_STATUS=$?
 set -e
@@ -194,6 +217,11 @@ if [[ "$DEPLOY_STATUS" -ne 0 ]]; then log_aws_error "$TEMP_DIR/deploy-error"; fa
 
 aws cloudformation describe-stacks --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$STACK_JSON" 2>"$TEMP_DIR/stack-error" || { log_aws_error "$TEMP_DIR/stack-error"; fail "POST_DEPLOYMENT_STACK_LOOKUP_FAILED" "Unable to read the deployed stack."; }
 STACK_SUMMARY="$(python3 "$DIAGNOSTICS_HELPER" stack-check "$STACK_JSON")"
+if ! python3 "$DIAGNOSTICS_HELPER" stack-contract-verify \
+  "$STACK_JSON" "$STACK_NAME" "$STAGE" "$FRONTEND_BUCKET" \
+  >"$TEMP_DIR/stack-contract.json"; then
+  fail "STACK_CONTRACT_INVALID" "CloudFormation stack identity, parameters, or tags do not match the stage contract."
+fi
 POST_STATUS="$(printf '%s' "$STACK_SUMMARY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
 POST_TIMESTAMP="$(printf '%s' "$STACK_SUMMARY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["last_updated"] or "")')"
 log_info "Resulting stack status=$POST_STATUS last_updated=$POST_TIMESTAMP"
@@ -233,8 +261,10 @@ DISTRIBUTION_ID="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; pri
 DISTRIBUTION_DOMAIN="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["DistributionDomainName"]["value"])')"
 FRONTEND_BUCKET_REGIONAL_DOMAIN="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["FrontendBucketRegionalDomainName"]["value"])')"
 ORIGIN_ACCESS_CONTROL_ID="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["OriginAccessControlId"]["value"])')"
+FRONTEND_ORIGIN_OUTPUT="$(printf '%s' "$OUTPUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["FrontendOrigin"]["value"])')"
 if [[ "$BUCKET_NAME" != "$FRONTEND_BUCKET" ]]; then fail "FRONTEND_BUCKET_OUTPUT_MISMATCH" "CloudFormation frontend bucket output does not match FRONTEND_BUCKET."; fi
 if [[ "$DISTRIBUTION_DOMAIN" != *.cloudfront.net ]]; then fail "INVALID_DISTRIBUTION_DOMAIN" "Distribution domain must end exactly in .cloudfront.net."; fi
+if [[ "$FRONTEND_ORIGIN_OUTPUT" != "https://${DISTRIBUTION_DOMAIN}" ]]; then fail "FRONTEND_ORIGIN_OUTPUT_MISMATCH" "CloudFormation frontend origin does not match the distribution domain."; fi
 log_info "Output validation completed"
 
 VERIFICATION_PHASE="s3_verification"
@@ -251,6 +281,8 @@ OBJECT_OWNERSHIP="$(aws s3api get-bucket-ownership-controls --bucket "$BUCKET_NA
 if [[ "$OBJECT_OWNERSHIP" != "BucketOwnerEnforced" ]]; then fail "S3_OWNERSHIP_INVALID" "Frontend bucket ownership must be BucketOwnerEnforced."; fi
 VERSIONING_STATUS="$(aws s3api get-bucket-versioning --bucket "$BUCKET_NAME" --query Status --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 if [[ "$VERSIONING_STATUS" != "Enabled" ]]; then fail "S3_VERSIONING_INVALID" "Frontend bucket versioning must be Enabled."; fi
+aws s3api get-bucket-tagging --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$TEMP_DIR/bucket-tags.json"
+if ! python3 "$DIAGNOSTICS_HELPER" tags-verify "$TEMP_DIR/bucket-tags.json" "$STAGE" >"$TEMP_DIR/bucket-tag-check.json"; then fail "S3_TAGS_INVALID" "Frontend bucket tags do not match the stage contract."; fi
 log_info "S3 verification completed"
 
 WEBSITE_ERROR_FILE="$TEMP_DIR/website-error"
@@ -280,8 +312,17 @@ d=json.load(open(sys.argv[1]))["Distribution"]["DistributionConfig"]["Origins"].
 print(sum(1 for x in d if x.get("DomainName") == sys.argv[2]))
 PY
 )"
-DISTRIBUTION_VERIFY="$(python3 "$DIAGNOSTICS_HELPER" cloudfront-verify "$TEMP_DIR/distribution.json" "$FRONTEND_BUCKET_REGIONAL_DOMAIN" "$ORIGIN_ACCESS_CONTROL_ID" "$DISTRIBUTION_DOMAIN")"
+set +e
+DISTRIBUTION_VERIFY="$(python3 "$DIAGNOSTICS_HELPER" cloudfront-verify \
+  "$TEMP_DIR/distribution.json" \
+  "$FRONTEND_BUCKET_REGIONAL_DOMAIN" \
+  "$ORIGIN_ACCESS_CONTROL_ID" \
+  "$DISTRIBUTION_DOMAIN" \
+  "$STAGE" \
+  "$DISTRIBUTION_ID" \
+  "${STACK_NAME}-basic-auth")"
 DISTRIBUTION_VERIFY_STATUS=$?
+set -e
 if [[ "$DISTRIBUTION_VERIFY_STATUS" -ne 0 ]]; then
   python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data.get("error_code") or "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID")' <<< "$DISTRIBUTION_VERIFY" > "$TEMP_DIR/cloudfront_verify_error"
   VERIFY_ERROR_CODE="$(cat "$TEMP_DIR/cloudfront_verify_error")"
@@ -294,6 +335,33 @@ print(next((x.get("OriginAccessControlId", "") for x in d if x.get("DomainName")
 PY
 )"
 [[ "$ORIGIN_OAC_ID" =~ ^[A-Za-z0-9_-]{3,64}$ ]] || fail "CLOUDFRONT_ORIGIN_OAC_MISSING" "Attached CloudFront OAC ID is malformed or missing."
+CLOUDFRONT_RESOURCE_ARN="arn:aws:cloudfront::${EXPECTED_AWS_ACCOUNT_ID}:distribution/${DISTRIBUTION_ID}"
+aws cloudfront list-tags-for-resource --resource "$CLOUDFRONT_RESOURCE_ARN" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$TEMP_DIR/distribution-tags.json"
+if ! python3 "$DIAGNOSTICS_HELPER" tags-verify "$TEMP_DIR/distribution-tags.json" "$STAGE" >"$TEMP_DIR/distribution-tag-check.json"; then fail "CLOUDFRONT_TAGS_INVALID" "CloudFront distribution tags do not match the stage contract."; fi
+if [[ "$STAGE" == "staging" ]]; then
+  AUTH_FUNCTION_ARN="$(python3 - "$TEMP_DIR/distribution.json" <<'PY_AUTH_FUNCTION'
+import json
+import sys
+
+configuration = json.load(open(sys.argv[1], encoding="utf-8"))[
+    "Distribution"
+]["DistributionConfig"]["DefaultCacheBehavior"]
+associations = configuration.get("FunctionAssociations", {}).get("Items", [])
+matches = [
+    item.get("FunctionARN", "")
+    for item in associations
+    if item.get("EventType") == "viewer-request"
+]
+if len(matches) != 1 or not matches[0]:
+    raise SystemExit("Staging Basic Auth function ARN is missing.")
+print(matches[0])
+PY_AUTH_FUNCTION
+)"
+  aws cloudfront list-tags-for-resource --resource "$AUTH_FUNCTION_ARN" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$TEMP_DIR/function-tags.json"
+  if ! python3 "$DIAGNOSTICS_HELPER" tags-verify "$TEMP_DIR/function-tags.json" "$STAGE" >"$TEMP_DIR/function-tag-check.json"; then fail "CLOUDFRONT_FUNCTION_TAGS_INVALID" "Staging Basic Auth function tags do not match the stage contract."; fi
+fi
+aws s3api get-bucket-policy --bucket "$BUCKET_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json >"$TEMP_DIR/bucket-policy.json"
+if ! python3 "$DIAGNOSTICS_HELPER" bucket-policy-verify "$TEMP_DIR/bucket-policy.json" "$BUCKET_NAME" "$CLOUDFRONT_RESOURCE_ARN" >"$TEMP_DIR/bucket-policy-check.json"; then fail "S3_BUCKET_POLICY_INVALID" "Frontend bucket policy does not match the exact OAC distribution and HTTPS-only contract."; fi
 VERIFICATION_PHASE="oac_verification"
 FINAL_CODE="IN_PROGRESS"
 REPORT_ERROR_CODE=""
@@ -302,8 +370,10 @@ write_report
 read -r OAC_ORIGIN_TYPE OAC_SIGNING_BEHAVIOR OAC_SIGNING_PROTOCOL <<< "$(aws cloudfront get-origin-access-control --id "$ORIGIN_OAC_ID" --query '[OriginAccessControl.OriginAccessControlConfig.OriginAccessControlOriginType, OriginAccessControl.OriginAccessControlConfig.SigningBehavior, OriginAccessControl.OriginAccessControlConfig.SigningProtocol]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 OAC_JSON="$(aws cloudfront get-origin-access-control --id "$ORIGIN_OAC_ID" --output json --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 printf '%s' "$OAC_JSON" >"$TEMP_DIR/oac.json"
+set +e
 OAC_VERIFY="$(python3 "$DIAGNOSTICS_HELPER" oac-verify "$TEMP_DIR/oac.json" "$ORIGIN_ACCESS_CONTROL_ID")"
 OAC_VERIFY_STATUS=$?
+set -e
 if [[ "$OAC_VERIFY_STATUS" -ne 0 ]]; then
   python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); print(data.get("error_code") or "OAC_RESOURCE_ID_MISMATCH")' <<< "$OAC_VERIFY" > "$TEMP_DIR/oac_verify_error"
   OAC_ERROR_CODE="$(cat "$TEMP_DIR/oac_verify_error")"

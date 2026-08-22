@@ -57,7 +57,6 @@ AWS_LAMBDA_BASIC_POLICY_ARN = (
 BEDROCK_PROFILE_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 RESOURCE_STAR_ACTIONS = {
     "cloudfront:CreateDistribution",
-    "cloudfront:CreateFunction",
     "cloudfront:CreateOriginAccessControl",
     "cognito-idp:CreateUserPool",
     "cognito-idp:DescribeUserPoolDomain",
@@ -358,7 +357,6 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         _statement(
             "ManageProductionFrontendStack",
             (
-                "cloudformation:CreateChangeSet",
                 "cloudformation:DeleteChangeSet",
                 "cloudformation:DescribeChangeSet",
                 "cloudformation:DescribeStackEvents",
@@ -370,6 +368,21 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             stack_arn,
         ),
         _statement(
+            "CreateTaggedProductionFrontendChangeSet",
+            ("cloudformation:CreateChangeSet",),
+            stack_arn,
+            {
+                "StringEquals": {
+                    "aws:RequestTag/App": APP_NAME,
+                    "aws:RequestTag/ManagedBy": "aws-cli",
+                    "aws:RequestTag/Stage": STAGE,
+                },
+                "ForAllValues:StringEquals": {
+                    "aws:TagKeys": ["App", "ManagedBy", "Stage"],
+                },
+            },
+        ),
+        _statement(
             "ManageProductionFrontendBucket",
             (
                 "s3:CreateBucket",
@@ -378,7 +391,9 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "s3:GetEncryptionConfiguration",
                 "s3:GetBucketLocation",
                 "s3:GetBucketOwnershipControls",
+                "s3:GetBucketPolicy",
                 "s3:GetBucketPublicAccessBlock",
+                "s3:GetBucketTagging",
                 "s3:GetBucketVersioning",
                 "s3:GetBucketWebsite",
                 "s3:ListBucket",
@@ -404,21 +419,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             {
                 "StringEquals": {
                     "aws:RequestTag/App": APP_NAME,
-                    "aws:RequestTag/Stage": STAGE,
-                    "aws:RequestedRegion": region,
-                },
-                "ForAnyValue:StringEquals": {
-                    "aws:CalledVia": "cloudformation.amazonaws.com",
-                },
-            },
-        ),
-        _statement(
-            "CreateTaggedProductionCloudFrontFunction",
-            ("cloudfront:CreateFunction",),
-            "*",
-            {
-                "StringEquals": {
-                    "aws:RequestTag/App": APP_NAME,
+                    "aws:RequestTag/ManagedBy": "aws-cli",
                     "aws:RequestTag/Stage": STAGE,
                     "aws:RequestedRegion": region,
                 },
@@ -446,21 +447,10 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "cloudfront:GetDistribution",
                 "cloudfront:GetDistributionConfig",
                 "cloudfront:GetInvalidation",
+                "cloudfront:ListTagsForResource",
                 "cloudfront:UpdateDistribution",
             ),
             f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/*",
-            production_tag_condition,
-        ),
-        _statement(
-            "ManageProductionCloudFrontFunction",
-            (
-                "cloudfront:DeleteFunction",
-                "cloudfront:DescribeFunction",
-                "cloudfront:GetFunction",
-                "cloudfront:PublishFunction",
-                "cloudfront:UpdateFunction",
-            ),
-            f"arn:aws:cloudfront::{ACCOUNT_ID}:function/journalm8-prod-*",
             production_tag_condition,
         ),
         _statement(
@@ -489,11 +479,17 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         _statement(
             "TagOnlyProductionCloudFrontResources",
             ("cloudfront:TagResource",),
-            (
-                f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/*",
-                f"arn:aws:cloudfront::{ACCOUNT_ID}:function/journalm8-prod-*",
-            ),
-            production_request_tag_condition,
+            f"arn:aws:cloudfront::{ACCOUNT_ID}:distribution/*",
+            {
+                "StringEquals": {
+                    "aws:RequestTag/App": APP_NAME,
+                    "aws:RequestTag/ManagedBy": "aws-cli",
+                    "aws:RequestTag/Stage": STAGE,
+                },
+                "ForAnyValue:StringEquals": {
+                    "aws:CalledVia": "cloudformation.amazonaws.com",
+                },
+            },
         ),
     )
 

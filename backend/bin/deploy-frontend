@@ -11,19 +11,14 @@ set -euo pipefail
 : "${CLOUDFRONT_DISTRIBUTION_ID:?CLOUDFRONT_DISTRIBUTION_ID is required. Run: source .env}"
 : "${FRONTEND_ORIGIN:?FRONTEND_ORIGIN is required. Run: source .env}"
 : "${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required. Run: source .env}"
-: "${VITE_API_ENDPOINT:?VITE_API_ENDPOINT is required. Run: source .env}"
-: "${VITE_APP_STAGE:?VITE_APP_STAGE is required. Run: source .env}"
-: "${VITE_COGNITO_DOMAIN:?VITE_COGNITO_DOMAIN is required. Run: source .env}"
-: "${VITE_COGNITO_CLIENT_ID:?VITE_COGNITO_CLIENT_ID is required. Run: source .env}"
-: "${VITE_COGNITO_REDIRECT_URI:?VITE_COGNITO_REDIRECT_URI is required. Run: source .env}"
-: "${VITE_COGNITO_LOGOUT_URI:?VITE_COGNITO_LOGOUT_URI is required. Run: source .env}"
-: "${STAGING_BASIC_AUTH_USERNAME:?STAGING_BASIC_AUTH_USERNAME is required. Run: source .env}"
-: "${STAGING_BASIC_AUTH_PASSWORD:?STAGING_BASIC_AUTH_PASSWORD is required. Run: source .env}"
 
-if [[ "${STAGE}" != "staging" ]]; then
-  echo "ERROR: deploy-frontend is staging-only." >&2
-  exit 1
-fi
+case "$STAGE" in
+  staging|prod) ;;
+  *)
+    echo "ERROR: deploy-frontend supports only staging or prod." >&2
+    exit 1
+    ;;
+esac
 
 if [[ "${FRONTEND_BUCKET}" != "${APP_NAME}-${STAGE}-frontend-${EXPECTED_AWS_ACCOUNT_ID}" ]]; then
   echo "ERROR: FRONTEND_BUCKET must match ${APP_NAME}-${STAGE}-frontend-${EXPECTED_AWS_ACCOUNT_ID}" >&2
@@ -33,6 +28,26 @@ fi
 if [[ "${FRONTEND_BUCKET}" == "${RAW_BUCKET}" ]]; then
   echo "ERROR: FRONTEND_BUCKET must be distinct from RAW_BUCKET." >&2
   exit 1
+fi
+
+if [[ "$STAGE" == "staging" ]]; then
+  : "${VITE_API_ENDPOINT:?VITE_API_ENDPOINT is required for staging.}"
+  : "${VITE_APP_STAGE:?VITE_APP_STAGE is required for staging.}"
+  : "${VITE_COGNITO_DOMAIN:?VITE_COGNITO_DOMAIN is required for staging.}"
+  : "${VITE_COGNITO_CLIENT_ID:?VITE_COGNITO_CLIENT_ID is required for staging.}"
+  : "${VITE_COGNITO_REDIRECT_URI:?VITE_COGNITO_REDIRECT_URI is required for staging.}"
+  : "${VITE_COGNITO_LOGOUT_URI:?VITE_COGNITO_LOGOUT_URI is required for staging.}"
+  : "${STAGING_BASIC_AUTH_USERNAME:?STAGING_BASIC_AUTH_USERNAME is required for staging.}"
+  : "${STAGING_BASIC_AUTH_PASSWORD:?STAGING_BASIC_AUTH_PASSWORD is required for staging.}"
+else
+  if [[ "$AWS_PROFILE" != "jm8-prod" ]] ||
+     [[ "$EXPECTED_AWS_ACCOUNT_ID" != "114743615542" ]] ||
+     [[ "${DEPLOY_CONFIRMATION:-}" != "prod" ]] ||
+     [[ "${PRODUCTION_ISOLATION_MODE:-}" != "stage-scoped-same-account" ]] ||
+     [[ "$FRONTEND_BUCKET" != "journalm8-prod-frontend-114743615542" ]]; then
+    echo "ERROR: production frontend deployment controls do not match the approved contract." >&2
+    exit 1
+  fi
 fi
 
 if [[ "${FRONTEND_ORIGIN}" != https://* ]]; then
@@ -65,6 +80,7 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIAGNOSTICS_HELPER="$SCRIPT_DIR/jm8_frontend_hosting_diagnostics.py"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
 export JM8_OPERATION="deploy-frontend"
 
@@ -72,49 +88,130 @@ if ! jm8_validate_contract_or_exit; then
   exit 1
 fi
 
-DISTRIBUTION_DOMAIN="$(aws cloudfront get-distribution \
-  --id "$CLOUDFRONT_DISTRIBUTION_ID" \
-  --query 'Distribution.DomainName' \
-  --output text \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION")"
-
-if [[ "$FRONTEND_ORIGIN" != "https://${DISTRIBUTION_DOMAIN}" ]]; then
-  echo "ERROR: FRONTEND_ORIGIN must match the CloudFront distribution domain." >&2
-  exit 1
-fi
-
-ORIGIN_BUCKET="$(aws cloudfront get-distribution \
-  --id "$CLOUDFRONT_DISTRIBUTION_ID" \
-  --query 'Distribution.DistributionConfig.Origins.Items[0].DomainName' \
-  --output text \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION")"
-
 STACK_NAME="${APP_NAME}-${STAGE}-frontend-hosting"
-EXPECTED_ORIGIN_BUCKET="$(aws cloudformation describe-stacks \
-  --stack-name "$STACK_NAME" \
-  --query 'Stacks[0].Outputs[?OutputKey==`FrontendBucketRegionalDomainName`].OutputValue | [0]' \
-  --output text \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION")"
+TEMP_DIR="$(mktemp -d)"
+cleanup() {
+  rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
 
-if [[ -z "$EXPECTED_ORIGIN_BUCKET" || "$EXPECTED_ORIGIN_BUCKET" == "None" ]]; then
-  echo "ERROR: could not resolve frontend bucket regional domain name from stack outputs." >&2
+aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --output json \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" >"$TEMP_DIR/stack.json"
+
+if ! python3 "$DIAGNOSTICS_HELPER" stack-contract-verify \
+  "$TEMP_DIR/stack.json" "$STACK_NAME" "$STAGE" "$FRONTEND_BUCKET" \
+  >"$TEMP_DIR/stack-contract.json"; then
+  echo "ERROR: frontend stack identity, parameters, or tags do not match the stage contract." >&2
   exit 1
 fi
 
-if [[ "$ORIGIN_BUCKET" != "$EXPECTED_ORIGIN_BUCKET" ]]; then
-  echo "ERROR: CloudFront origin does not match FRONTEND_BUCKET." >&2
+STACK_STATUS="$(python3 - "$TEMP_DIR/stack.json" <<'PY_STACK_STATUS'
+import json
+import sys
+
+stacks = json.load(open(sys.argv[1], encoding="utf-8")).get("Stacks", [])
+if len(stacks) != 1:
+    raise SystemExit("Expected exactly one frontend stack response.")
+print(stacks[0].get("StackStatus", ""))
+PY_STACK_STATUS
+)"
+case "$STACK_STATUS" in
+  CREATE_COMPLETE|UPDATE_COMPLETE) ;;
+  *)
+    echo "ERROR: frontend stack is not in a stable completed state." >&2
+    exit 1
+    ;;
+esac
+
+read -r STACK_BUCKET EXPECTED_ORIGIN_BUCKET STACK_DISTRIBUTION_ID DISTRIBUTION_DOMAIN STACK_FRONTEND_ORIGIN ORIGIN_ACCESS_CONTROL_ID <<< "$(python3 - "$TEMP_DIR/stack.json" <<'PY_STACK_OUTPUTS'
+import json
+import sys
+
+stack = json.load(open(sys.argv[1], encoding="utf-8"))["Stacks"][0]
+outputs = {
+    item.get("OutputKey"): item.get("OutputValue", "")
+    for item in stack.get("Outputs", [])
+}
+names = (
+    "FrontendBucketName",
+    "FrontendBucketRegionalDomainName",
+    "DistributionId",
+    "DistributionDomainName",
+    "FrontendOrigin",
+    "OriginAccessControlId",
+)
+values = [outputs.get(name, "") for name in names]
+if any(not value or any(character.isspace() for character in value) for value in values):
+    raise SystemExit("Required frontend stack output is missing or malformed.")
+print(" ".join(values))
+PY_STACK_OUTPUTS
+)"
+
+if [[ "$STACK_BUCKET" != "$FRONTEND_BUCKET" ]] ||
+   [[ "$STACK_DISTRIBUTION_ID" != "$CLOUDFRONT_DISTRIBUTION_ID" ]] ||
+   [[ "$STACK_FRONTEND_ORIGIN" != "$FRONTEND_ORIGIN" ]] ||
+   [[ "$FRONTEND_ORIGIN" != "https://${DISTRIBUTION_DOMAIN}" ]]; then
+  echo "ERROR: frontend stack outputs do not match the deployment target." >&2
+  exit 1
+fi
+
+aws cloudfront get-distribution \
+  --id "$CLOUDFRONT_DISTRIBUTION_ID" \
+  --output json \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" >"$TEMP_DIR/distribution.json"
+
+if ! python3 "$DIAGNOSTICS_HELPER" cloudfront-verify \
+  "$TEMP_DIR/distribution.json" \
+  "$EXPECTED_ORIGIN_BUCKET" \
+  "$ORIGIN_ACCESS_CONTROL_ID" \
+  "$DISTRIBUTION_DOMAIN" \
+  "$STAGE" \
+  "$CLOUDFRONT_DISTRIBUTION_ID" \
+  "${STACK_NAME}-basic-auth" \
+  >"$TEMP_DIR/distribution-check.json"; then
+  echo "ERROR: CloudFront distribution does not match the frontend stack contract." >&2
+  exit 1
+fi
+
+CLOUDFRONT_RESOURCE_ARN="arn:aws:cloudfront::${EXPECTED_AWS_ACCOUNT_ID}:distribution/${CLOUDFRONT_DISTRIBUTION_ID}"
+aws cloudfront list-tags-for-resource \
+  --resource "$CLOUDFRONT_RESOURCE_ARN" \
+  --output json \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" >"$TEMP_DIR/distribution-tags.json"
+if ! python3 "$DIAGNOSTICS_HELPER" tags-verify \
+  "$TEMP_DIR/distribution-tags.json" "$STAGE" \
+  >"$TEMP_DIR/distribution-tag-check.json"; then
+  echo "ERROR: CloudFront distribution tags do not match the stage contract." >&2
   exit 1
 fi
 
 cd "$REPO_ROOT/frontend"
-export VITE_API_ENDPOINT VITE_APP_STAGE VITE_COGNITO_DOMAIN VITE_COGNITO_CLIENT_ID VITE_COGNITO_REDIRECT_URI VITE_COGNITO_LOGOUT_URI
 
 npm ci
 npm run test
-npm run build:staging
+if [[ "$STAGE" == "staging" ]]; then
+  export VITE_API_ENDPOINT VITE_APP_STAGE VITE_COGNITO_DOMAIN VITE_COGNITO_CLIENT_ID VITE_COGNITO_REDIRECT_URI VITE_COGNITO_LOGOUT_URI
+  npm run build:staging
+  find dist -type f -name '*.map' -delete
+else
+  if [[ ! -f .env.production.local ]] ||
+     [[ -e .env ]] ||
+     [[ -e .env.local ]] ||
+     [[ -e .env.production ]]; then
+    echo "ERROR: production builds require only frontend/.env.production.local." >&2
+    exit 1
+  fi
+  while IFS= read -r variable_name; do
+    unset "$variable_name"
+  done < <(compgen -A variable VITE_)
+  npm run build:production
+  node scripts/validate_production_build.mjs dist
+fi
 
 if [[ ! -f dist/index.html ]]; then
   echo "ERROR: dist/index.html was not generated." >&2
@@ -125,8 +222,6 @@ if [[ ! -d dist/assets ]]; then
   echo "ERROR: dist/assets was not generated." >&2
   exit 1
 fi
-
-find dist -type f -name '*.map' -delete
 
 aws s3 sync dist/ "s3://${FRONTEND_BUCKET}" \
   --delete \
@@ -161,27 +256,34 @@ aws cloudfront wait invalidation-completed \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION"
 
-tmp_dir="$(mktemp -d)"
-cleanup() {
-  rm -rf "$tmp_dir"
-}
-trap cleanup EXIT
-
-UNAUTH_STATUS="$(curl -sS -o "$tmp_dir/unauth.out" -w '%{http_code}' "$FRONTEND_ORIGIN/")"
-if [[ "$UNAUTH_STATUS" != "401" ]]; then
-  echo "ERROR: unauthenticated frontend request must return 401." >&2
+INVALIDATION_STATUS="$(aws cloudfront get-invalidation \
+  --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+  --id "$INVALIDATION_ID" \
+  --query 'Invalidation.Status' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
+if [[ "$INVALIDATION_STATUS" != "Completed" ]]; then
+  echo "ERROR: CloudFront invalidation did not complete." >&2
   exit 1
 fi
 
-set +x
-encoded_credentials="$(printf '%s:%s' "$STAGING_BASIC_AUTH_USERNAME" "$STAGING_BASIC_AUTH_PASSWORD" | base64 | tr -d '\n')"
-auth_header="Authorization: Basic ${encoded_credentials}"
+if [[ "$STAGE" == "staging" ]]; then
+  UNAUTH_STATUS="$(curl -sS -o "$TEMP_DIR/unauth.out" -w '%{http_code}' "$FRONTEND_ORIGIN/")"
+  if [[ "$UNAUTH_STATUS" != "401" ]]; then
+    echo "ERROR: unauthenticated staging frontend request must return 401." >&2
+    exit 1
+  fi
 
-authenticated_status() {
-  local request_url="$1"
-  local output_path="$2"
+  set +x
+  encoded_credentials="$(printf '%s:%s' "$STAGING_BASIC_AUTH_USERNAME" "$STAGING_BASIC_AUTH_PASSWORD" | base64 | tr -d '\n')"
+  auth_header="Authorization: Basic ${encoded_credentials}"
 
-  curl --config - <<EOF
+  authenticated_status() {
+    local request_url="$1"
+    local output_path="$2"
+
+    curl --config - <<EOF
 url = "$request_url"
 header = "$auth_header"
 silent
@@ -189,18 +291,26 @@ show-error
 output = "$output_path"
 write-out = "%{http_code}"
 EOF
-}
+  }
 
-AUTH_STATUS="$(authenticated_status "$FRONTEND_ORIGIN/" "$tmp_dir/home.out")"
-if [[ "$AUTH_STATUS" != "200" ]]; then
-  echo "ERROR: authenticated frontend home request must return 200." >&2
-  exit 1
-fi
+  AUTH_STATUS="$(authenticated_status "$FRONTEND_ORIGIN/" "$TEMP_DIR/home.out")"
+  if [[ "$AUTH_STATUS" != "200" ]]; then
+    echo "ERROR: authenticated frontend home request must return 200." >&2
+    exit 1
+  fi
 
-ARCHIVE_STATUS="$(authenticated_status "$FRONTEND_ORIGIN/archive" "$tmp_dir/archive.out")"
-if [[ "$ARCHIVE_STATUS" != "200" ]]; then
-  echo "ERROR: authenticated archive route must return 200." >&2
-  exit 1
+  ARCHIVE_STATUS="$(authenticated_status "$FRONTEND_ORIGIN/archive" "$TEMP_DIR/archive.out")"
+  if [[ "$ARCHIVE_STATUS" != "200" ]]; then
+    echo "ERROR: authenticated archive route must return 200." >&2
+    exit 1
+  fi
+else
+  HOME_STATUS="$(curl -sS -o "$TEMP_DIR/home.out" -w '%{http_code}' "$FRONTEND_ORIGIN/")"
+  ARCHIVE_STATUS="$(curl -sS -o "$TEMP_DIR/archive.out" -w '%{http_code}' "$FRONTEND_ORIGIN/archive")"
+  if [[ "$HOME_STATUS" != "200" ]] || [[ "$ARCHIVE_STATUS" != "200" ]]; then
+    echo "ERROR: production frontend health checks must return 200 without Basic Auth." >&2
+    exit 1
+  fi
 fi
 
 printf '%s\n%s\n%s\n%s\n' "$FRONTEND_BUCKET" "$CLOUDFRONT_DISTRIBUTION_ID" "$FRONTEND_ORIGIN" "$DISTRIBUTION_DOMAIN"

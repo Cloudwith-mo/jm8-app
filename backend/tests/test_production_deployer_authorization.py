@@ -377,7 +377,6 @@ class PolicyGenerationTests(unittest.TestCase):
         ]["Statement"]
         protected_actions = {
             "cloudfront:CreateDistribution",
-            "cloudfront:CreateFunction",
             "cloudfront:CreateOriginAccessControl",
             "cloudfront:DeleteOriginAccessControl",
             "cloudfront:UpdateOriginAccessControl",
@@ -392,6 +391,37 @@ class PolicyGenerationTests(unittest.TestCase):
                     {"aws:CalledVia": "cloudformation.amazonaws.com"},
                 )
         self.assertEqual(matched_actions, protected_actions)
+
+    def test_frontend_policy_requires_stack_tags_and_omits_prod_basic_auth(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-frontend"
+        ]["Statement"]
+        change_set = next(
+            statement
+            for statement in statements
+            if statement["Sid"] == "CreateTaggedProductionFrontendChangeSet"
+        )
+        self.assertEqual(change_set["Action"], ["cloudformation:CreateChangeSet"])
+        self.assertEqual(
+            change_set["Condition"]["StringEquals"],
+            {
+                "aws:RequestTag/App": "journalm8",
+                "aws:RequestTag/ManagedBy": "aws-cli",
+                "aws:RequestTag/Stage": "prod",
+            },
+        )
+        actions = {
+            action
+            for statement in statements
+            for action in statement["Action"]
+        }
+        self.assertNotIn("cloudfront:CreateFunction", actions)
+        self.assertFalse(
+            any(action.endswith("Function") for action in actions)
+        )
+        self.assertIn("s3:GetBucketPolicy", actions)
+        self.assertIn("s3:GetBucketTagging", actions)
+        self.assertIn("cloudfront:ListTagsForResource", actions)
 
     def test_only_inspected_deployment_services_are_authorized(self):
         expected_services = {

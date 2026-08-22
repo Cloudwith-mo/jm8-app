@@ -606,22 +606,29 @@ def validate_operation_specific(operation: str, stage: str) -> None:
         validate_allowed_origins(stage, allowed_origins_csv)
 
     if op == "create-frontend-hosting":
-        if stage != "staging":
-            raise EnvironmentContractError("create-frontend-hosting is staging-only")
+        if stage not in {"staging", "prod"}:
+            raise EnvironmentContractError(
+                "create-frontend-hosting supports only staging or prod"
+            )
 
         app_name = os.environ.get("APP_NAME", "").strip()
         expected_account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
         raw_bucket = os.environ.get("RAW_BUCKET", "").strip()
         frontend_bucket = os.environ.get("FRONTEND_BUCKET", "").strip()
-        basic_auth_user = os.environ.get("STAGING_BASIC_AUTH_USERNAME", "").strip()
-        basic_auth_password = os.environ.get("STAGING_BASIC_AUTH_PASSWORD", "").strip()
 
         if not frontend_bucket:
             raise EnvironmentContractError("create-frontend-hosting requires FRONTEND_BUCKET")
-        if not basic_auth_user or not basic_auth_password:
-            raise EnvironmentContractError(
-                "create-frontend-hosting requires STAGING_BASIC_AUTH_USERNAME and STAGING_BASIC_AUTH_PASSWORD"
-            )
+        if stage == "staging":
+            basic_auth_user = os.environ.get(
+                "STAGING_BASIC_AUTH_USERNAME", ""
+            ).strip()
+            basic_auth_password = os.environ.get(
+                "STAGING_BASIC_AUTH_PASSWORD", ""
+            ).strip()
+            if not basic_auth_user or not basic_auth_password:
+                raise EnvironmentContractError(
+                    "create-frontend-hosting requires staging Basic Auth credentials"
+                )
 
         validate_frontend_bucket_name(
             app_name,
@@ -632,8 +639,10 @@ def validate_operation_specific(operation: str, stage: str) -> None:
         )
 
     if op == "deploy-frontend":
-        if stage != "staging":
-            raise EnvironmentContractError("deploy-frontend is staging-only")
+        if stage not in {"staging", "prod"}:
+            raise EnvironmentContractError(
+                "deploy-frontend supports only staging or prod"
+            )
 
         app_name = os.environ.get("APP_NAME", "").strip()
         expected_account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
@@ -659,7 +668,9 @@ def validate_operation_specific(operation: str, stage: str) -> None:
 
         parsed = urlsplit(frontend_origin)
         if parsed.scheme != "https":
-            raise EnvironmentContractError("FRONTEND_ORIGIN must use https for STAGE=staging")
+            raise EnvironmentContractError(
+                "FRONTEND_ORIGIN must use https for staging/prod"
+            )
         if not parsed.netloc:
             raise EnvironmentContractError("FRONTEND_ORIGIN must contain a valid hostname")
         if parsed.path not in {"", "/"}:

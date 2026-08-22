@@ -689,6 +689,38 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         validate_environment_contract()
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_staging_frontend_hosting_preserves_jm8_dev_profile(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "STAGE": "staging",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-dev",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-staging-main",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-staging-frontend-114743615542",
+            "STAGING_BASIC_AUTH_USERNAME": "staging-user",
+            "STAGING_BASIC_AUTH_PASSWORD": "staging-pass",
+            "JM8_OPERATION": "create-frontend-hosting",
+            "DEPLOY_CONFIRMATION": "staging",
+        })
+
+        validate_environment_contract()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_production_frontend_hosting_does_not_require_basic_auth(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update(self._production_environment())
+        os.environ.update({
+            "JM8_OPERATION": "create-frontend-hosting",
+        })
+        os.environ.pop("STAGING_BASIC_AUTH_USERNAME", None)
+        os.environ.pop("STAGING_BASIC_AUTH_PASSWORD", None)
+
+        validate_environment_contract()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_create_frontend_hosting_rejects_raw_bucket_collision(self, mock_sts):
         mock_sts.return_value = "114743615542"
         os.environ.update({
@@ -729,6 +761,42 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         })
 
         validate_environment_contract()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_production_deploy_frontend_accepts_cloudfront_hostname(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update(self._production_environment())
+        os.environ.update({
+            "CLOUDFRONT_DISTRIBUTION_ID": "PROD123ABC",
+            "FRONTEND_ORIGIN": "https://prod123abc.cloudfront.net",
+            "ALLOWED_ORIGINS": "https://prod123abc.cloudfront.net",
+            "JM8_OPERATION": "deploy-frontend",
+        })
+
+        validate_environment_contract()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_frontend_operations_reject_dev_stage(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        base = {
+            "APP_NAME": "journalm8",
+            "STAGE": "dev",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-dev",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-dev-main",
+            "RAW_BUCKET": "journalm8-dev-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-dev-frontend-114743615542",
+        }
+        for operation in ("create-frontend-hosting", "deploy-frontend"):
+            with self.subTest(operation=operation):
+                os.environ.update(base)
+                os.environ["JM8_OPERATION"] = operation
+                with self.assertRaisesRegex(
+                    EnvironmentContractError,
+                    "supports only staging or prod",
+                ):
+                    validate_environment_contract()
 
 
 class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
@@ -787,7 +855,7 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         self.assertIn('"staging": "sk_test_"', script_text)
         self.assertIn("sk_live_", script_text)
 
-    def test_create_frontend_hosting_requires_staging_only_contract(self):
+    def test_create_frontend_hosting_requires_stage_specific_contract(self):
         script_text = self._read("bin/create-frontend-hosting")
         self.assertIn('export JM8_OPERATION="create-frontend-hosting"', script_text)
         self.assertIn('source "$SCRIPT_DIR/jm8_deployment_guard.sh"', script_text)
@@ -796,6 +864,8 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         self.assertIn('FRONTEND_BUCKET', script_text)
         self.assertIn('STAGING_BASIC_AUTH_USERNAME', script_text)
         self.assertIn('STAGING_BASIC_AUTH_PASSWORD', script_text)
+        self.assertIn("staging|prod", script_text)
+        self.assertIn("journalm8-prod-frontend-114743615542", script_text)
         self.assertNotIn('STRIPE_SECRET_KEY', script_text)
 
     def test_deploy_frontend_requires_cloudfront_contract(self):
@@ -808,6 +878,7 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         self.assertIn('FRONTEND_ORIGIN', script_text)
         self.assertIn('npm run test', script_text)
         self.assertIn('npm run build:staging', script_text)
+        self.assertIn('npm run build:production', script_text)
         self.assertIn('aws s3 sync', script_text)
         self.assertIn('--delete', script_text)
         self.assertNotIn('STRIPE_SECRET_KEY', script_text)

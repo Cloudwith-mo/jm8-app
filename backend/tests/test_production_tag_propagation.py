@@ -364,11 +364,18 @@ class DeploymentTagWiringTests(unittest.TestCase):
         ):
             self.assertIn(lookup, helper)
 
-    def test_no_frontend_production_enablement_was_added(self):
+    def test_frontend_production_enablement_uses_cloudformation_tags(self):
         for name in ("create-frontend-hosting", "deploy-frontend"):
             source = (BIN_DIR / name).read_text(encoding="utf-8")
-            self.assertIn("staging", source)
+            self.assertIn("staging|prod", source)
             self.assertNotIn("jm8_resource_tags.sh", source)
+        create_source = (BIN_DIR / "create-frontend-hosting").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '--tags "App=$APP_NAME" "Stage=$STAGE" "ManagedBy=aws-cli"',
+            create_source,
+        )
 
     def test_tag_helpers_contain_no_secret_material_or_secret_output(self):
         combined = self.sources["jm8_resource_tags.sh"] + self.sources[

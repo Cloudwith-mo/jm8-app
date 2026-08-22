@@ -4,6 +4,9 @@ declare module "*.mjs" {
     options?: {
       mode?: string;
       hasLegacyEnvLocal?: boolean;
+      hasProductionLocal?: boolean;
+      hasProductionEnv?: boolean;
+      hasGenericEnv?: boolean;
     }
   ): void;
 }

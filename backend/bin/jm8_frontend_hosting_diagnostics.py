@@ -18,6 +18,10 @@ REQUIRED_OUTPUTS = (
     "OriginAccessControlId",
 )
 SAFE_OUTPUTS = set(REQUIRED_OUTPUTS)
+REQUIRED_TAGS = {
+    "App": "journalm8",
+    "ManagedBy": "aws-cli",
+}
 
 
 def sha256_file(path: str) -> str:
@@ -116,9 +120,20 @@ def stack_result(path: str) -> dict[str, Any]:
         elif name == "DistributionDomainName" and not value.endswith(".cloudfront.net"):
             status, reason = "INVALID", "must end in .cloudfront.net"
         statuses[name] = {"status": status, "reason": reason, "value": value if name in SAFE_OUTPUTS else None}
+    parameters = {
+        item.get("ParameterKey"): item.get("ParameterValue")
+        for item in (stack.get("Parameters") or [])
+        if item.get("ParameterKey") in {"AppName", "Stage", "FrontendBucketName"}
+    }
+    tags = {
+        item.get("Key"): item.get("Value")
+        for item in (stack.get("Tags") or [])
+        if isinstance(item, dict) and item.get("Key")
+    }
     return {"stack_name": stack.get("StackName"), "status": stack.get("StackStatus"),
             "last_updated": stack.get("LastUpdatedTime") or stack.get("CreationTime"),
-            "output_keys": sorted(outputs), "outputs": statuses}
+            "output_keys": sorted(outputs), "outputs": statuses,
+            "parameters": parameters, "tags": tags}
 
 
 def resource_result(path: str) -> dict[str, Any]:
@@ -163,7 +178,208 @@ def add_validation(checks: list[dict[str, Any]], name: str, expected: Any, actua
     })
 
 
-def cloudfront_checks(path: str, bucket_domain: str, expected_oac_id: str, expected_distribution_domain: str) -> dict[str, Any]:
+def _checks_result(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    failed = [item for item in checks if item["status"] == "FAIL"]
+    return {
+        "passed": not failed,
+        "checks": checks,
+        "error_code": failed[0]["stable_error_code"] if failed else None,
+    }
+
+
+def stack_contract_checks(
+    path: str,
+    expected_stack_name: str,
+    expected_stage: str,
+    expected_bucket: str,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        stacks = payload.get("Stacks") if isinstance(payload, dict) else None
+        if not isinstance(stacks, list) or len(stacks) != 1:
+            raise ValueError("stack response must contain exactly one stack")
+        summary = stack_result(path)
+    except (OSError, ValueError, TypeError) as exc:
+        add_validation(
+            checks,
+            "stack_json",
+            "valid stack response",
+            str(exc),
+            "STACK_RESPONSE_INVALID",
+            "CloudFormation stack response could not be parsed.",
+        )
+        return _checks_result(checks)
+
+    expected_parameters = {
+        "AppName": "journalm8",
+        "Stage": expected_stage,
+        "FrontendBucketName": expected_bucket,
+    }
+    if summary.get("stack_name") != expected_stack_name:
+        add_validation(
+            checks,
+            "stack_name",
+            expected_stack_name,
+            summary.get("stack_name") or "<missing>",
+            "STACK_IDENTITY_MISMATCH",
+            "CloudFormation stack identity does not match the stage contract.",
+        )
+    if summary.get("parameters") != expected_parameters:
+        add_validation(
+            checks,
+            "stack_parameters",
+            expected_parameters,
+            summary.get("parameters"),
+            "STACK_PARAMETER_MISMATCH",
+            "CloudFormation stack parameters do not match the selected stage.",
+        )
+    expected_tags = {**REQUIRED_TAGS, "Stage": expected_stage}
+    actual_tags = summary.get("tags", {})
+    if any(actual_tags.get(key) != value for key, value in expected_tags.items()):
+        add_validation(
+            checks,
+            "stack_tags",
+            expected_tags,
+            {key: actual_tags.get(key) for key in expected_tags},
+            "STACK_TAG_MISMATCH",
+            "CloudFormation stack tags do not match the stage contract.",
+        )
+    return _checks_result(checks)
+
+
+def _tag_map(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("tag response is not an object")
+    items: Any
+    if isinstance(payload.get("TagSet"), list):
+        items = payload["TagSet"]
+    elif isinstance(payload.get("Tags"), dict):
+        items = payload["Tags"].get("Items")
+    else:
+        raise ValueError("tag response has no supported tag collection")
+    if not isinstance(items, list):
+        raise ValueError("tag collection is malformed")
+    tags: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("tag entry is malformed")
+        key = item.get("Key")
+        value = item.get("Value")
+        if not isinstance(key, str) or not isinstance(value, str) or key in tags:
+            raise ValueError("tag entry is malformed or duplicated")
+        tags[key] = value
+    return tags
+
+
+def tag_checks(path: str, expected_stage: str) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        tags = _tag_map(payload)
+    except (OSError, ValueError, TypeError) as exc:
+        add_validation(
+            checks,
+            "resource_tags",
+            "valid tag response",
+            str(exc),
+            "RESOURCE_TAG_RESPONSE_INVALID",
+            "Resource tags could not be parsed.",
+        )
+        return _checks_result(checks)
+    expected = {**REQUIRED_TAGS, "Stage": expected_stage}
+    if any(tags.get(key) != value for key, value in expected.items()):
+        add_validation(
+            checks,
+            "resource_tags",
+            expected,
+            {key: tags.get(key) for key in expected},
+            "RESOURCE_TAG_MISMATCH",
+            "Resource tags do not match the stage contract.",
+        )
+    return _checks_result(checks)
+
+
+def bucket_policy_checks(
+    path: str,
+    expected_bucket: str,
+    expected_distribution_arn: str,
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        policy = payload.get("Policy") if isinstance(payload, dict) else None
+        if isinstance(policy, str):
+            policy = json.loads(policy)
+        statements = policy.get("Statement") if isinstance(policy, dict) else None
+        if not isinstance(statements, list):
+            raise ValueError("bucket policy statements are malformed")
+    except (OSError, ValueError, TypeError) as exc:
+        add_validation(
+            checks,
+            "bucket_policy",
+            "valid policy response",
+            str(exc),
+            "BUCKET_POLICY_RESPONSE_INVALID",
+            "Frontend bucket policy could not be parsed.",
+        )
+        return _checks_result(checks)
+
+    bucket_arn = f"arn:aws:s3:::{expected_bucket}"
+    object_arn = f"{bucket_arn}/*"
+    allow_matches = [
+        statement
+        for statement in statements
+        if statement.get("Effect") == "Allow"
+        and statement.get("Principal") == {"Service": "cloudfront.amazonaws.com"}
+        and statement.get("Action") == "s3:GetObject"
+        and statement.get("Resource") == object_arn
+        and statement.get("Condition", {}).get("StringEquals", {}).get("AWS:SourceArn")
+        == expected_distribution_arn
+    ]
+    deny_matches = [
+        statement
+        for statement in statements
+        if statement.get("Effect") == "Deny"
+        and statement.get("Principal") == "*"
+        and statement.get("Action") == "s3:*"
+        and set(statement.get("Resource", [])) == {bucket_arn, object_arn}
+        and str(
+            statement.get("Condition", {}).get("Bool", {}).get(
+                "aws:SecureTransport"
+            )
+        ).lower() == "false"
+    ]
+    if len(allow_matches) != 1:
+        add_validation(
+            checks,
+            "cloudfront_read_policy",
+            1,
+            len(allow_matches),
+            "BUCKET_POLICY_CLOUDFRONT_ACCESS_INVALID",
+            "Bucket policy must allow only the exact distribution through OAC.",
+        )
+    if len(deny_matches) != 1:
+        add_validation(
+            checks,
+            "https_only_policy",
+            1,
+            len(deny_matches),
+            "BUCKET_POLICY_HTTPS_ONLY_INVALID",
+            "Bucket policy must deny insecure transport for bucket and objects.",
+        )
+    return _checks_result(checks)
+
+
+def cloudfront_checks(
+    path: str,
+    bucket_domain: str,
+    expected_oac_id: str,
+    expected_distribution_domain: str,
+    expected_stage: str = "staging",
+    expected_distribution_id: str = "",
+    expected_auth_function_name: str = "",
+) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -179,6 +395,8 @@ def cloudfront_checks(path: str, bucket_domain: str, expected_oac_id: str, expec
     status = distribution.get("Status")
     if status != "Deployed":
         add_validation(checks, "distribution_status", "Deployed", status or "<missing>", "CLOUDFRONT_DISTRIBUTION_STATUS_INVALID", "CloudFront distribution status should be Deployed.")
+    if expected_distribution_id and distribution.get("Id") != expected_distribution_id:
+        add_validation(checks, "distribution_id", expected_distribution_id, distribution.get("Id") or "<missing>", "CLOUDFRONT_DISTRIBUTION_ID_MISMATCH", "Distribution ID does not match the stack output.")
     # AWS stores Enabled and DefaultRootObject under Distribution.DistributionConfig.
     if config.get("Enabled") is not True:
         add_validation(checks, "distribution_enabled", True, config.get("Enabled"), "CLOUDFRONT_DISTRIBUTION_DISABLED", "CloudFront distribution must be enabled.")
@@ -195,6 +413,8 @@ def cloudfront_checks(path: str, bucket_domain: str, expected_oac_id: str, expec
     origin = matching_origins[0] if matching_origins else {}
     if origin.get("OriginAccessControlId") != expected_oac_id:
         add_validation(checks, "origin_oac_id", expected_oac_id, origin.get("OriginAccessControlId") or "<missing>", "CLOUDFRONT_ORIGIN_OAC_MISMATCH", "Origin Access Control ID on the origin does not match the stack output.")
+    if not isinstance(origin.get("S3OriginConfig"), dict) or origin.get("CustomOriginConfig") is not None:
+        add_validation(checks, "private_s3_origin", "S3 origin through OAC", "non-S3 or custom origin", "CLOUDFRONT_PRIVATE_S3_ORIGIN_INVALID", "CloudFront must use the private S3 origin surface.")
 
     default_behavior = config.get("DefaultCacheBehavior", {}) if isinstance(config.get("DefaultCacheBehavior", {}), dict) else {}
     viewer_policy = default_behavior.get("ViewerProtocolPolicy")
@@ -204,17 +424,23 @@ def cloudfront_checks(path: str, bucket_domain: str, expected_oac_id: str, expec
     if cache_policy_id != "658327ea-f89d-4fab-a63d-7e88639e58f6":
         add_validation(checks, "cache_policy_id", "658327ea-f89d-4fab-a63d-7e88639e58f6", cache_policy_id or "<missing>", "CLOUDFRONT_CACHE_POLICY_INVALID", "Cache policy must use the required AWS-managed cache policy ID.")
     function_items = default_behavior.get("FunctionAssociations", {}).get("Items", []) if isinstance(default_behavior.get("FunctionAssociations", {}), dict) else []
-    has_viewer_request = sum(1 for x in function_items if x.get("EventType") == "viewer-request") == 1
-    if not has_viewer_request:
-        add_validation(checks, "viewer_request_function", 1, len([x for x in function_items if x.get("EventType") == "viewer-request"]), "CLOUDFRONT_FUNCTION_ASSOCIATION_INVALID", "Exactly one viewer-request CloudFront Function association is expected.")
+    viewer_request_items = [
+        item for item in function_items if item.get("EventType") == "viewer-request"
+    ]
+    expected_viewer_request_count = 1 if expected_stage == "staging" else 0
+    if len(viewer_request_items) != expected_viewer_request_count:
+        add_validation(checks, "viewer_request_function", expected_viewer_request_count, len(viewer_request_items), "CLOUDFRONT_FUNCTION_ASSOCIATION_INVALID", "Viewer-request CloudFront Function association does not match the selected stage.")
+    if expected_stage == "staging" and expected_auth_function_name and viewer_request_items:
+        function_arn = viewer_request_items[0].get("FunctionARN", "")
+        if not function_arn.endswith(f":function/{expected_auth_function_name}"):
+            add_validation(checks, "viewer_request_function_name", expected_auth_function_name, function_arn or "<missing>", "CLOUDFRONT_FUNCTION_IDENTITY_INVALID", "Staging Basic Auth function does not match the stack contract.")
     for error_code in (403, 404):
         match = next((item for item in error_items if str(item.get("ErrorCode")) == str(error_code) and str(item.get("ResponseCode")) == "200" and item.get("ResponsePagePath") == "/index.html"), None)
         if match is None:
             code_name = "CLOUDFRONT_SPA_403_FALLBACK_INVALID" if error_code == 403 else "CLOUDFRONT_SPA_404_FALLBACK_INVALID"
             add_validation(checks, f"spa_{error_code}_fallback", {"ResponseCode": 200, "ResponsePagePath": "/index.html"}, {"ErrorCode": error_code, "ResponseCode": None, "ResponsePagePath": None}, code_name, f"The {error_code} fallback must return /index.html with HTTP 200.")
 
-    failed = [item for item in checks if item["status"] == "FAIL"]
-    return {"passed": not failed, "checks": checks, "error_code": failed[0]["stable_error_code"] if failed else None}
+    return _checks_result(checks)
 
 
 def oac_checks(path: str, expected_oac_id: str) -> dict[str, Any]:
@@ -247,6 +473,18 @@ def main() -> int:
     template_parser.add_argument("path")
     stack_parser = sub.add_parser("stack-check")
     stack_parser.add_argument("path")
+    stack_contract_parser = sub.add_parser("stack-contract-verify")
+    stack_contract_parser.add_argument("path")
+    stack_contract_parser.add_argument("expected_stack_name")
+    stack_contract_parser.add_argument("expected_stage", choices=("staging", "prod"))
+    stack_contract_parser.add_argument("expected_bucket")
+    tags_parser = sub.add_parser("tags-verify")
+    tags_parser.add_argument("path")
+    tags_parser.add_argument("expected_stage", choices=("staging", "prod"))
+    bucket_policy_parser = sub.add_parser("bucket-policy-verify")
+    bucket_policy_parser.add_argument("path")
+    bucket_policy_parser.add_argument("expected_bucket")
+    bucket_policy_parser.add_argument("expected_distribution_arn")
     resource_parser = sub.add_parser("resource-check")
     resource_parser.add_argument("path")
     events_parser = sub.add_parser("events")
@@ -258,6 +496,14 @@ def main() -> int:
     cloudfront_parser.add_argument("bucket_domain")
     cloudfront_parser.add_argument("expected_oac_id")
     cloudfront_parser.add_argument("expected_distribution_domain")
+    cloudfront_parser.add_argument(
+        "expected_stage",
+        choices=("staging", "prod"),
+        nargs="?",
+        default="staging",
+    )
+    cloudfront_parser.add_argument("expected_distribution_id", nargs="?", default="")
+    cloudfront_parser.add_argument("expected_auth_function_name", nargs="?", default="")
     oac_parser = sub.add_parser("oac-verify")
     oac_parser.add_argument("oac_json")
     oac_parser.add_argument("expected_oac_id")
@@ -291,6 +537,27 @@ def main() -> int:
         print(json.dumps(result))
     elif args.command == "stack-check":
         print(json.dumps(stack_result(args.path)))
+    elif args.command == "stack-contract-verify":
+        result = stack_contract_checks(
+            args.path,
+            args.expected_stack_name,
+            args.expected_stage,
+            args.expected_bucket,
+        )
+        print(json.dumps(result))
+        return 0 if result["passed"] else 1
+    elif args.command == "tags-verify":
+        result = tag_checks(args.path, args.expected_stage)
+        print(json.dumps(result))
+        return 0 if result["passed"] else 1
+    elif args.command == "bucket-policy-verify":
+        result = bucket_policy_checks(
+            args.path,
+            args.expected_bucket,
+            args.expected_distribution_arn,
+        )
+        print(json.dumps(result))
+        return 0 if result["passed"] else 1
     elif args.command == "resource-check":
         print(json.dumps(resource_result(args.path)))
     elif args.command == "events":
@@ -298,7 +565,15 @@ def main() -> int:
     elif args.command == "sanitize-error":
         print(sanitized_error(args.path), end="")
     elif args.command == "cloudfront-verify":
-        result = cloudfront_checks(args.distribution_json, args.bucket_domain, args.expected_oac_id, args.expected_distribution_domain)
+        result = cloudfront_checks(
+            args.distribution_json,
+            args.bucket_domain,
+            args.expected_oac_id,
+            args.expected_distribution_domain,
+            args.expected_stage,
+            args.expected_distribution_id,
+            args.expected_auth_function_name,
+        )
         print(json.dumps(result))
         return 0 if result["passed"] else 1
     elif args.command == "oac-verify":

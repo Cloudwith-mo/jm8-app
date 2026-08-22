@@ -2,7 +2,7 @@
 
 **Current decision: NO-GO. Production is not deployed or ready.**
 
-By owner decision, the initial production deployment may share AWS account `114743615542` with dev and staging, provided production uses exact stage-scoped resources and the separate `jm8-prod` deployment profile/role. Separate-account isolation is deferred, not abandoned. Frontend hosting automation remains staging-only, and the other blocked gates below remain unresolved. No checklist item may be inferred complete from staging alone.
+By owner decision, the initial production deployment may share AWS account `114743615542` with dev and staging, provided production uses exact stage-scoped resources and the separate `jm8-prod` deployment profile/role. Separate-account isolation is deferred, not abandoned. The initial production frontend may use its generated CloudFront HTTPS hostname; custom-domain, ACM-certificate, and Route 53 integration are deferred. Production must not use the staging Basic Auth function. Production hosting automation is implemented but remains unverified until supported by actual production deployment evidence, and the other blocked gates below remain unresolved. No checklist item may be inferred complete from staging alone.
 
 ## Status legend
 
@@ -59,8 +59,8 @@ These results demonstrate that the design can work; they do not certify producti
 | Callback URLs | Required | Allow only exact production HTTPS callback URLs; verify the effective existing-client configuration because `create-auth` does not reconcile an existing client's URLs |
 | Logout URLs | Required | Allow only exact production HTTPS logout URLs; reject localhost and staging origins |
 | JWT authorizer | Required | Verify issuer and audience match only the production pool/client; every declared route except the webhook must be JWT-secured |
-| Custom frontend domain | Owner decision | Choose the production hostname and DNS ownership, or explicitly accept the CloudFront domain for launch |
-| ACM certificate | Required if custom domain | Request/validate a certificate in the region required by CloudFront, attach the exact certificate, and record renewal/DNS ownership |
+| Custom frontend domain | Deferred | Owner accepted the generated CloudFront HTTPS hostname for initial launch; record the owner, risk acceptance, and due date for custom-domain and Route 53 integration |
+| ACM certificate | Deferred | Not required while the generated CloudFront hostname is used; request and validate the CloudFront-region certificate before adding a custom domain |
 | Explicit TLS policy | Required if custom domain | Configure and verify an approved minimum TLS/security policy after the alternate domain and ACM certificate are attached |
 | Cognito custom domain | Owner decision | Decide whether the Hosted UI also needs a branded custom domain; document certificate/DNS impact |
 
@@ -68,13 +68,13 @@ These results demonstrate that the design can work; they do not certify producti
 
 | Gate | Status | Production requirement and evidence |
 | --- | --- | --- |
-| Production hosting automation | Blocked | Implement and review a production path; both current frontend scripts reject non-staging stages |
+| Production hosting automation | Required | The stage-aware production path is implemented; remain unverified until the exact production stack, bucket, OAC, distribution, tags, outputs, and deployment postconditions have actual production evidence |
 | Dedicated frontend bucket | Required | Use a production/account-scoped bucket distinct from raw uploads; block all public access, enforce ownership, encryption, HTTPS, versioning, and lifecycle |
 | CloudFront OAC | Required | Permit reads only from the exact production distribution through OAC/SigV4; verify no public S3 website path |
 | SPA behavior | Required | Verify default root and 403/404 fallback to `/index.html` without caching errors |
 | Cache policy | Required | Keep hashed assets immutable and long-lived, `index.html` no-store, and non-hashed content revalidating |
 | Invalidation | Required | Use `invalidation-completed`; verify a release is visible globally before traffic acceptance |
-| Staging Basic Auth behavior | Owner decision | Explicitly remove it from production or approve a separate access-control design; do not carry the staging digest/function forward accidentally |
+| Staging Basic Auth behavior | Required | Preserve staging Basic Auth exactly; production Basic Auth is explicitly rejected and the production distribution must have no viewer-request function association |
 | Frontend build contract | Required | Build with production API/Cognito values only; scan `dist` for source maps, secrets, staging endpoints, and localhost |
 | CloudFront logging/WAF | Deferred or owner decision | Decide before launch; if deferred, record abuse/forensics risk, owner, and due date |
 
@@ -179,7 +179,7 @@ All **Blocked** items must be resolved. Every **Required** item must be verified
 | Security owner | Blocked | Signed security/privacy/IAM/secret review |
 | Operations owner | Blocked | Monitoring, confirmed alerts, incident response, backup restore, and rollback evidence |
 | Billing owner | Blocked | Live catalog, secret, webhook, test/financial controls, and customer-support readiness |
-| Product/data owner | Blocked | Domain/Basic Auth decisions, model quality, retention, and user-communication approval |
+| Product/data owner | Blocked | CloudFront-hostname launch and no-production-Basic-Auth decisions are recorded; model quality, retention, user communication, and deferred custom-domain ownership still require approval/evidence |
 | Final go/no-go | Blocked | Timestamped unanimous approval after all gates above; otherwise remain NO-GO |
 
 Phase 1 environment-contract support does not authorize production deployment. Production remains **NO-GO** until every other **Blocked** gate is resolved, every **Required** gate is evidenced, every deferral is accepted, and the final status is explicitly changed to **Verified** by the named owners.

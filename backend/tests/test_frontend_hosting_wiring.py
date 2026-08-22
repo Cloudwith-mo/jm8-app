@@ -124,9 +124,13 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertIn("ErrorCachingMinTTL: 0", self.template)
         self.assertIn("DefaultRootObject: index.html", self.template)
 
-    def test_cloudfront_function_basic_auth_is_required(self):
+    def test_cloudfront_function_basic_auth_is_staging_only(self):
+        self.assertIn("IsStaging: !Equals [!Ref Stage, staging]", self.template)
+        self.assertIn("Condition: IsStaging", self.template)
         self.assertIn("viewer-request", self.template)
         self.assertIn("FunctionAssociations", self.template)
+        self.assertIn("FunctionAssociations: !If", self.template)
+        self.assertIn("!Ref AWS::NoValue", self.template)
         self.assertIn("FunctionConfig:", self.template)
         self.assertIn("Comment: JM8 staging basic authentication", self.template)
         self.assertIn("Runtime: cloudfront-js-2.0", self.template)
@@ -155,6 +159,9 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertNotIn("-H \"Authorization: Basic", self.deploy_script)
         self.assertIn("curl --config -", self.deploy_script)
         self.assertIn("auth_header=\"Authorization: Basic", self.deploy_script)
+        self.assertIn('if [[ "$STAGE" == "staging" ]]', self.create_script)
+        self.assertIn('AUTH_DIGEST=""', self.create_script)
+        self.assertIn('PARAMETER_OVERRIDES+=("AuthorizationDigest=$AUTH_DIGEST")', self.create_script)
 
     def test_create_post_deploy_state_and_output_validation(self):
         self.assertIn("CREATE_COMPLETE|UPDATE_COMPLETE", self.create_script)
@@ -164,6 +171,8 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertIn('DISTRIBUTION_DOMAIN" != *.cloudfront.net', self.create_script)
         self.assertNotIn("stack-create-complete", self.create_script)
         self.assertNotIn("stack-update-complete", self.create_script)
+        self.assertIn("stack-contract-verify", self.create_script)
+        self.assertIn('--tags "App=$APP_NAME" "Stage=$STAGE" "ManagedBy=aws-cli"', self.create_script)
 
     def test_create_verifies_actual_s3_settings(self):
         self.assertIn("BlockPublicAcls", self.create_script)
@@ -174,6 +183,9 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertIn('!= "AES256"', self.create_script)
         self.assertIn('!= "BucketOwnerEnforced"', self.create_script)
         self.assertIn('!= "Enabled"', self.create_script)
+        self.assertIn("get-bucket-tagging", self.create_script)
+        self.assertIn("get-bucket-policy", self.create_script)
+        self.assertIn("bucket-policy-verify", self.create_script)
 
     def test_website_check_accepts_only_missing_configuration(self):
         self.assertIn("WEBSITE_ERROR_FILE", self.create_script)
@@ -203,6 +215,8 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertIn("CustomErrorResponses", self.template)
         self.assertIn("ERROR_CODE", self.create_script)
         self.assertIn("/index.html", self.create_script)
+        self.assertIn("list-tags-for-resource", self.create_script)
+        self.assertIn('"$STAGE"', self.create_script)
 
     def test_create_script_has_no_upload_behavior(self):
         self.assertNotIn("aws s3 sync", self.create_script)
@@ -219,6 +233,9 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertLess(self.deploy_script.index("npm ci"), self.deploy_script.index("npm run test"))
         self.assertLess(self.deploy_script.index("npm run test"), self.deploy_script.index("npm run build:staging"))
         self.assertIn("npm run build:staging", self.deploy_script)
+        self.assertIn("npm run build:production", self.deploy_script)
+        self.assertIn(".env.production.local", self.deploy_script)
+        self.assertIn("node scripts/validate_production_build.mjs dist", self.deploy_script)
         self.assertIn("aws s3 sync dist/ \"s3://${FRONTEND_BUCKET}\"", self.deploy_script)
         self.assertIn("--delete", self.deploy_script)
         self.assertIn("--cache-control \"no-cache\"", self.deploy_script)
@@ -233,6 +250,8 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertNotIn("invalidation-deployed", self.deploy_script)
         self.assertIn('--distribution-id "$CLOUDFRONT_DISTRIBUTION_ID"', self.deploy_script)
         self.assertIn('--id "$INVALIDATION_ID"', self.deploy_script)
+        self.assertIn("aws cloudfront get-invalidation", self.deploy_script)
+        self.assertIn('"$INVALIDATION_STATUS" != "Completed"', self.deploy_script)
         self.assertIn("curl", self.deploy_script)
         self.assertIn("mktemp -d", self.deploy_script)
         self.assertIn("trap cleanup EXIT", self.deploy_script)
@@ -263,6 +282,24 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertNotIn("STRIPE_SECRET_KEY", self.create_script)
         self.assertNotIn("STRIPE_SECRET_KEY", self.deploy_script)
         self.assertNotIn("|| true", self.create_script)
+        self.assertNotIn("|| true", self.deploy_script)
+
+    def test_scripts_support_only_staging_and_production(self):
+        for source in (self.create_script, self.deploy_script):
+            self.assertIn("staging|prod", source)
+            self.assertNotIn("staging-only", source)
+        self.assertIn('[[ "$AWS_PROFILE" != "jm8-prod" ]]', self.create_script)
+        self.assertIn('[[ "$AWS_PROFILE" != "jm8-prod" ]]', self.deploy_script)
+        self.assertIn("journalm8-prod-frontend-114743615542", self.create_script)
+        self.assertIn("journalm8-prod-frontend-114743615542", self.deploy_script)
+
+    def test_production_does_not_use_staging_basic_auth_health_checks(self):
+        self.assertIn('if [[ "$STAGE" == "staging" ]]', self.deploy_script)
+        self.assertIn(
+            "production frontend health checks must return 200 without Basic Auth",
+            self.deploy_script,
+        )
+        self.assertIn("expected_viewer_request_count = 1 if expected_stage == \"staging\" else 0", self.diagnostics_helper)
 
     def test_amplify_files_are_absent(self):
         self.assertFalse(AMPLIFY_FILE.exists())
@@ -320,7 +357,11 @@ class FrontendHostingWiringTests(unittest.TestCase):
                     "DistributionConfig": {
                         "Enabled": True,
                         "DefaultRootObject": "index.html",
-                        "Origins": {"Items": [{"DomainName": "bucket.s3.amazonaws.com", "OriginAccessControlId": "GOOD_OAC_123"}]},
+                        "Origins": {"Items": [{
+                            "DomainName": "bucket.s3.amazonaws.com",
+                            "OriginAccessControlId": "GOOD_OAC_123",
+                            "S3OriginConfig": {"OriginAccessIdentity": ""},
+                        }]},
                         "DefaultCacheBehavior": {
                             "ViewerProtocolPolicy": "redirect-to-https",
                             "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
@@ -351,6 +392,182 @@ class FrontendHostingWiringTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertTrue(payload["passed"])
             self.assertIsNone(payload["error_code"])
+
+    def test_cloudfront_helper_rejects_basic_auth_for_production(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dist_path = Path(tmpdir) / "distribution.json"
+            dist_path.write_text(json.dumps({
+                "Distribution": {
+                    "Id": "PRODDIST123",
+                    "Status": "Deployed",
+                    "DomainName": "prod.cloudfront.net",
+                    "DistributionConfig": {
+                        "Enabled": True,
+                        "DefaultRootObject": "index.html",
+                        "Origins": {"Items": [{
+                            "DomainName": "prod-bucket.s3.amazonaws.com",
+                            "OriginAccessControlId": "PROD_OAC_123",
+                            "S3OriginConfig": {"OriginAccessIdentity": ""},
+                        }]},
+                        "DefaultCacheBehavior": {
+                            "ViewerProtocolPolicy": "redirect-to-https",
+                            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                            "FunctionAssociations": {"Items": [{"EventType": "viewer-request"}]},
+                        },
+                        "CustomErrorResponses": {"Items": [
+                            {"ErrorCode": 403, "ResponsePagePath": "/index.html", "ResponseCode": "200"},
+                            {"ErrorCode": 404, "ResponsePagePath": "/index.html", "ResponseCode": "200"},
+                        ]},
+                    },
+                }
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(DIAGNOSTICS_HELPER),
+                    "cloudfront-verify",
+                    str(dist_path),
+                    "prod-bucket.s3.amazonaws.com",
+                    "PROD_OAC_123",
+                    "prod.cloudfront.net",
+                    "prod",
+                    "PRODDIST123",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                json.loads(result.stdout)["error_code"],
+                "CLOUDFRONT_FUNCTION_ASSOCIATION_INVALID",
+            )
+            payload = json.loads(dist_path.read_text(encoding="utf-8"))
+            payload["Distribution"]["DistributionConfig"][
+                "DefaultCacheBehavior"
+            ]["FunctionAssociations"] = {"Quantity": 0}
+            dist_path.write_text(json.dumps(payload), encoding="utf-8")
+            accepted = subprocess.run(
+                [
+                    sys.executable,
+                    str(DIAGNOSTICS_HELPER),
+                    "cloudfront-verify",
+                    str(dist_path),
+                    "prod-bucket.s3.amazonaws.com",
+                    "PROD_OAC_123",
+                    "prod.cloudfront.net",
+                    "prod",
+                    "PRODDIST123",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stdout)
+
+    def test_stack_tags_and_parameters_are_verified_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stack_path = Path(tmpdir) / "stack.json"
+            stack_path.write_text(json.dumps({
+                "Stacks": [{
+                    "StackName": "journalm8-prod-frontend-hosting",
+                    "StackStatus": "CREATE_COMPLETE",
+                    "Parameters": [
+                        {"ParameterKey": "AppName", "ParameterValue": "journalm8"},
+                        {"ParameterKey": "Stage", "ParameterValue": "prod"},
+                        {
+                            "ParameterKey": "FrontendBucketName",
+                            "ParameterValue": "journalm8-prod-frontend-114743615542",
+                        },
+                    ],
+                    "Tags": [
+                        {"Key": "App", "Value": "journalm8"},
+                        {"Key": "Stage", "Value": "prod"},
+                        {"Key": "ManagedBy", "Value": "aws-cli"},
+                    ],
+                    "Outputs": [],
+                }]
+            }), encoding="utf-8")
+            command = [
+                sys.executable,
+                str(DIAGNOSTICS_HELPER),
+                "stack-contract-verify",
+                str(stack_path),
+                "journalm8-prod-frontend-hosting",
+                "prod",
+                "journalm8-prod-frontend-114743615542",
+            ]
+            accepted = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stdout)
+
+            payload = json.loads(stack_path.read_text(encoding="utf-8"))
+            payload["Stacks"][0]["Tags"][1]["Value"] = "staging"
+            stack_path.write_text(json.dumps(payload), encoding="utf-8")
+            rejected = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertEqual(
+                json.loads(rejected.stdout)["error_code"],
+                "STACK_TAG_MISMATCH",
+            )
+
+    def test_exact_bucket_policy_contract_is_verified(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            policy_path = Path(tmpdir) / "policy.json"
+            bucket = "journalm8-prod-frontend-114743615542"
+            distribution_arn = (
+                "arn:aws:cloudfront::114743615542:distribution/PRODDIST123"
+            )
+            policy_path.write_text(json.dumps({
+                "Policy": json.dumps({
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {"Service": "cloudfront.amazonaws.com"},
+                            "Action": "s3:GetObject",
+                            "Resource": f"arn:aws:s3:::{bucket}/*",
+                            "Condition": {
+                                "StringEquals": {"AWS:SourceArn": distribution_arn}
+                            },
+                        },
+                        {
+                            "Effect": "Deny",
+                            "Principal": "*",
+                            "Action": "s3:*",
+                            "Resource": [
+                                f"arn:aws:s3:::{bucket}",
+                                f"arn:aws:s3:::{bucket}/*",
+                            ],
+                            "Condition": {
+                                "Bool": {"aws:SecureTransport": "false"}
+                            },
+                        },
+                    ]
+                })
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(DIAGNOSTICS_HELPER),
+                    "bucket-policy-verify",
+                    str(policy_path),
+                    bucket,
+                    distribution_arn,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_create_script_reports_and_sanitizes_diagnostics(self):
         self.assertIn('mkdir -p "$DIAGNOSTICS_DIR"', self.create_script)

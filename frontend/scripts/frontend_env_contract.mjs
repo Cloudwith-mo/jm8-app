@@ -17,6 +17,9 @@ const DEV_IDENTIFIERS = ["localhost", "127.0.0.1", "-dev", "dev."];
 const STAGING_IDENTIFIERS = ["localhost", "127.0.0.1", "-staging", "staging."];
 
 export function getApprovedModeLocalFiles(mode) {
+  if (mode === "production") {
+    return [".env.production.local"];
+  }
   return [`.env.${mode}.local`, `.env.${mode}`];
 }
 
@@ -78,6 +81,43 @@ export function validateFrontendEnv(env, options = {}) {
       "Legacy .env.local is not allowed for staging/production builds. "
       + "Migrate values to .env.development.local."
     );
+  }
+
+  if (mode === "production") {
+    if (options.hasProductionLocal !== true) {
+      throw new Error(
+        "Production frontend configuration requires .env.production.local"
+      );
+    }
+    if (options.hasProductionEnv === true) {
+      throw new Error(
+        "Production frontend configuration must not use .env.production"
+      );
+    }
+    if (options.hasGenericEnv === true) {
+      throw new Error(
+        "Production frontend configuration must not use generic .env"
+      );
+    }
+    const secretVariable = Object.keys(env).find(
+      (name) => name.startsWith("VITE_")
+        && /(SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)/i.test(name)
+    );
+    if (secretVariable) {
+      throw new Error(
+        `Production frontend configuration contains forbidden variable ${secretVariable}`
+      );
+    }
+    const secretValueVariable = Object.keys(env).find((name) => {
+      if (!name.startsWith("VITE_")) return false;
+      const value = String(env[name] || "");
+      return /(?:sk_(?:live|test)_|whsec_|AKIA[0-9A-Z]{16})/.test(value);
+    });
+    if (secretValueVariable) {
+      throw new Error(
+        `Production frontend configuration contains a secret-like value in ${secretValueVariable}`
+      );
+    }
   }
 
   const missing = REQUIRED_VARIABLES.filter((name) => {

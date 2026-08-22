@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: JM8 private S3 + CloudFront hosting for the staging frontend.
+Description: JM8 private S3 + CloudFront hosting for staging and production.
 
 Parameters:
   AppName:
@@ -8,7 +8,6 @@ Parameters:
   Stage:
     Type: String
     AllowedValues:
-      - dev
       - staging
       - prod
   FrontendBucketName:
@@ -17,7 +16,11 @@ Parameters:
   AuthorizationDigest:
     Type: String
     NoEcho: true
+    Default: ''
     Description: SHA-256 digest of the full Basic Authorization header.
+
+Conditions:
+  IsStaging: !Equals [!Ref Stage, staging]
 
 Resources:
   FrontendBucket:
@@ -49,11 +52,11 @@ Resources:
               DaysAfterInitiation: 7
       Tags:
         - Key: App
-          Value: journalm8
+          Value: !Ref AppName
         - Key: Stage
           Value: !Ref Stage
         - Key: ManagedBy
-          Value: cloudformation
+          Value: aws-cli
         - Key: DataClassification
           Value: PublicFrontendAssets
 
@@ -68,6 +71,7 @@ Resources:
 
   FrontendAuthFunction:
     Type: AWS::CloudFront::Function
+    Condition: IsStaging
     Properties:
       Name: !Sub "${AWS::StackName}-basic-auth"
       AutoPublish: true
@@ -108,10 +112,24 @@ Resources:
             }
           };
         }
+      Tags:
+        - Key: App
+          Value: !Ref AppName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: aws-cli
 
   FrontendDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
+      Tags:
+        - Key: App
+          Value: !Ref AppName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: ManagedBy
+          Value: aws-cli
       DistributionConfig:
         Enabled: true
         IPV6Enabled: true
@@ -135,9 +153,11 @@ Resources:
           CachedMethods:
             - GET
             - HEAD
-          FunctionAssociations:
-            - EventType: viewer-request
-              FunctionARN: !GetAtt FrontendAuthFunction.FunctionMetadata.FunctionARN
+          FunctionAssociations: !If
+            - IsStaging
+            - - EventType: viewer-request
+                FunctionARN: !GetAtt FrontendAuthFunction.FunctionMetadata.FunctionARN
+            - !Ref AWS::NoValue
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200

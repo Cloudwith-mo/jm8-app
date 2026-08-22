@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "build:dev": "VITE_APP_STAGE=dev tsc -b && VITE_APP_STAGE=dev vite build --mode development",
     "build:staging": "VITE_APP_STAGE=staging tsc -b && VITE_APP_STAGE=staging vite build --mode staging",
-    "build:prod": "VITE_APP_STAGE=prod tsc -b && VITE_APP_STAGE=prod vite build --mode production",
+    "build:production": "tsc -b && vite build --mode production",
+    "build:prod": "npm run build:production",
     "test": "node --test scripts/frontend_env_contract.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
