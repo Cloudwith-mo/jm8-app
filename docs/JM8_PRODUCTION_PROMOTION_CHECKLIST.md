@@ -2,7 +2,7 @@
 
 **Current decision: NO-GO. Production is not deployed or ready.**
 
-The repository intentionally blocks `STAGE=prod` because a separate production AWS account has not been configured. In addition, `backend/bin/create-frontend-hosting` and `backend/bin/deploy-frontend` are staging-only. No checklist item may be inferred complete from staging alone.
+By owner decision, the initial production deployment may share AWS account `114743615542` with dev and staging, provided production uses exact stage-scoped resources and the separate `jm8-prod` deployment profile/role. Separate-account isolation is deferred, not abandoned. Frontend hosting automation remains staging-only, and the other blocked gates below remain unresolved. No checklist item may be inferred complete from staging alone.
 
 ## Status legend
 
@@ -36,10 +36,12 @@ These results demonstrate that the design can work; they do not certify producti
 
 | Gate | Status | Production requirement and evidence |
 | --- | --- | --- |
-| Separate production AWS account | Blocked | Provision a production account distinct from the current dev/staging account; record organization, billing, security-contact, and break-glass ownership |
-| Production environment contract | Blocked | Update and review `backend/bin/jm8_environment_contract.py`; current code rejects every production deployment even with a separate account |
-| Production confirmation guard | Required | Require exact `STAGE=prod`, `DEPLOY_CONFIRMATION=prod`, expected account, profile, region, and stage-scoped names before any mutation |
-| Production AWS identity | Required | Record read-only STS evidence that the deployment principal and `${EXPECTED_AWS_ACCOUNT_ID}` are the approved production account |
+| Separate production AWS account | Deferred | Owner accepted stage-scoped same-account isolation for initial production. Record the owner, risk acceptance, compensating controls, migration trigger, and due date for revisiting separate-account isolation |
+| Same-account stage isolation | Required | Require exact `PRODUCTION_ISOLATION_MODE=stage-scoped-same-account` and exact production table and account-scoped bucket names; reject dev/staging references |
+| Production environment contract | Required | Use the reviewed fail-closed production contract; prove all exact production controls pass before any deployment mutation |
+| Production confirmation guard | Required | Require exact `STAGE=prod`, `DEPLOY_CONFIRMATION=prod`, `AWS_PROFILE=jm8-prod`, account `114743615542`, region, and stage-scoped names before any mutation |
+| Production AWS identity | Required | Record read-only STS evidence that the `jm8-prod` principal and `${EXPECTED_AWS_ACCOUNT_ID}` are both account `114743615542` |
+| Separate production deploy role/profile | Required | Provision and use only the distinct `jm8-prod` role/profile for production; do not use the dev or staging deployment identity |
 | Least-privilege deploy principal | Required | Review permissions needed by each script; avoid daily admin credentials and define short-lived operator access |
 | Environment file | Required | Create an ignored production base environment from `backend/infra/environments/prod.env.example`; include safe configuration only |
 | Stage resource names | Required | Require `${APP_NAME}-prod-*`, `${APP_NAME}-prod-main`, and account-scoped production buckets; reject dev/staging references |
@@ -51,7 +53,7 @@ These results demonstrate that the design can work; they do not certify producti
 
 | Gate | Status | Production requirement and evidence |
 | --- | --- | --- |
-| Production user pool | Blocked | After guard support exists, create a separate `${APP_NAME}-prod-users`; do not reuse staging users or pool |
+| Production user pool | Blocked | Create a separate `${APP_NAME}-prod-users`; do not reuse staging users or pool |
 | Production app client | Blocked | Create a separate `${APP_NAME}-prod-web`, no client secret, authorization-code flow with PKCE |
 | Production Cognito domain | Blocked | Create a production-only Hosted UI domain and record issuer/client IDs in the ignored production generated file |
 | Callback URLs | Required | Allow only exact production HTTPS callback URLs; verify the effective existing-client configuration because `create-auth` does not reconcile an existing client's URLs |
@@ -108,7 +110,7 @@ These results demonstrate that the design can work; they do not certify producti
 | Gate | Status | Production requirement and evidence |
 | --- | --- | --- |
 | Live-mode account readiness | Blocked | Billing owner must approve legal/business settings, tax, branding, support, statement descriptor, and payout access |
-| Live product and price | Required | Run the idempotent catalog setup only after production guard support; verify JM8 Pro amount, currency, interval, lookup key, and live mode |
+| Live product and price | Required | Run the idempotent catalog setup only after its production path is approved; verify JM8 Pro amount, currency, interval, lookup key, and live mode |
 | Live API credential | Required | Inject only for catalog/secret provisioning; never store in `.env`, generated files, Lambda environment, logs, tickets, or frontend |
 | Secrets Manager object | Required | Create `${APP_NAME}/prod/stripe` in the production account; verify ARN, tags, encryption policy, and exact API-role read permission |
 | Live webhook endpoint | Required | Create the exact production HTTPS endpoint and subscribe only to handled events |
@@ -180,7 +182,7 @@ All **Blocked** items must be resolved. Every **Required** item must be verified
 | Product/data owner | Blocked | Domain/Basic Auth decisions, model quality, retention, and user-communication approval |
 | Final go/no-go | Blocked | Timestamped unanimous approval after all gates above; otherwise remain NO-GO |
 
-Do not deploy production until this final status is explicitly changed to **Verified** by the named owners.
+Phase 1 environment-contract support does not authorize production deployment. Production remains **NO-GO** until every other **Blocked** gate is resolved, every **Required** gate is evidenced, every deferral is accepted, and the final status is explicitly changed to **Verified** by the named owners.
 
 ## 12. Related documentation
 

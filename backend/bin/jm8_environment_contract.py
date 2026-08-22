@@ -11,10 +11,11 @@ Environment Contract:
 - AWS_REGION must be explicitly set
 - AWS_PROFILE must be explicitly set
 - EXPECTED_AWS_ACCOUNT_ID must be explicitly configured and match actual STS account
-- dev/staging currently require account 114743615542
-- prod must fail (no production account configured yet)
+- dev/staging/prod currently require account 114743615542
+- prod requires AWS_PROFILE=jm8-prod and explicit same-account isolation acknowledgment
 - TABLE_NAME must match ${APP_NAME}-${STAGE}-main
 - RAW_BUCKET must match ${APP_NAME}-${STAGE}-raw-${ACCOUNT_ID}
+- prod FRONTEND_BUCKET must match ${APP_NAME}-prod-frontend-${ACCOUNT_ID}
 - Non-dev URLs cannot contain localhost or 127.0.0.1
 - Stripe credentials must be test mode (sk_test_*) for dev/staging
 - Production requires live mode (sk_live_*) but secrets are never logged
@@ -23,7 +24,8 @@ Environment Contract:
 Confirmation Gates:
 - dev: no confirmation required
 - staging: requires DEPLOY_CONFIRMATION=staging environment variable
-- prod: requires DEPLOY_CONFIRMATION=prod plus separate AWS account
+- prod: requires DEPLOY_CONFIRMATION=prod, AWS_PROFILE=jm8-prod, and
+  PRODUCTION_ISOLATION_MODE=stage-scoped-same-account
 """
 
 import json
@@ -32,8 +34,31 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 from urllib.parse import urlsplit
+
+
+JM8_AWS_ACCOUNT_ID = "114743615542"
+PRODUCTION_AWS_PROFILE = "jm8-prod"
+PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
+
+PRODUCTION_SCOPED_REFERENCE_KEYS = {
+    "TABLE_NAME",
+    "RAW_BUCKET",
+    "FRONTEND_BUCKET",
+    "API_NAME",
+    "API_ENDPOINT",
+    "FRONTEND_ORIGIN",
+    "ALLOWED_ORIGINS",
+    "STRIPE_SECRET_ARN",
+    "STRIPE_CHECKOUT_SUCCESS_URL",
+    "STRIPE_CHECKOUT_CANCEL_URL",
+    "STRIPE_PORTAL_RETURN_URL",
+    "COGNITO_DOMAIN",
+    "COGNITO_ISSUER",
+    "CALLBACK_URL",
+    "LOGOUT_URL",
+}
 
 
 class EnvironmentContractError(Exception):
@@ -127,22 +152,63 @@ def validate_aws_configuration(
 def validate_stage_account_mapping(stage: str, account_id: str) -> None:
     """
     Validate that the stage and account match the deployment policy.
-    - dev/staging: must be 114743615542
-    - prod: must be a separate (not yet configured) account
+    - dev/staging/prod: must be 114743615542
+    - prod's additional isolation controls are validated separately
     """
-    if stage in {"dev", "staging"}:
-        allowed_account = "114743615542"
-        if account_id != allowed_account:
+    if stage in {"dev", "staging", "prod"}:
+        if account_id != JM8_AWS_ACCOUNT_ID:
             raise EnvironmentContractError(
-                f"STAGE={stage} requires AWS account {allowed_account}, "
+                f"STAGE={stage} requires AWS account {JM8_AWS_ACCOUNT_ID}, "
                 f"but EXPECTED_AWS_ACCOUNT_ID={account_id}"
             )
-    elif stage == "prod":
+
+
+def validate_production_isolation_controls(
+    stage: str,
+    aws_profile: str,
+    expected_account_id: str,
+    isolation_mode: str,
+) -> None:
+    """Require the owner-approved same-account production isolation controls."""
+    if stage != "prod":
+        return
+
+    if aws_profile != PRODUCTION_AWS_PROFILE:
         raise EnvironmentContractError(
-            "STAGE=prod is not yet configured. Production requires a separate "
-            "AWS account. Configure the production account ID in your deployment "
-            "pipeline before proceeding."
+            "STAGE=prod requires AWS_PROFILE=jm8-prod"
         )
+
+    if expected_account_id != JM8_AWS_ACCOUNT_ID:
+        raise EnvironmentContractError(
+            f"STAGE=prod requires EXPECTED_AWS_ACCOUNT_ID={JM8_AWS_ACCOUNT_ID}"
+        )
+
+    if isolation_mode != PRODUCTION_ISOLATION_MODE:
+        raise EnvironmentContractError(
+            "STAGE=prod requires PRODUCTION_ISOLATION_MODE="
+            "stage-scoped-same-account"
+        )
+
+
+def validate_production_resource_references(
+    stage: str,
+    environment: Mapping[str, str],
+) -> None:
+    """Reject obvious dev/staging references in production-scoped settings."""
+    if stage != "prod":
+        return
+
+    cross_stage_pattern = re.compile(
+        r"(^|[./:_-])(dev|staging)([./:_-]|$)",
+        re.IGNORECASE,
+    )
+
+    for key in sorted(PRODUCTION_SCOPED_REFERENCE_KEYS):
+        value = str(environment.get(key) or "").strip()
+        if value and cross_stage_pattern.search(value):
+            raise EnvironmentContractError(
+                f"{key} must not reference dev or staging resources for STAGE=prod"
+            )
 
 
 def validate_resource_names(
@@ -173,7 +239,7 @@ def validate_frontend_bucket_name(
     account_id: str,
     raw_bucket: str,
 ) -> None:
-    """Validate the staging frontend bucket naming contract."""
+    """Validate the stage-scoped frontend bucket naming contract."""
     if not frontend_bucket:
         raise EnvironmentContractError("FRONTEND_BUCKET is required")
     expected_bucket = f"{app_name}-{stage}-frontend-{account_id}"
@@ -368,10 +434,26 @@ def validate_environment_contract() -> dict:
     expected_account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
     table_name = os.environ.get("TABLE_NAME", "").strip()
     raw_bucket = os.environ.get("RAW_BUCKET", "").strip()
+    frontend_bucket = os.environ.get("FRONTEND_BUCKET", "").strip()
+    production_isolation_mode = os.environ.get(
+        "PRODUCTION_ISOLATION_MODE",
+        "",
+    ).strip()
 
     # Basic validation
     validate_app_name(app_name)
     validate_stage(stage)
+
+    # Production controls are checked before STS so an unapproved profile or
+    # incomplete same-account acknowledgment cannot initiate even a read call.
+    if stage == "prod":
+        validate_confirmation_gate(stage)
+        validate_production_isolation_controls(
+            stage,
+            aws_profile,
+            expected_account_id,
+            production_isolation_mode,
+        )
 
     # AWS validation
     actual_account_id = validate_aws_configuration(aws_region, aws_profile, expected_account_id)
@@ -380,7 +462,16 @@ def validate_environment_contract() -> dict:
     validate_stage_account_mapping(stage, actual_account_id)
 
     # Resource naming
+    validate_production_resource_references(stage, os.environ)
     validate_resource_names(app_name, stage, table_name, raw_bucket, actual_account_id)
+    if stage == "prod":
+        validate_frontend_bucket_name(
+            app_name,
+            stage,
+            frontend_bucket,
+            actual_account_id,
+            raw_bucket,
+        )
 
     # Optional: Stripe (if provided)
     stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "").strip()
@@ -407,7 +498,8 @@ def validate_environment_contract() -> dict:
         validate_allowed_origins(stage, allowed_origins)
 
     # Confirmation gate
-    validate_confirmation_gate(stage)
+    if stage != "prod":
+        validate_confirmation_gate(stage)
 
     return {
         "app_name": app_name,
@@ -417,6 +509,8 @@ def validate_environment_contract() -> dict:
         "account_id": actual_account_id,
         "table_name": table_name,
         "raw_bucket": raw_bucket,
+        "frontend_bucket": frontend_bucket,
+        "production_isolation_mode": production_isolation_mode,
     }
 
 

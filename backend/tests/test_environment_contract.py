@@ -6,7 +6,7 @@ Validates that:
 1. Environment variables follow the contract
 2. Account validation prevents cross-stage deployment
 3. Staging requires confirmation
-4. Production is blocked until configured
+4. Production requires the approved same-account isolation controls
 5. Operation-specific script behavior remains safe
 """
 
@@ -37,6 +37,8 @@ from jm8_environment_contract import (  # noqa: E402
     validate_allowed_origins,
     validate_environment_contract,
     validate_operation_specific,
+    validate_production_isolation_controls,
+    validate_production_resource_references,
 )
 
 
@@ -84,6 +86,7 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "AWS_REGION",
         "AWS_PROFILE",
         "EXPECTED_AWS_ACCOUNT_ID",
+        "PRODUCTION_ISOLATION_MODE",
         "TABLE_NAME",
         "RAW_BUCKET",
         "DEPLOY_CONFIRMATION",
@@ -97,6 +100,18 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "CLOUDFRONT_DISTRIBUTION_ID",
         "STAGING_BASIC_AUTH_USERNAME",
         "STAGING_BASIC_AUTH_PASSWORD",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "STRIPE_CHECKOUT_SUCCESS_URL",
+        "STRIPE_CHECKOUT_CANCEL_URL",
+        "STRIPE_PORTAL_RETURN_URL",
+        "API_NAME",
+        "API_ENDPOINT",
+        "COGNITO_DOMAIN",
+        "COGNITO_ISSUER",
+        "CALLBACK_URL",
+        "LOGOUT_URL",
     }
 
     def setUp(self) -> None:
@@ -269,9 +284,43 @@ class TestAccountMapping(EnvironmentIsolationTestCase):
         with self.assertRaises(EnvironmentContractError):
             validate_stage_account_mapping("staging", "999999999999")
 
-    def test_prod_blocked_unconditionally(self):
+    def test_prod_requires_approved_same_account(self):
+        validate_stage_account_mapping("prod", "114743615542")
+
+    def test_prod_rejects_other_accounts(self):
         with self.assertRaises(EnvironmentContractError):
-            validate_stage_account_mapping("prod", "114743615542")
+            validate_stage_account_mapping("prod", "999999999999")
+
+
+class TestProductionIsolationControls(EnvironmentIsolationTestCase):
+
+    def test_exact_owner_approved_controls_pass(self):
+        validate_production_isolation_controls(
+            "prod",
+            "jm8-prod",
+            "114743615542",
+            "stage-scoped-same-account",
+        )
+
+    def test_non_production_stages_do_not_require_prod_acknowledgment(self):
+        for stage in ("dev", "staging"):
+            with self.subTest(stage=stage):
+                validate_production_isolation_controls(
+                    stage,
+                    "",
+                    "114743615542",
+                    "",
+                )
+
+    def test_cross_stage_reference_check_is_production_only(self):
+        validate_production_resource_references(
+            "dev",
+            {"TABLE_NAME": "journalm8-dev-main"},
+        )
+        validate_production_resource_references(
+            "staging",
+            {"TABLE_NAME": "journalm8-staging-main"},
+        )
 
 
 class TestConfirmationGates(EnvironmentIsolationTestCase):
@@ -306,9 +355,36 @@ class TestAWSAccountValidation(EnvironmentIsolationTestCase):
 
     @patch("jm8_environment_contract.subprocess.run")
     def test_sts_call_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="AccessDenied: credential lookup failed",
+        )
         account_id = get_actual_aws_account_id("jm8-dev", "us-east-1")
         self.assertIsNone(account_id)
+
+    @patch("jm8_environment_contract.subprocess.run")
+    def test_sts_malformed_success_response_fails_closed(self, mock_run):
+        for malformed in ("", "None\n", "not-an-account\n", "123\n"):
+            with self.subTest(response=malformed):
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout=malformed,
+                    stderr="",
+                )
+                self.assertIsNone(
+                    get_actual_aws_account_id("jm8-prod", "us-east-1")
+                )
+
+    @patch(
+        "jm8_environment_contract.subprocess.run",
+        side_effect=OSError("network unavailable"),
+    )
+    def test_sts_network_failure_fails_closed(self, mock_run):
+        self.assertIsNone(
+            get_actual_aws_account_id("jm8-prod", "us-east-1")
+        )
+        mock_run.assert_called_once()
 
     @patch("jm8_environment_contract.subprocess.run")
     def test_validation_only_uses_read_only_sts_call(self, mock_run):
@@ -349,6 +425,22 @@ class TestAWSAccountValidation(EnvironmentIsolationTestCase):
 
 class TestCompleteContractValidation(EnvironmentIsolationTestCase):
 
+    @staticmethod
+    def _production_environment() -> dict[str, str]:
+        return {
+            "APP_NAME": "journalm8",
+            "STAGE": "prod",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-prod",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "PRODUCTION_ISOLATION_MODE": "stage-scoped-same-account",
+            "TABLE_NAME": "journalm8-prod-main",
+            "RAW_BUCKET": "journalm8-prod-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-prod-frontend-114743615542",
+            "DEPLOY_CONFIRMATION": "prod",
+            "STRIPE_SECRET_KEY": "",
+        }
+
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_valid_dev_environment(self, mock_sts):
         mock_sts.return_value = "114743615542"
@@ -386,22 +478,125 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         self.assertEqual(config["account_id"], "114743615542")
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
-    def test_production_always_blocked(self, mock_sts):
-        mock_sts.return_value = "999999999999"
-        os.environ.update({
-            "APP_NAME": "journalm8",
-            "STAGE": "prod",
-            "AWS_REGION": "us-east-1",
-            "AWS_PROFILE": "jm8-prod",
-            "EXPECTED_AWS_ACCOUNT_ID": "999999999999",
-            "TABLE_NAME": "journalm8-prod-main",
-            "RAW_BUCKET": "journalm8-prod-raw-999999999999",
-            "DEPLOY_CONFIRMATION": "prod",
-        })
+    def test_approved_same_account_production_environment(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        os.environ.update(self._production_environment())
+
+        config = validate_environment_contract()
+
+        self.assertEqual(config["stage"], "prod")
+        self.assertEqual(config["aws_profile"], "jm8-prod")
+        self.assertEqual(config["account_id"], "114743615542")
+        self.assertEqual(
+            config["production_isolation_mode"],
+            "stage-scoped-same-account",
+        )
+        mock_sts.assert_called_once_with("jm8-prod", "us-east-1")
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_rejects_dev_profile_before_sts(self, mock_sts):
+        environment = self._production_environment()
+        environment["AWS_PROFILE"] = "jm8-dev"
+        os.environ.update(environment)
 
         with self.assertRaises(EnvironmentContractError) as ctx:
             validate_environment_contract()
-        self.assertIn("not yet configured", str(ctx.exception))
+
+        self.assertIn("AWS_PROFILE=jm8-prod", str(ctx.exception))
+        mock_sts.assert_not_called()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_requires_exact_isolation_mode_before_sts(self, mock_sts):
+        for isolation_mode in ("", "same-account", "stage_scoped_same_account"):
+            with self.subTest(isolation_mode=isolation_mode):
+                environment = self._production_environment()
+                environment["PRODUCTION_ISOLATION_MODE"] = isolation_mode
+                os.environ.update(environment)
+
+                with self.assertRaises(EnvironmentContractError) as ctx:
+                    validate_environment_contract()
+
+                self.assertIn("PRODUCTION_ISOLATION_MODE", str(ctx.exception))
+
+        mock_sts.assert_not_called()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_rejects_incorrect_confirmation_before_sts(self, mock_sts):
+        for confirmation in ("", "staging", "PROD"):
+            with self.subTest(confirmation=confirmation):
+                environment = self._production_environment()
+                environment["DEPLOY_CONFIRMATION"] = confirmation
+                os.environ.update(environment)
+
+                with self.assertRaises(EnvironmentContractError) as ctx:
+                    validate_environment_contract()
+
+                self.assertIn("DEPLOY_CONFIRMATION=prod", str(ctx.exception))
+
+        mock_sts.assert_not_called()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_rejects_incorrect_expected_account_before_sts(self, mock_sts):
+        environment = self._production_environment()
+        environment["EXPECTED_AWS_ACCOUNT_ID"] = "999999999999"
+        os.environ.update(environment)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_environment_contract()
+
+        self.assertIn("EXPECTED_AWS_ACCOUNT_ID=114743615542", str(ctx.exception))
+        mock_sts.assert_not_called()
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_rejects_incorrect_actual_account(self, mock_sts):
+        mock_sts.return_value = "999999999999"
+        os.environ.update(self._production_environment())
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_environment_contract()
+
+        self.assertIn("account ID mismatch", str(ctx.exception))
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_rejects_dev_and_staging_resource_references(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        invalid_references = {
+            "TABLE_NAME": "journalm8-dev-main",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "FRONTEND_BUCKET": "journalm8-dev-frontend-114743615542",
+            "API_ENDPOINT": "https://journalm8-staging-api.example.com",
+        }
+
+        for key, value in invalid_references.items():
+            with self.subTest(key=key):
+                environment = self._production_environment()
+                environment[key] = value
+                os.environ.update(environment)
+
+                with self.assertRaises(EnvironmentContractError) as ctx:
+                    validate_environment_contract()
+
+                self.assertIn(key, str(ctx.exception))
+                self.assertIn("dev or staging", str(ctx.exception))
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_contract_errors_do_not_expose_credentials(self, mock_sts):
+        mock_sts.return_value = None
+        credentials = {
+            "AWS_ACCESS_KEY_ID": "EXAMPLE_ACCESS_CREDENTIAL",
+            "AWS_SECRET_ACCESS_KEY": "EXAMPLE_SECRET_CREDENTIAL",
+            "AWS_SESSION_TOKEN": "EXAMPLE_SESSION_CREDENTIAL",
+            "STRIPE_SECRET_KEY": "EXAMPLE_STRIPE_CREDENTIAL",
+        }
+        os.environ.update(self._production_environment())
+        os.environ.update(credentials)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_environment_contract()
+
+        message = str(ctx.exception)
+        for credential in credentials.values():
+            self.assertNotIn(credential, message)
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_create_auth_env_name_must_match_stage_when_set(self, mock_sts):
@@ -698,6 +893,81 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
 
 
 class TestTemplatesAndIgnoreRules(EnvironmentIsolationTestCase):
+
+    def test_prod_example_matches_same_account_isolation_contract(self):
+        content = (
+            BACKEND_ROOT
+            / "infra"
+            / "environments"
+            / "prod.env.example"
+        ).read_text(encoding="utf-8")
+
+        for assignment in (
+            "export STAGE=prod",
+            "export AWS_PROFILE=jm8-prod",
+            "export EXPECTED_AWS_ACCOUNT_ID=114743615542",
+            "export PRODUCTION_ISOLATION_MODE=stage-scoped-same-account",
+            "export DEPLOY_CONFIRMATION=prod",
+            "export TABLE_NAME=journalm8-prod-main",
+            "export RAW_BUCKET=journalm8-prod-raw-114743615542",
+            "export FRONTEND_BUCKET=journalm8-prod-frontend-114743615542",
+        ):
+            with self.subTest(assignment=assignment):
+                self.assertIn(assignment, content)
+
+    def test_prod_example_contains_only_secret_reference(self):
+        content = (
+            BACKEND_ROOT
+            / "infra"
+            / "environments"
+            / "prod.env.example"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("STRIPE_SECRET_KEY", content)
+        self.assertNotIn("STRIPE_WEBHOOK_SECRET", content)
+        self.assertIn(
+            "export STRIPE_SECRET_ARN="
+            "arn:aws:secretsmanager:us-east-1:114743615542:",
+            content,
+        )
+
+    def test_prod_example_uses_settings_checkout_urls(self):
+        content = (
+            BACKEND_ROOT
+            / "infra"
+            / "environments"
+            / "prod.env.example"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "export STRIPE_CHECKOUT_SUCCESS_URL="
+            "'https://app.journalm8.com/settings?checkout=success&"
+            "session_id={CHECKOUT_SESSION_ID}'",
+            content,
+        )
+        self.assertIn(
+            "export STRIPE_CHECKOUT_CANCEL_URL="
+            "'https://app.journalm8.com/settings?checkout=cancelled'",
+            content,
+        )
+        self.assertIn(
+            "export STRIPE_PORTAL_RETURN_URL="
+            "'https://app.journalm8.com/settings'",
+            content,
+        )
+
+    def test_environment_guard_introduces_no_permissive_bypass(self):
+        contract = (
+            BACKEND_ROOT / "bin" / "jm8_environment_contract.py"
+        ).read_text(encoding="utf-8")
+        shell_guard = (
+            BACKEND_ROOT / "bin" / "jm8_deployment_guard.sh"
+        ).read_text(encoding="utf-8")
+
+        for source in (contract, shell_guard):
+            self.assertNotIn("|| true", source)
+            self.assertNotIn("eval ", source)
+            self.assertNotIn("set -x", source)
 
     def test_templates_contain_no_real_secret_values(self):
         template_paths = [
