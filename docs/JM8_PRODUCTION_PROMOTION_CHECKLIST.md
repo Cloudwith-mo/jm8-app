@@ -37,7 +37,7 @@ These results demonstrate that the design can work; they do not certify producti
 | Gate | Status | Production requirement and evidence |
 | --- | --- | --- |
 | Separate production AWS account | Deferred | Owner accepted stage-scoped same-account isolation for initial production. Record the owner, risk acceptance, compensating controls, migration trigger, and due date for revisiting separate-account isolation |
-| Same-account stage isolation | Required | Require exact `PRODUCTION_ISOLATION_MODE=stage-scoped-same-account` and exact production table and account-scoped bucket names; reject dev/staging references |
+| Same-account stage isolation | Required | Allow only `journalm8-prod-*` production resources (including exact table, API, user-pool, and account-scoped bucket names) plus `journalm8/prod/stripe`; reject dev, staging, unrelated, cross-account, and cross-region AWS resources |
 | Production environment contract | Required | Use the reviewed fail-closed production contract; prove all exact production controls pass before any deployment mutation |
 | Production confirmation guard | Required | Require exact `STAGE=prod`, `DEPLOY_CONFIRMATION=prod`, `AWS_PROFILE=jm8-prod`, account `114743615542`, region, and stage-scoped names before any mutation |
 | Production AWS identity | Required | Record read-only STS evidence that the `jm8-prod` principal and `${EXPECTED_AWS_ACCOUNT_ID}` are both account `114743615542` |

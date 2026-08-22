@@ -16,6 +16,9 @@ Environment Contract:
 - TABLE_NAME must match ${APP_NAME}-${STAGE}-main
 - RAW_BUCKET must match ${APP_NAME}-${STAGE}-raw-${ACCOUNT_ID}
 - prod FRONTEND_BUCKET must match ${APP_NAME}-prod-frontend-${ACCOUNT_ID}
+- prod API_NAME must equal journalm8-prod-api when configured
+- prod STRIPE_SECRET_ARN must identify only journalm8/prod/stripe in the
+  expected region and account
 - Non-dev URLs cannot contain localhost or 127.0.0.1
 - Stripe credentials must be test mode (sk_test_*) for dev/staging
 - Production requires live mode (sk_live_*) but secrets are never logged
@@ -194,7 +197,7 @@ def validate_production_resource_references(
     stage: str,
     environment: Mapping[str, str],
 ) -> None:
-    """Reject obvious dev/staging references in production-scoped settings."""
+    """Require production-scoped names and reject unrelated AWS resources."""
     if stage != "prod":
         return
 
@@ -208,6 +211,43 @@ def validate_production_resource_references(
         if value and cross_stage_pattern.search(value):
             raise EnvironmentContractError(
                 f"{key} must not reference dev or staging resources for STAGE=prod"
+            )
+
+    api_name = str(environment.get("API_NAME") or "").strip()
+    if api_name and api_name != "journalm8-prod-api":
+        raise EnvironmentContractError(
+            "API_NAME must be 'journalm8-prod-api' for STAGE=prod"
+        )
+
+    user_pool_name = str(
+        environment.get("COGNITO_USER_POOL_NAME") or ""
+    ).strip()
+    if user_pool_name and user_pool_name != "journalm8-prod-users":
+        raise EnvironmentContractError(
+            "COGNITO_USER_POOL_NAME must be 'journalm8-prod-users' for STAGE=prod"
+        )
+
+    stripe_secret_arn = str(
+        environment.get("STRIPE_SECRET_ARN") or ""
+    ).strip()
+    if stripe_secret_arn:
+        expected_region = str(environment.get("AWS_REGION") or "").strip()
+        expected_account = str(
+            environment.get("EXPECTED_AWS_ACCOUNT_ID") or ""
+        ).strip()
+        secret_arn_pattern = re.compile(
+            r"^arn:aws:secretsmanager:([^:]+):([0-9]{12}):"
+            r"secret:journalm8/prod/stripe-[A-Za-z0-9]{6}$"
+        )
+        match = secret_arn_pattern.fullmatch(stripe_secret_arn)
+        if (
+            match is None
+            or match.group(1) != expected_region
+            or match.group(2) != expected_account
+        ):
+            raise EnvironmentContractError(
+                "STRIPE_SECRET_ARN must identify journalm8/prod/stripe in the "
+                "expected production region and account"
             )
 
 

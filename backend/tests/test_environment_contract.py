@@ -110,6 +110,7 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "API_ENDPOINT",
         "COGNITO_DOMAIN",
         "COGNITO_ISSUER",
+        "COGNITO_USER_POOL_NAME",
         "CALLBACK_URL",
         "LOGOUT_URL",
     }
@@ -437,8 +438,13 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "TABLE_NAME": "journalm8-prod-main",
             "RAW_BUCKET": "journalm8-prod-raw-114743615542",
             "FRONTEND_BUCKET": "journalm8-prod-frontend-114743615542",
+            "API_NAME": "journalm8-prod-api",
             "DEPLOY_CONFIRMATION": "prod",
             "STRIPE_SECRET_KEY": "",
+            "STRIPE_SECRET_ARN": (
+                "arn:aws:secretsmanager:us-east-1:114743615542:"
+                "secret:journalm8/prod/stripe-ABC123"
+            ),
         }
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
@@ -578,6 +584,51 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
 
                 self.assertIn(key, str(ctx.exception))
                 self.assertIn("dev or staging", str(ctx.exception))
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_rejects_unrelated_aws_resource_names(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        invalid_names = {
+            "API_NAME": "unrelated-api",
+            "COGNITO_USER_POOL_NAME": "unrelated-users",
+        }
+
+        for key, value in invalid_names.items():
+            with self.subTest(key=key):
+                environment = self._production_environment()
+                environment[key] = value
+                os.environ.update(environment)
+
+                with self.assertRaises(EnvironmentContractError) as ctx:
+                    validate_environment_contract()
+
+                self.assertIn(key, str(ctx.exception))
+                self.assertNotIn(value, str(ctx.exception))
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_prod_stripe_secret_arn_is_exactly_scoped(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        invalid_arns = (
+            "arn:aws:secretsmanager:us-west-2:114743615542:"
+            "secret:journalm8/prod/stripe-ABC123",
+            "arn:aws:secretsmanager:us-east-1:999999999999:"
+            "secret:journalm8/prod/stripe-ABC123",
+            "arn:aws:secretsmanager:us-east-1:114743615542:"
+            "secret:unrelated/secret-ABC123",
+            "malformed-secret-arn",
+        )
+
+        for secret_arn in invalid_arns:
+            with self.subTest(secret_arn=secret_arn):
+                environment = self._production_environment()
+                environment["STRIPE_SECRET_ARN"] = secret_arn
+                os.environ.update(environment)
+
+                with self.assertRaises(EnvironmentContractError) as ctx:
+                    validate_environment_contract()
+
+                self.assertIn("STRIPE_SECRET_ARN", str(ctx.exception))
+                self.assertNotIn(secret_arn, str(ctx.exception))
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_contract_errors_do_not_expose_credentials(self, mock_sts):
@@ -911,6 +962,7 @@ class TestTemplatesAndIgnoreRules(EnvironmentIsolationTestCase):
             "export TABLE_NAME=journalm8-prod-main",
             "export RAW_BUCKET=journalm8-prod-raw-114743615542",
             "export FRONTEND_BUCKET=journalm8-prod-frontend-114743615542",
+            "export API_NAME=journalm8-prod-api",
         ):
             with self.subTest(assignment=assignment):
                 self.assertIn(assignment, content)
