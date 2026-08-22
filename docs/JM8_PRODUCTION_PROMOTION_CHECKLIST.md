@@ -42,7 +42,7 @@ These results demonstrate that the design can work; they do not certify producti
 | Production confirmation guard | Required | Require exact `STAGE=prod`, `DEPLOY_CONFIRMATION=prod`, `AWS_PROFILE=jm8-prod`, account `114743615542`, region, and stage-scoped names before any mutation |
 | Production AWS identity | Required | Record read-only STS evidence that the `jm8-prod` principal and `${EXPECTED_AWS_ACCOUNT_ID}` are both account `114743615542` |
 | Separate production deploy role/profile | Required | Provision and use only the distinct `jm8-prod` role/profile for production; do not use the dev or staging deployment identity |
-| Least-privilege deploy principal | Required | Review permissions needed by each script; avoid daily admin credentials and define short-lived operator access |
+| Least-privilege deploy principal | Required | Provision only `journalm8-prod-deployer` through `jm8-dev`; attach the six reviewed, size-checked customer-managed policy groups, verify exact default versions and attachment isolation, require `App=journalm8`/`Stage=prod` tags wherever an AWS API exposes only opaque resource IDs, and restrict untaggable CloudFront OAC writes to CloudFormation-forwarded calls |
 | Environment file | Required | Create an ignored production base environment from `backend/infra/environments/prod.env.example`; include safe configuration only |
 | Stage resource names | Required | Require `${APP_NAME}-prod-*`, `${APP_NAME}-prod-main`, and account-scoped production buckets; reject dev/staging references |
 | Commit promotion | Required | Tag or otherwise immutably identify the exact reviewed commit; require clean worktree and passing release checks |

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required.}"
+: "${AWS_REGION:?AWS_REGION is required.}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required.}"
+
+if [ "$AWS_PROFILE" != "jm8-dev" ]; then
+  echo "Production deployer provisioning requires AWS_PROFILE=jm8-dev." >&2
+  exit 1
+fi
+
+if [ "$EXPECTED_AWS_ACCOUNT_ID" != "114743615542" ]; then
+  echo "Production deployer provisioning requires the approved AWS account." >&2
+  exit 1
+fi
+
+MODE="${1:-}"
+case "$MODE" in
+  generate|apply|verify)
+    ;;
+  *)
+    echo "Usage: provision-production-deployer {generate|apply|verify}" >&2
+    exit 1
+    ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUTPUT_DIR="${PRODUCTION_DEPLOYER_POLICY_OUTPUT_DIR:-$SCRIPT_DIR/../.build/production-deployer-policies}"
+
+python3 "$SCRIPT_DIR/jm8_production_deployer_policies.py" \
+  "$MODE" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION" \
+  --expected-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+  --output-dir "$OUTPUT_DIR"
