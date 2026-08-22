@@ -11,6 +11,7 @@ set -euo pipefail
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
 jm8_validate_contract_or_exit
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
@@ -567,6 +568,8 @@ ensure_lambda_function() {
     --region "$AWS_REGION" \
     >/dev/null 2>&1
   then
+    jm8_reconcile_lambda_tags "$function_name"
+
     echo "Updating Lambda: $function_name"
 
     aws lambda update-function-code \
@@ -621,6 +624,8 @@ ensure_lambda_function() {
       --function-name "$function_name" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION"
+
+    jm8_reconcile_lambda_tags "$function_name"
   fi
 }
 

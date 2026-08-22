@@ -22,6 +22,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
 source "$SCRIPT_DIR/jm8_bedrock_analysis_policy.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
 export JM8_OPERATION="deploy"
 jm8_validate_contract_or_exit
 
@@ -373,8 +374,12 @@ if [ "$FUNCTION_EXISTS" -ne 0 ]; then
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION"
 
+  jm8_reconcile_lambda_tags "$FUNCTION_NAME"
+
   echo "Lambda created."
 else
+  jm8_reconcile_lambda_tags "$FUNCTION_NAME"
+
   echo "Updating Lambda code: $FUNCTION_NAME"
 
   aws lambda update-function-code \
@@ -407,6 +412,7 @@ else
 
   echo "Lambda updated."
 fi
+echo "Lambda tags reconciled and verified."
 
 echo "Deployed function:"
 aws lambda get-function \

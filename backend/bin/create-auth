@@ -15,6 +15,7 @@ umask 077
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
 export JM8_OPERATION="create-auth"
 jm8_validate_contract_or_exit
 
@@ -56,16 +57,9 @@ COGNITO_DOMAIN_PREFIX="${APP_NAME}-${ENV_NAME}-${AWS_ACCOUNT_ID}"
 
 echo "Checking Cognito user pool: $USER_POOL_NAME"
 
-USER_POOL_ID="$(
-  aws cognito-idp list-user-pools \
-    --max-results 60 \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    --query "UserPools[?Name=='$USER_POOL_NAME'].Id | [0]" \
-    --output text
-)"
+USER_POOL_ID="$(jm8_resolve_cognito_user_pool_id "$USER_POOL_NAME")"
 
-if [[ "$USER_POOL_ID" == "None" || -z "$USER_POOL_ID" ]]; then
+if [[ -z "$USER_POOL_ID" ]]; then
   echo "Creating Cognito user pool."
 
   USER_POOL_ID="$(
@@ -75,6 +69,10 @@ if [[ "$USER_POOL_ID" == "None" || -z "$USER_POOL_ID" ]]; then
       --auto-verified-attributes email \
       --account-recovery-setting 'RecoveryMechanisms=[{Priority=1,Name=verified_email}]' \
       --policies 'PasswordPolicy={MinimumLength=8,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=false,TemporaryPasswordValidityDays=7}' \
+      --user-pool-tags \
+        "App=${APP_NAME}" \
+        "Stage=${STAGE}" \
+        "ManagedBy=aws-cli" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
       --query 'UserPool.Id' \
@@ -83,6 +81,12 @@ if [[ "$USER_POOL_ID" == "None" || -z "$USER_POOL_ID" ]]; then
 else
   echo "User pool already exists: $USER_POOL_ID"
 fi
+
+jm8_reconcile_cognito_user_pool_tags \
+  "$USER_POOL_ID" \
+  "$USER_POOL_NAME"
+
+echo "Cognito user-pool tags verified."
 
 echo "Checking app client: $APP_CLIENT_NAME"
 
@@ -128,7 +132,7 @@ DOMAIN_USER_POOL_ID="$(
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     --query 'DomainDescription.UserPoolId' \
-    --output text 2>/dev/null || true
+    --output text
 )"
 
 if [[ "$DOMAIN_USER_POOL_ID" == "$USER_POOL_ID" ]]; then

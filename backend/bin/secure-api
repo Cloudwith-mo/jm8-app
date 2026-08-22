@@ -8,16 +8,42 @@ set -euo pipefail
 : "${COGNITO_ISSUER:?COGNITO_ISSUER is required}"
 
 AUTHORIZER_NAME="${API_NAME}-jwt-authorizer"
+PRODUCTION_API_DEPLOYMENT=false
+
+if [ "${STAGE:-}" = "prod" ] || \
+   [ "$AWS_PROFILE" = "jm8-prod" ] || \
+   [ "$API_NAME" = "journalm8-prod-api" ]; then
+  PRODUCTION_API_DEPLOYMENT=true
+fi
 
 echo "Finding API: $API_NAME"
 
-API_ID="$(
-  aws apigatewayv2 get-apis \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    --query "Items[?Name=='$API_NAME'].ApiId | [0]" \
-    --output text
-)"
+if [ "$PRODUCTION_API_DEPLOYMENT" = true ]; then
+  : "${APP_NAME:?APP_NAME is required for production API security.}"
+  : "${STAGE:?STAGE is required for production API security.}"
+  : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required for production API security.}"
+  if [ "$APP_NAME" != "journalm8" ] || \
+     [ "$STAGE" != "prod" ] || \
+     [ "$AWS_PROFILE" != "jm8-prod" ] || \
+     [ "$API_NAME" != "journalm8-prod-api" ]; then
+    echo "Production API environment does not match the resource name." >&2
+    exit 1
+  fi
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+  source "$SCRIPT_DIR/jm8_resource_tags.sh"
+  export JM8_OPERATION="secure-api"
+  jm8_validate_contract_or_exit
+  API_ID="$(jm8_resolve_http_api_id "$API_NAME")"
+else
+  API_ID="$(
+    aws apigatewayv2 get-apis \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query "Items[?Name=='$API_NAME'].ApiId | [0]" \
+      --output text
+  )"
+fi
 
 if [[ "$API_ID" == "None" || -z "$API_ID" ]]; then
   echo "API not found: $API_NAME"
@@ -25,6 +51,11 @@ if [[ "$API_ID" == "None" || -z "$API_ID" ]]; then
 fi
 
 echo "API resolved."
+
+if [ "$PRODUCTION_API_DEPLOYMENT" = true ]; then
+  jm8_verify_http_api_tags "$API_ID" "$API_NAME"
+  echo "Production HTTP API tags verified."
+fi
 
 echo "Checking JWT authorizer: $AUTHORIZER_NAME"
 

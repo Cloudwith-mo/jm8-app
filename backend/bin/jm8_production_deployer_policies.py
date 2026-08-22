@@ -213,10 +213,29 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             (
                 "cognito-idp:CreateUserPoolDomain",
                 "cognito-idp:CreateUserPoolClient",
+                "cognito-idp:DescribeUserPool",
+                "cognito-idp:ListTagsForResource",
                 "cognito-idp:ListUserPoolClients",
             ),
             f"arn:aws:cognito-idp:{region}:{ACCOUNT_ID}:userpool/*",
             production_tag_condition,
+        ),
+        _statement(
+            "TagVerifiedProductionUserPool",
+            ("cognito-idp:TagResource",),
+            f"arn:aws:cognito-idp:{region}:{ACCOUNT_ID}:userpool/*",
+            {
+                "StringEquals": {
+                    "aws:RequestTag/App": APP_NAME,
+                    "aws:RequestTag/ManagedBy": "aws-cli",
+                    "aws:RequestTag/Stage": STAGE,
+                    "aws:ResourceTag/App": APP_NAME,
+                    "aws:ResourceTag/Stage": STAGE,
+                },
+                "ForAllValues:StringEquals": {
+                    "aws:TagKeys": ["App", "ManagedBy", "Stage"],
+                },
+            },
         ),
         _statement(
             "DescribeProductionUserPoolDomain",
@@ -244,6 +263,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "lambda:CreateFunction",
                 "lambda:GetFunction",
                 "lambda:GetFunctionConfiguration",
+                "lambda:ListTags",
                 "lambda:PutFunctionConcurrency",
                 "lambda:TagResource",
                 "lambda:UpdateFunctionCode",

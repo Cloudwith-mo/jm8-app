@@ -14,6 +14,7 @@ set -euo pipefail
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
 export JM8_OPERATION="create-api"
 jm8_validate_contract_or_exit
 
@@ -44,17 +45,17 @@ FUNCTION_ARN=$(aws lambda get-function \
 
 echo "Checking API Gateway HTTP API: $API_NAME"
 
-API_ID=$(aws apigatewayv2 get-apis \
-  --query "Items[?Name=='${API_NAME}'].ApiId | [0]" \
-  --output text \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION")
+API_ID="$(jm8_resolve_http_api_id "$API_NAME")"
 
-if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
+if [ -z "$API_ID" ]; then
   API_ID=$(aws apigatewayv2 create-api \
     --name "$API_NAME" \
     --protocol-type HTTP \
     --cors-configuration "$CORS_CONFIGURATION" \
+    --tags \
+      "App=${APP_NAME}" \
+      "Stage=${STAGE}" \
+      "ManagedBy=aws-cli" \
     --query "ApiId" \
     --output text \
     --profile "$AWS_PROFILE" \
@@ -64,6 +65,9 @@ if [ "$API_ID" = "None" ] || [ -z "$API_ID" ]; then
 else
   echo "API already exists: $API_ID"
 fi
+
+jm8_reconcile_http_api_tags "$API_ID" "$API_NAME"
+echo "HTTP API tags reconciled and verified."
 
 aws apigatewayv2 update-api   --api-id "$API_ID"   --cors-configuration "$CORS_CONFIGURATION"   --profile "$AWS_PROFILE"   --region "$AWS_REGION"   >/dev/null
 

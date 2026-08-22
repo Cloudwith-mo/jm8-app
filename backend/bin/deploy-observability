@@ -11,6 +11,7 @@ set -euo pipefail
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
 jm8_validate_contract_or_exit
 
 ALERT_EMAIL="${ALERT_EMAIL:-}"
@@ -263,18 +264,15 @@ echo "API Gateway access log retention is included."
 
 echo "Configuring API Gateway access logging and detailed metrics..."
 
-API_ID="$(
-  aws apigatewayv2 get-apis \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    --query "Items[?Name=='${API_GATEWAY_NAME}'].ApiId | [0]" \
-    --output text
-)"
+API_ID="$(jm8_resolve_http_api_id "$API_GATEWAY_NAME")"
 
-if [ -z "$API_ID" ] || [ "$API_ID" = "None" ]; then
+if [ -z "$API_ID" ]; then
   echo "HTTP API was not found: $API_GATEWAY_NAME"
   exit 1
 fi
+
+jm8_verify_http_api_tags "$API_ID" "$API_GATEWAY_NAME"
+echo "HTTP API tags verified before observability updates."
 
 API_ACCESS_LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${API_ACCESS_LOG_GROUP}"
 API_ACCESS_LOG_POLICY_NAME="${API_GATEWAY_NAME}-access-logs"
