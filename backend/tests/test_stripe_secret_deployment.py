@@ -177,6 +177,22 @@ class StripeSecretDeploymentTests(
             self.provision,
         )
 
+    def test_status_reports_only_stage_mode_match(self):
+        self.assertIn('echo "stripeModeMatchesStage: True"', self.provision)
+        self.assertNotIn("stripeModeIsTest", self.provision)
+        status_output = self.provision[
+            self.provision.index('echo "stripeModeMatchesStage: True"'):
+        ]
+        for secret_material in (
+            "sk_test_",
+            "sk_live_",
+            "whsec_",
+            "STRIPE_SECRET_KEY",
+            "STRIPE_WEBHOOK_SECRET",
+            "SECRET_PAYLOAD",
+        ):
+            self.assertNotIn(secret_material, status_output)
+
     def test_local_environment_is_updated(
         self,
     ):
@@ -213,9 +229,9 @@ class StripeSecretDeploymentTests(
         script = self.provision[start:self.provision.index("\nPY\n", start)]
         secret_value = "sk_live_bootstrap123456"
 
-        def run(mode=None, key=secret_value, webhook=None):
+        def run(stage="prod", mode=None, key=secret_value, webhook=None):
             environment = os.environ.copy()
-            environment.update({"STAGE": "prod", "STRIPE_SECRET_KEY": key})
+            environment.update({"STAGE": stage, "STRIPE_SECRET_KEY": key})
             for name in ("JM8_STRIPE_BOOTSTRAP_MODE", "STRIPE_WEBHOOK_SECRET"):
                 environment.pop(name, None)
             if mode is not None:
@@ -238,6 +254,28 @@ class StripeSecretDeploymentTests(
         normal_missing, _ = run()
         self.assertNotEqual(normal_missing.returncode, 0)
 
+        for stage in ("dev", "staging"):
+            with self.subTest(stage=stage):
+                test_mode, payload = run(
+                    stage=stage,
+                    key="sk_test_stagecorrect123456",
+                )
+                self.assertEqual(test_mode.returncode, 0, test_mode.stderr)
+                self.assertEqual(
+                    payload,
+                    {"STRIPE_SECRET_KEY": "sk_test_stagecorrect123456"},
+                )
+
+        normal_prod, normal_payload = run(webhook="whsec_normalprod123456")
+        self.assertEqual(normal_prod.returncode, 0, normal_prod.stderr)
+        self.assertEqual(
+            normal_payload,
+            {
+                "STRIPE_SECRET_KEY": secret_value,
+                "STRIPE_WEBHOOK_SECRET": "whsec_normalprod123456",
+            },
+        )
+
         bootstrap, payload = run(mode="pre-webhook")
         self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
         self.assertEqual(payload, {"STRIPE_SECRET_KEY": secret_value})
@@ -248,7 +286,13 @@ class StripeSecretDeploymentTests(
             mode="pre-webhook", webhook="whsec_rejected123456"
         )
         self.assertNotEqual(with_webhook.returncode, 0)
-        for result in (normal_missing, bootstrap, test_key, with_webhook):
+        for result in (
+            normal_missing,
+            normal_prod,
+            bootstrap,
+            test_key,
+            with_webhook,
+        ):
             self.assertNotIn(secret_value, result.stdout + result.stderr)
 
     def test_deploy_payload_verifier_requires_post_api_webhook(self):
