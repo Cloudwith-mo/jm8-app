@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -186,6 +187,27 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertIn("get-bucket-tagging", self.create_script)
         self.assertIn("get-bucket-policy", self.create_script)
         self.assertIn("bucket-policy-verify", self.create_script)
+
+    def test_aws_cli_options_are_separate_from_quoted_arguments(self):
+        concatenated_option = re.compile(
+            r'''(?:"[^"\n]*"|'[^'\n]*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|'''
+            r'''\$[A-Za-z_][A-Za-z0-9_]*)(--[a-z][a-z0-9-]*)'''
+        )
+        self.assertEqual(concatenated_option.findall(self.create_script), [])
+        self.assertNotIn('"$BUCKET_NAME"--query', self.create_script)
+        self.assertNotIn('"$ORIGIN_OAC_ID"--output', self.create_script)
+
+    def test_public_access_block_arguments_have_explicit_boundaries(self):
+        self.assertRegex(
+            self.create_script,
+            r'''aws s3api get-public-access-block \\\n+\s+--bucket "\$BUCKET_NAME" \\\n+\s+--query ''',
+        )
+
+    def test_origin_access_control_arguments_have_explicit_boundaries(self):
+        self.assertRegex(
+            self.create_script,
+            r'''OAC_JSON="\$\(aws cloudfront get-origin-access-control \\\n+\s+--id "\$ORIGIN_OAC_ID" \\\n+\s+--output json''',
+        )
 
     def test_website_check_accepts_only_missing_configuration(self):
         self.assertIn("WEBSITE_ERROR_FILE", self.create_script)

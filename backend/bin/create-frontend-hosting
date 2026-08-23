@@ -273,7 +273,12 @@ REPORT_ERROR_CODE=""
 REPORT_MESSAGE=""
 write_report
 log_info "S3 verification started"
-read -r BLOCK_PUBLIC_ACLS IGNORE_PUBLIC_ACLS BLOCK_PUBLIC_POLICY RESTRICT_PUBLIC_BUCKETS <<< "$(aws s3api get-public-access-block --bucket "$BUCKET_NAME" --query '[PublicAccessBlockConfiguration.BlockPublicAcls, PublicAccessBlockConfiguration.IgnorePublicAcls, PublicAccessBlockConfiguration.BlockPublicPolicy, PublicAccessBlockConfiguration.RestrictPublicBuckets]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+read -r BLOCK_PUBLIC_ACLS IGNORE_PUBLIC_ACLS BLOCK_PUBLIC_POLICY RESTRICT_PUBLIC_BUCKETS <<< "$(aws s3api get-public-access-block \
+  --bucket "$BUCKET_NAME" \
+  --query '[PublicAccessBlockConfiguration.BlockPublicAcls, PublicAccessBlockConfiguration.IgnorePublicAcls, PublicAccessBlockConfiguration.BlockPublicPolicy, PublicAccessBlockConfiguration.RestrictPublicBuckets]' \
+  --output text \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
 if [[ "$BLOCK_PUBLIC_ACLS" != "True" || "$IGNORE_PUBLIC_ACLS" != "True" || "$BLOCK_PUBLIC_POLICY" != "True" || "$RESTRICT_PUBLIC_BUCKETS" != "True" ]]; then fail "S3_PUBLIC_ACCESS_BLOCK_INVALID" "Frontend bucket Public Access Block is not fully enabled."; fi
 ENCRYPTION_ALGORITHM="$(aws s3api get-bucket-encryption --bucket "$BUCKET_NAME" --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 if [[ "$ENCRYPTION_ALGORITHM" != "AES256" ]]; then fail "S3_ENCRYPTION_INVALID" "Frontend bucket encryption must use AES256."; fi
@@ -368,7 +373,11 @@ REPORT_ERROR_CODE=""
 REPORT_MESSAGE=""
 write_report
 read -r OAC_ORIGIN_TYPE OAC_SIGNING_BEHAVIOR OAC_SIGNING_PROTOCOL <<< "$(aws cloudfront get-origin-access-control --id "$ORIGIN_OAC_ID" --query '[OriginAccessControl.OriginAccessControlConfig.OriginAccessControlOriginType, OriginAccessControl.OriginAccessControlConfig.SigningBehavior, OriginAccessControl.OriginAccessControlConfig.SigningProtocol]' --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
-OAC_JSON="$(aws cloudfront get-origin-access-control --id "$ORIGIN_OAC_ID" --output json --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+OAC_JSON="$(aws cloudfront get-origin-access-control \
+  --id "$ORIGIN_OAC_ID" \
+  --output json \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION")"
 printf '%s' "$OAC_JSON" >"$TEMP_DIR/oac.json"
 set +e
 OAC_VERIFY="$(python3 "$DIAGNOSTICS_HELPER" oac-verify "$TEMP_DIR/oac.json" "$ORIGIN_ACCESS_CONTROL_ID")"
