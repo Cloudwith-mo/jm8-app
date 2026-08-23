@@ -261,6 +261,14 @@ class DeploymentTagWiringTests(unittest.TestCase):
             )
         }
 
+    @staticmethod
+    def _lambda_create_blocks(source):
+        return re.findall(
+            r"aws lambda create-function \\\n(.*?\n\s*>/dev/null)",
+            source,
+            flags=re.DOTALL,
+        )
+
     def test_production_create_commands_supply_canonical_tags(self):
         create_auth = self.sources["create-auth"]
         create_api = self.sources["create-api"]
@@ -537,15 +545,121 @@ class DeploymentTagWiringTests(unittest.TestCase):
         helper = self.sources["jm8_resource_tags.sh"]
         self.assertIn("aws lambda tag-resource", helper)
         self.assertGreaterEqual(helper.count("aws lambda list-tags"), 2)
+        creation_paths = (
+            ("deploy", "$FUNCTION_NAME"),
+            ("deploy-ocr-workflow", "$WORKER_FUNCTION_NAME"),
+            ("deploy-ocr-workflow", "$FAILURE_FUNCTION_NAME"),
+            ("deploy-historical-reanalysis-workflow", "$function_name"),
+        )
+        search_offsets = {}
+        for name, function_name in creation_paths:
+            source = self.sources[name]
+            create_index = source.index(
+                "aws lambda create-function",
+                search_offsets.get(name, 0),
+            )
+            reconcile = f'jm8_reconcile_lambda_tags "{function_name}"'
+            reconcile_index = source.index(reconcile, create_index)
+            self.assertGreater(reconcile_index, create_index)
+            search_offsets[name] = create_index + 1
+
+        historical = self.sources["deploy-historical-reanalysis-workflow"]
+        for function_name in (
+            "$WORKER_FUNCTION_NAME",
+            "$COORDINATOR_FUNCTION_NAME",
+        ):
+            with self.subTest(historical_function=function_name):
+                self.assertRegex(
+                    historical,
+                    rf'ensure_lambda_function \\\n\s+"{re.escape(function_name)}"',
+                )
+
+    def test_lambda_create_tags_are_one_exact_json_shell_argument(self):
+        expected_command_counts = {
+            "deploy": 1,
+            "deploy-ocr-workflow": 2,
+            "deploy-historical-reanalysis-workflow": 1,
+        }
+        for name, expected_count in expected_command_counts.items():
+            blocks = self._lambda_create_blocks(self.sources[name])
+            self.assertEqual(len(blocks), expected_count, name)
+            for command_number, block in enumerate(blocks, start=1):
+                with self.subTest(script=name, command=command_number):
+                    match = re.search(
+                        r'--tags \\\n\s+"((?:\\.|[^"\\])*)" \\',
+                        block,
+                    )
+                    self.assertIsNotNone(match)
+                    self.assertEqual(block.count("--tags"), 1)
+                    json_template = match.group(1).replace(r'\"', '"')
+                    for stage in ("dev", "staging", "prod"):
+                        expanded = json_template.replace(
+                            "${APP_NAME}", APP_NAME
+                        ).replace("${STAGE}", stage)
+                        self.assertEqual(
+                            json.loads(expanded),
+                            {
+                                "App": APP_NAME,
+                                "Stage": stage,
+                                "ManagedBy": "aws-cli",
+                            },
+                        )
+
+                    self.assertNotIn(
+                        "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli",
+                        block,
+                    )
+                    for separate_tag in (
+                        '"App=${APP_NAME}"',
+                        '"Stage=${STAGE}"',
+                        '"ManagedBy=aws-cli"',
+                    ):
+                        self.assertNotIn(separate_tag, block)
+
+    def test_lambda_create_paths_cover_all_five_functions(self):
+        deploy = self.sources["deploy"]
+        self.assertIn(
+            'FUNCTION_NAME="${APP_NAME}-${STAGE}-api"',
+            deploy,
+        )
+        self.assertIn('--function-name "$FUNCTION_NAME"', deploy)
+
+        ocr = self.sources["deploy-ocr-workflow"]
+        ocr_blocks = self._lambda_create_blocks(ocr)
+        self.assertEqual(
+            {
+                re.search(r'--function-name "([^"]+)"', block).group(1)
+                for block in ocr_blocks
+            },
+            {"$WORKER_FUNCTION_NAME", "$FAILURE_FUNCTION_NAME"},
+        )
+
+        historical = self.sources["deploy-historical-reanalysis-workflow"]
+        self.assertIn('--function-name "$function_name"', historical)
+        self.assertIn(
+            'ensure_lambda_function \\\n  "$WORKER_FUNCTION_NAME"',
+            historical,
+        )
+        self.assertIn(
+            'ensure_lambda_function \\\n  "$COORDINATOR_FUNCTION_NAME"',
+            historical,
+        )
+
+    def test_lambda_deployment_scripts_keep_strict_shell_behavior(self):
+        concatenated_option = re.compile(
+            r'''(?:"[^"\n]*"|'[^'\n]*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|'''
+            r'''\$[A-Za-z_][A-Za-z0-9_]*)(--[a-z][a-z0-9-]*)'''
+        )
         for name in (
             "deploy",
             "deploy-ocr-workflow",
             "deploy-historical-reanalysis-workflow",
         ):
+            source = self.sources[name]
             with self.subTest(script=name):
-                source = self.sources[name]
-                self.assertIn("aws lambda create-function", source)
-                self.assertIn("jm8_reconcile_lambda_tags", source)
+                self.assertEqual(concatenated_option.findall(source), [])
+                for forbidden in ("|| true", "eval ", "set -x"):
+                    self.assertNotIn(forbidden, source)
 
     def test_downstream_api_paths_verify_tags(self):
         self.assertIn(

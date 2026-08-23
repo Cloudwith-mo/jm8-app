@@ -370,7 +370,8 @@ if [ "$FUNCTION_EXISTS" -ne 0 ]; then
     --timeout 28 \
     --memory-size 512 \
     --environment file://.build/api-environment.json \
-    --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+    --tags \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null

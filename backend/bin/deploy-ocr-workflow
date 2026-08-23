@@ -293,7 +293,7 @@ else
     --environment \
       "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
     --tags \
-      "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null
@@ -370,7 +370,7 @@ else
     --environment \
       "Variables={APP_NAME=${APP_NAME},STAGE=${STAGE},TABLE_NAME=${TABLE_NAME},RAW_BUCKET=${RAW_BUCKET}}" \
     --tags \
-      "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null

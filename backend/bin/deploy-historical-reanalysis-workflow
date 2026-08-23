@@ -615,7 +615,7 @@ ensure_lambda_function() {
       --memory-size "$memory_size" \
       --environment "$environment" \
       --tags \
-        "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+        "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
       >/dev/null
