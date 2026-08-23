@@ -415,7 +415,6 @@ class DeploymentTagWiringTests(unittest.TestCase):
         expected_client = {
             "ClientId": client_id,
             "ClientName": client_name,
-            "GenerateSecret": False,
             "AllowedOAuthFlowsUserPoolClient": True,
             "AllowedOAuthFlows": ["code"],
             "AllowedOAuthScopes": ["openid", "email", "profile"],
@@ -433,19 +432,33 @@ class DeploymentTagWiringTests(unittest.TestCase):
             logout_url,
         ]
 
-        accepted = subprocess.run(
-            command,
-            input=json.dumps({"UserPoolClient": expected_client}),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        def verify(client):
+            return subprocess.run(
+                command,
+                input=json.dumps({"UserPoolClient": client}),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        omitted = verify(dict(expected_client))
+        self.assertEqual(omitted.returncode, 0, omitted.stderr)
+
+        explicit_false_client = dict(expected_client)
+        explicit_false_client["GenerateSecret"] = False
+        explicit_false = verify(explicit_false_client)
+        self.assertEqual(explicit_false.returncode, 0, explicit_false.stderr)
+
+        for invalid_generate_secret in (True, None, 0, 1, "false", {}, []):
+            with self.subTest(generate_secret=invalid_generate_secret):
+                client = dict(expected_client)
+                client["GenerateSecret"] = invalid_generate_secret
+                rejected = verify(client)
+                self.assertNotEqual(rejected.returncode, 0)
 
         mismatches = {
             "ClientId": "other-client-id",
             "ClientName": "journalm8-staging-web",
-            "GenerateSecret": True,
             "AllowedOAuthFlowsUserPoolClient": False,
             "AllowedOAuthFlows": ["implicit"],
             "AllowedOAuthScopes": ["openid", "email"],
@@ -457,13 +470,7 @@ class DeploymentTagWiringTests(unittest.TestCase):
             with self.subTest(field=field):
                 client = dict(expected_client)
                 client[field] = mismatched_value
-                rejected = subprocess.run(
-                    command,
-                    input=json.dumps({"UserPoolClient": client}),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
+                rejected = verify(client)
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertNotIn(mismatched_value.__repr__(), rejected.stderr)
 

@@ -182,10 +182,11 @@ if not isinstance(client, dict):
     fail()
 
 expected_id, expected_name, callback_url, logout_url = sys.argv[1:]
+generate_secret = client.get("GenerateSecret", False)
 if (
     client.get("ClientId") != expected_id
     or client.get("ClientName") != expected_name
-    or client.get("GenerateSecret") is not False
+    or generate_secret is not False
     or client.get("AllowedOAuthFlowsUserPoolClient") is not True
     or not exact_string_values(client.get("AllowedOAuthFlows"), ["code"])
     or not exact_string_values(
