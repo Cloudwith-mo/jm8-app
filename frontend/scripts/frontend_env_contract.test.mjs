@@ -15,6 +15,7 @@ function baseEnv(overrides = {}) {
   return {
     VITE_APP_STAGE: "dev",
     VITE_API_ENDPOINT: "http://localhost:3000",
+    VITE_COGNITO_ENABLED: "true",
     VITE_COGNITO_DOMAIN: "http://localhost:4000",
     VITE_COGNITO_CLIENT_ID: "client-dev-123",
     VITE_COGNITO_REDIRECT_URI: "http://localhost:5173/callback",
@@ -135,6 +136,86 @@ test("production accepts exact CloudFront-hosted configuration", () => {
   );
 });
 
+test("production rejects every demo, mock, or bypass variable when present", () => {
+  const production = baseEnv({
+    VITE_APP_STAGE: "prod",
+    VITE_API_ENDPOINT: "https://prod123abc.execute-api.us-east-1.amazonaws.com",
+    VITE_COGNITO_ENABLED: "true",
+    VITE_COGNITO_DOMAIN: "https://journalm8-prod.auth.us-east-1.amazoncognito.com",
+    VITE_COGNITO_CLIENT_ID: "client-prod-123",
+    VITE_COGNITO_REDIRECT_URI: "https://prod123abc.cloudfront.net/callback",
+    VITE_COGNITO_LOGOUT_URI: "https://prod123abc.cloudfront.net",
+  });
+
+  for (const [name, value] of [
+    ["VITE_DEMO_MODE", "true"],
+    ["VITE_DEMO_MODE", "1"],
+    ["VITE_DEMO_MODE", "yes"],
+    ["VITE_DEMO_MODE", "on"],
+    ["VITE_DEMO_MODE", "TrUe"],
+    ["VITE_DEMO_MODE", "malformed"],
+    ["VITE_DEMO_MODE", "false"],
+    ["VITE_DEMO_USER_ID", "local-identity"],
+    ["VITE_MOCK_API", "enabled"],
+    ["VITE_AUTH_BYPASS", "enabled"],
+  ]) {
+    assert.throws(
+      () => validateFrontendEnv(
+        { ...production, [name]: value },
+        { mode: "production", hasProductionLocal: true }
+      ),
+      /forbidden demo or bypass variable/
+    );
+  }
+});
+
+test("production requires Cognito enablement to be exact and unambiguous", () => {
+  const production = baseEnv({
+    VITE_APP_STAGE: "prod",
+    VITE_API_ENDPOINT: "https://prod123abc.execute-api.us-east-1.amazonaws.com",
+    VITE_COGNITO_DOMAIN: "https://journalm8-prod.auth.us-east-1.amazoncognito.com",
+    VITE_COGNITO_CLIENT_ID: "client-prod-123",
+    VITE_COGNITO_REDIRECT_URI: "https://prod123abc.cloudfront.net/callback",
+    VITE_COGNITO_LOGOUT_URI: "https://prod123abc.cloudfront.net",
+  });
+
+  for (const value of ["false", "0", "no", "off", "TRUE", "", undefined]) {
+    assert.throws(
+      () => validateFrontendEnv(
+        { ...production, VITE_COGNITO_ENABLED: value },
+        { mode: "production", hasProductionLocal: true }
+      ),
+      /(?:Missing required frontend env variables|VITE_COGNITO_ENABLED=true)/
+    );
+  }
+});
+
+test("development retains its explicit local demo identity configuration", () => {
+  assert.deepEqual(
+    validateFrontendEnv(
+      baseEnv({ VITE_DEMO_USER_ID: "local-demo" }),
+      { mode: "development" }
+    ),
+    { mode: "development", stage: "dev" }
+  );
+});
+
+test("production-facing UI copy contains no demo login or identity fallback", () => {
+  const authStatus = fs.readFileSync(
+    new URL("../src/components/layout/AuthStatus.tsx", import.meta.url),
+    "utf8"
+  );
+  const archiveSidebar = fs.readFileSync(
+    new URL("../src/components/layout/ArchiveSidebar.tsx", import.meta.url),
+    "utf8"
+  );
+  for (const source of [authStatus, archiveSidebar]) {
+    assert.doesNotMatch(source, /Demo mode|Demo User|Using demo-user archive/);
+  }
+  assert.match(authStatus, /Signed out/);
+  assert.match(authStatus, /Sign in to access your archive/);
+});
+
 test("production requires only .env.production.local", () => {
   const environment = baseEnv({
     VITE_APP_STAGE: "prod",
@@ -170,6 +251,7 @@ test("production rejects cross-stage resources and plaintext secrets", () => {
   const production = {
     VITE_APP_STAGE: "prod",
     VITE_API_ENDPOINT: "https://prod123abc.execute-api.us-east-1.amazonaws.com",
+    VITE_COGNITO_ENABLED: "true",
     VITE_COGNITO_DOMAIN: "https://journalm8-prod.auth.us-east-1.amazoncognito.com",
     VITE_COGNITO_CLIENT_ID: "client-prod-123",
     VITE_COGNITO_REDIRECT_URI: "https://prod123abc.cloudfront.net/callback",
@@ -216,6 +298,23 @@ test("production build validator rejects maps, cross-stage URLs, and unhashed as
       "https://journalm8-staging-api.example.com"
     );
     assert.throws(() => validateProductionBuild(root), /cross-stage resource/);
+
+    for (const marker of [
+      "demo-user",
+      "x-user-id",
+      "VITE_DEMO_MODE",
+      "VITE_MOCK_API",
+      "VITE_AUTH_BYPASS",
+      "Demo mode",
+      "demo_login",
+      "http://localhost:5173",
+    ]) {
+      fs.writeFileSync(path.join(root, "index.html"), marker);
+      assert.throws(
+        () => validateProductionBuild(root),
+        /forbidden (?:demo or local authentication marker|localhost)/
+      );
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 const REQUIRED_VARIABLES = [
   "VITE_APP_STAGE",
   "VITE_API_ENDPOINT",
@@ -99,6 +103,15 @@ export function validateFrontendEnv(env, options = {}) {
         "Production frontend configuration must not use generic .env"
       );
     }
+    const demoOrBypassVariable = Object.keys(env).find(
+      (name) => name.startsWith("VITE_")
+        && /(DEMO|MOCK|BYPASS)/i.test(name)
+    );
+    if (demoOrBypassVariable) {
+      throw new Error(
+        `Production frontend configuration contains forbidden demo or bypass variable ${demoOrBypassVariable}`
+      );
+    }
     const secretVariable = Object.keys(env).find(
       (name) => name.startsWith("VITE_")
         && /(SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)/i.test(name)
@@ -132,6 +145,12 @@ export function validateFrontendEnv(env, options = {}) {
   const stage = String(env.VITE_APP_STAGE).trim();
   if (stage !== expectedStage) {
     throw new Error(`VITE_APP_STAGE must be '${expectedStage}' for mode '${mode}'`);
+  }
+
+  if (stage === "prod" && env.VITE_COGNITO_ENABLED !== "true") {
+    throw new Error(
+      "Production frontend configuration requires VITE_COGNITO_ENABLED=true"
+    );
   }
 
   const endpoint = parseUrl("VITE_API_ENDPOINT", env.VITE_API_ENDPOINT);
@@ -170,4 +189,42 @@ export function validateFrontendEnv(env, options = {}) {
 
 export function assertFrontendEnv(env, options = {}) {
   validateFrontendEnv(env, options);
+}
+
+export async function validateFrontendModeFiles(
+  mode,
+  rootPath = process.cwd()
+) {
+  const root = path.resolve(rootPath);
+  const { loadEnv } = await import("vite");
+  const env = loadEnv(mode, root, "");
+
+  return validateFrontendEnv(env, {
+    mode,
+    hasLegacyEnvLocal: fs.existsSync(path.join(root, ".env.local")),
+    hasProductionLocal: fs.existsSync(
+      path.join(root, ".env.production.local")
+    ),
+    hasProductionEnv: fs.existsSync(path.join(root, ".env.production")),
+    hasGenericEnv: fs.existsSync(path.join(root, ".env")),
+  });
+}
+
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  const mode = process.argv[2];
+  const rootPath = process.argv[3] || process.cwd();
+
+  if (!mode) {
+    console.error("Usage: node frontend_env_contract.mjs <mode> [root-directory]");
+    process.exit(1);
+  }
+
+  try {
+    await validateFrontendModeFiles(mode, rootPath);
+    console.log(`Frontend ${mode} environment validation passed.`);
+  } catch (error) {
+    console.error(String(error?.message || "Frontend environment validation failed."));
+    process.exit(1);
+  }
 }

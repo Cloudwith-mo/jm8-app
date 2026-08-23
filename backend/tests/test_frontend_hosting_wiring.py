@@ -253,6 +253,10 @@ class FrontendHostingWiringTests(unittest.TestCase):
 
     def test_build_order_and_sync_behavior(self):
         self.assertLess(self.deploy_script.index("npm ci"), self.deploy_script.index("npm run test"))
+        self.assertLess(
+            self.deploy_script.index("node scripts/frontend_env_contract.mjs production ."),
+            self.deploy_script.index("npm run build:production"),
+        )
         self.assertLess(self.deploy_script.index("npm run test"), self.deploy_script.index("npm run build:staging"))
         self.assertIn("npm run build:staging", self.deploy_script)
         self.assertIn("npm run build:production", self.deploy_script)
@@ -265,6 +269,17 @@ class FrontendHostingWiringTests(unittest.TestCase):
         self.assertIn("public,max-age=31536000,immutable", self.deploy_script)
         self.assertIn("aws s3 cp dist/assets/ \"s3://${FRONTEND_BUCKET}/assets/\"", self.deploy_script)
         self.assertNotIn("--exclude \"index.html\" --cache-control \"public,max-age=31536000,immutable\"", self.deploy_script)
+
+    def test_production_demo_preflight_precedes_build_and_upload(self):
+        preflight = self.deploy_script.index(
+            "node scripts/frontend_env_contract.mjs production ."
+        )
+        self.assertLess(preflight, self.deploy_script.index("npm run build:production"))
+        self.assertLess(preflight, self.deploy_script.index("aws s3 sync"))
+        self.assertLess(
+            self.deploy_script.index("jm8_validate_contract_or_exit"),
+            self.deploy_script.index("aws cloudformation describe-stacks"),
+        )
 
     def test_invalidation_and_health_checks_exist(self):
         self.assertIn("create-invalidation", self.deploy_script)

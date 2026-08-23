@@ -8,7 +8,6 @@ const COGNITO_LOGOUT_URI = import.meta.env.VITE_COGNITO_LOGOUT_URI as string;
 export const frontendEnv = {
   appStage: APP_STAGE,
   apiEndpoint: API_ENDPOINT,
-  demoUserId: (import.meta.env.VITE_DEMO_USER_ID as string | undefined) || "demo-user",
   cognitoEnabled: import.meta.env.VITE_COGNITO_ENABLED === "true",
   cognitoDomain: COGNITO_DOMAIN,
   cognitoClientId: COGNITO_CLIENT_ID,

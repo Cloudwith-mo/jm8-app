@@ -102,7 +102,7 @@ const navItems: SidebarNavItem[] = [
 function getDisplayName(user: AuthUser | null) {
   if (user?.name) return user.name;
   if (user?.email) return user.email.split("@")[0];
-  return "Demo User";
+  return "Guest";
 }
 
 function getInitial(user: AuthUser | null) {
@@ -183,7 +183,7 @@ export default function ArchiveSidebar({
       <section className="profile-card">
         <div className="profile-avatar">{getInitial(user)}</div>
         <h2>{displayName}</h2>
-        <p>{emailOrHandle} <span>{user ? "PRIVATE" : "DEMO"}</span></p>
+        <p>{emailOrHandle} <span>{user ? "PRIVATE" : "SIGNED OUT"}</span></p>
 
         <div className="profile-stats">
           <div>

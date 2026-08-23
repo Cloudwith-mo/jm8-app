@@ -39,7 +39,14 @@ import type {
 } from "../types/ocrJobs";
 
 const API_ENDPOINT = frontendEnv.apiEndpoint;
-const DEMO_USER_ID = frontendEnv.demoUserId;
+const DEVELOPMENT_IDENTITY_HEADERS: Record<string, string> =
+  import.meta.env.VITE_APP_STAGE === "prod"
+    ? {}
+    : {
+        "x-user-id":
+          (import.meta.env.VITE_DEMO_USER_ID as string | undefined)
+          || "demo-user",
+      };
 
 type ApiErrorPayload = Record<string, unknown>;
 
@@ -98,7 +105,7 @@ async function apiRequest<T>(
     ...options,
     headers: {
       "content-type": "application/json",
-      "x-user-id": DEMO_USER_ID,
+      ...DEVELOPMENT_IDENTITY_HEADERS,
       ...(accessToken
         ? {
             Authorization: `Bearer ${accessToken}`,

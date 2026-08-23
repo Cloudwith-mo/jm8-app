@@ -39,6 +39,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_operation_specific,
     production_api_exists,
     validate_production_isolation_controls,
+    validate_production_demo_controls,
     validate_production_resource_references,
 )
 
@@ -96,6 +97,16 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "STRIPE_SECRET_ARN",
         "STRIPE_PRO_MONTHLY_PRICE_ID",
         "JM8_STRIPE_BOOTSTRAP_MODE",
+        "DEMO_MODE",
+        "DEMO_USER_ID",
+        "JM8_DEMO_MODE",
+        "AUTH_BYPASS",
+        "MOCK_API",
+        "VITE_AUTH_BYPASS",
+        "VITE_DEMO_MODE",
+        "VITE_DEMO_USER_ID",
+        "VITE_MOCK_API",
+        "VITE_COGNITO_ENABLED",
         "ALLOWED_ORIGINS",
         "ENV_NAME",
         "JM8_OPERATION",
@@ -548,6 +559,75 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "stage-scoped-same-account",
         )
         mock_sts.assert_called_once_with("jm8-prod", "us-east-1")
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_production_rejects_demo_variables_before_sts(self, mock_sts):
+        secret_like_value = "credential-value-must-not-be-printed"
+        for name in (
+            "DEMO_MODE",
+            "DEMO_USER_ID",
+            "JM8_DEMO_MODE",
+            "AUTH_BYPASS",
+            "MOCK_API",
+            "VITE_AUTH_BYPASS",
+            "VITE_DEMO_MODE",
+            "VITE_DEMO_USER_ID",
+            "VITE_MOCK_API",
+        ):
+            for value in (
+                "true",
+                "1",
+                "yes",
+                "on",
+                "TrUe",
+                "malformed",
+                "false",
+                "",
+                secret_like_value,
+            ):
+                with self.subTest(name=name, value=value):
+                    environment = self._production_environment()
+                    environment[name] = value
+                    os.environ.update(environment)
+
+                    with self.assertRaises(EnvironmentContractError) as captured:
+                        validate_environment_contract()
+
+                    message = str(captured.exception)
+                    self.assertIn("must not define demo", message)
+                    self.assertNotIn(secret_like_value, message)
+                    os.environ.pop(name, None)
+
+        mock_sts.assert_not_called()
+
+    def test_production_rejects_ambiguous_cognito_bypass_values(self):
+        for value in ("false", "0", "no", "off", "TRUE", "", "malformed"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    EnvironmentContractError,
+                    "VITE_COGNITO_ENABLED must equal true",
+                ):
+                    validate_production_demo_controls(
+                        "prod",
+                        {"VITE_COGNITO_ENABLED": value},
+                    )
+
+        validate_production_demo_controls(
+            "prod",
+            {"VITE_COGNITO_ENABLED": "true"},
+        )
+
+    def test_dev_and_staging_demo_controls_remain_unchanged(self):
+        for stage in ("dev", "staging"):
+            with self.subTest(stage=stage):
+                validate_production_demo_controls(
+                    stage,
+                    {
+                        "VITE_DEMO_MODE": "true",
+                        "VITE_DEMO_USER_ID": "local-user",
+                        "VITE_COGNITO_ENABLED": "false",
+                    },
+                )
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_normal_production_secret_provision_still_requires_webhook(
@@ -1058,6 +1138,16 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
         self.assertIn('--delete', script_text)
         self.assertNotIn('STRIPE_SECRET_KEY', script_text)
 
+    def test_deploy_demo_guard_precedes_packaging_and_lambda_mutation(self):
+        script_text = self._read("bin/deploy")
+        guard_index = script_text.index("jm8_validate_contract_or_exit")
+        self.assertLess(guard_index, script_text.index("./bin/package"))
+        self.assertLess(guard_index, script_text.index("aws lambda create-function"))
+        self.assertLess(
+            guard_index,
+            script_text.index("aws lambda update-function-code"),
+        )
+
     def test_create_auth_derives_env_name_from_stage(self):
         script_text = self._read("bin/create-auth")
         self.assertIn('ENV_NAME="$STAGE"', script_text)
@@ -1190,6 +1280,25 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
 
 
 class TestTemplatesAndIgnoreRules(EnvironmentIsolationTestCase):
+
+    def test_frontend_production_example_disables_demo_by_absence(self):
+        frontend_root = BACKEND_ROOT.parent / "frontend"
+        example = (frontend_root / ".env.production.example").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("VITE_APP_STAGE=prod", example)
+        self.assertIn("VITE_COGNITO_ENABLED=true", example)
+        self.assertNotIn("DEMO", example.upper())
+        self.assertNotIn("VITE_STRIPE", example)
+
+        root_ignore = (BACKEND_ROOT.parent / ".gitignore").read_text(
+            encoding="utf-8"
+        )
+        frontend_ignore = (frontend_root / ".gitignore").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(".env.*.local", root_ignore)
+        self.assertIn(".env.production.local", frontend_ignore)
 
     def test_prod_example_matches_same_account_isolation_contract(self):
         content = (

@@ -46,6 +46,17 @@ PRODUCTION_AWS_PROFILE = "jm8-prod"
 PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
 STRIPE_BOOTSTRAP_MODE = "pre-webhook"
 PRODUCTION_API_NAME = "journalm8-prod-api"
+PRODUCTION_FORBIDDEN_DEMO_VARIABLES = {
+    "AUTH_BYPASS",
+    "DEMO_MODE",
+    "DEMO_USER_ID",
+    "JM8_DEMO_MODE",
+    "MOCK_API",
+    "VITE_AUTH_BYPASS",
+    "VITE_DEMO_MODE",
+    "VITE_DEMO_USER_ID",
+    "VITE_MOCK_API",
+}
 
 PRODUCTION_SCOPED_REFERENCE_KEYS = {
     "TABLE_NAME",
@@ -192,6 +203,29 @@ def validate_production_isolation_controls(
         raise EnvironmentContractError(
             "STAGE=prod requires PRODUCTION_ISOLATION_MODE="
             "stage-scoped-same-account"
+        )
+
+
+def validate_production_demo_controls(
+    stage: str,
+    environment: Mapping[str, str],
+) -> None:
+    """Reject production demo identities and authentication bypass controls."""
+    if stage != "prod":
+        return
+
+    if any(name in environment for name in PRODUCTION_FORBIDDEN_DEMO_VARIABLES):
+        raise EnvironmentContractError(
+            "Production must not define demo-mode or demo-identity variables"
+        )
+
+    if (
+        "VITE_COGNITO_ENABLED" in environment
+        and str(environment.get("VITE_COGNITO_ENABLED") or "").strip()
+        != "true"
+    ):
+        raise EnvironmentContractError(
+            "Production VITE_COGNITO_ENABLED must equal true when set"
         )
 
 
@@ -647,6 +681,7 @@ def validate_environment_contract() -> dict:
             expected_account_id,
             production_isolation_mode,
         )
+        validate_production_demo_controls(stage, os.environ)
 
     # AWS validation
     actual_account_id = validate_aws_configuration(aws_region, aws_profile, expected_account_id)

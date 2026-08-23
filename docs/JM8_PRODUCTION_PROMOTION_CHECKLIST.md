@@ -161,6 +161,7 @@ These results demonstrate that the design can work; they do not certify producti
 | Security review | Required | Review auth flows, public webhook, CORS, presigned upload scope, all IAM policies/trusts, secret paths, dependency scan, logging, and tenant isolation |
 | No broad privilege | Required | Prove no administrator attachment, wildcard action, broad Lambda/States/Bedrock action, or wildcard resource where service-level scoping is supported |
 | Secret scan | Required | Scan source, history, generated configs, artifacts, logs, and frontend output; resolve every suspected credential before go-live |
+| Demo-mode shutdown | Required | Verify production configuration rejects every demo/mock/bypass variable, Cognito is explicitly enabled, the frontend artifact contains no demo identity or local endpoint markers, and authenticated Lambda routes reject missing JWT subjects and `x-user-id` substitution |
 | Dependency and artifact provenance | Required | Pin/install from reviewed lockfiles, record build environment, and retain checksums of promoted backend/frontend artifacts |
 | Load/performance test | Required | Exercise API concurrency, DynamoDB access patterns, presigned uploads, OCR starts, Bedrock latency, and historical cap; record p50/p95/p99 and throttles |
 | Quota review | Required | Check Lambda concurrency, Step Functions, Bedrock, Textract, Cognito, API Gateway, DynamoDB, and SNS quotas against forecast and failure mode |

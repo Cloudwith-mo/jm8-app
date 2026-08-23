@@ -15,6 +15,10 @@ const TEXT_EXTENSIONS = new Set([
 
 const FORBIDDEN_ARTIFACT_PATTERNS = [
   { name: "localhost", pattern: /(?:localhost|127\.0\.0\.1)/i },
+  {
+    name: "demo or local authentication marker",
+    pattern: /(?:x-user-id|demo[-_ ]?(?:mode|user|login|banner|route)|VITE_[A-Z0-9_]*(?:DEMO|MOCK|BYPASS))/i,
+  },
   { name: "cross-stage resource", pattern: /journalm8-(?:dev|staging)(?:[-./:_]|$)/i },
   { name: "cross-stage URL", pattern: /https?:\/\/[^\s"']*(?:staging\.|dev\.)/i },
   { name: "Stripe secret", pattern: /(?:sk_(?:live|test)_|whsec_)[A-Za-z0-9]+/ },

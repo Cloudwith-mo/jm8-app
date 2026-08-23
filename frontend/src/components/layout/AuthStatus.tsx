@@ -21,9 +21,9 @@ export default function AuthStatus({
       </div>
 
       <div className="auth-status-copy">
-        <strong>{user ? "Signed in" : "Demo mode"}</strong>
+        <strong>{user ? "Signed in" : "Signed out"}</strong>
         <span>
-          {user?.email || (isAuthReady ? "Using demo-user archive" : "Checking session...")}
+          {user?.email || (isAuthReady ? "Sign in to access your archive" : "Checking session...")}
         </span>
       </div>
 

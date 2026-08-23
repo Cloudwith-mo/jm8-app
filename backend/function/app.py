@@ -120,6 +120,11 @@ def lambda_handler(event, context):
             return response(200, result)
 
         user_id = get_user_id(event)
+        if user_id is None:
+            return response(401, {
+                "error": "Unauthorized",
+                "message": "Authentication is required.",
+            })
 
         if method == "POST" and path == "/entries":
             body = parse_body(event)
@@ -2014,18 +2019,35 @@ def get_user_id(event):
     """
     Auth priority:
     1. Cognito JWT claim sub from API Gateway authorizer
-    2. x-user-id header for local/demo development
-    3. demo-user fallback
-    """
-    claims = (
-        event.get("requestContext", {})
-        .get("authorizer", {})
-        .get("jwt", {})
-        .get("claims", {})
-    )
+    2. Local-development identity header outside production
+    3. Local-development fallback outside production
 
-    if claims.get("sub"):
-        return claims["sub"]
+    Production accepts only a non-empty string Cognito subject. API Gateway
+    validates the JWT before invoking authenticated routes; this additional
+    check prevents direct invocation or malformed events from substituting a
+    development identity.
+    """
+    request_context = event.get("requestContext", {})
+    if not isinstance(request_context, dict):
+        request_context = {}
+    authorizer = request_context.get("authorizer", {})
+    if not isinstance(authorizer, dict):
+        authorizer = {}
+    jwt = authorizer.get("jwt", {})
+    if not isinstance(jwt, dict):
+        jwt = {}
+    claims = jwt.get("claims", {})
+    if not isinstance(claims, dict):
+        claims = {}
+
+    subject = claims.get("sub")
+    if isinstance(subject, str):
+        subject = subject.strip()
+        if subject and len(subject) <= 512:
+            return subject
+
+    if os.environ.get("STAGE", "").strip() == "prod":
+        return None
 
     headers = event.get("headers") or {}
     normalized_headers = {

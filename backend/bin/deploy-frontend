@@ -193,12 +193,7 @@ fi
 cd "$REPO_ROOT/frontend"
 
 npm ci
-npm run test
-if [[ "$STAGE" == "staging" ]]; then
-  export VITE_API_ENDPOINT VITE_APP_STAGE VITE_COGNITO_DOMAIN VITE_COGNITO_CLIENT_ID VITE_COGNITO_REDIRECT_URI VITE_COGNITO_LOGOUT_URI
-  npm run build:staging
-  find dist -type f -name '*.map' -delete
-else
+if [[ "$STAGE" == "prod" ]]; then
   if [[ ! -f .env.production.local ]] ||
      [[ -e .env ]] ||
      [[ -e .env.local ]] ||
@@ -209,6 +204,14 @@ else
   while IFS= read -r variable_name; do
     unset "$variable_name"
   done < <(compgen -A variable VITE_)
+  node scripts/frontend_env_contract.mjs production .
+fi
+npm run test
+if [[ "$STAGE" == "staging" ]]; then
+  export VITE_API_ENDPOINT VITE_APP_STAGE VITE_COGNITO_DOMAIN VITE_COGNITO_CLIENT_ID VITE_COGNITO_REDIRECT_URI VITE_COGNITO_LOGOUT_URI
+  npm run build:staging
+  find dist -type f -name '*.map' -delete
+else
   npm run build:production
   node scripts/validate_production_build.mjs dist
 fi
