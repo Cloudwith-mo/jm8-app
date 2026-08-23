@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -21,6 +22,7 @@ from jm8_resource_tag_contract import (  # noqa: E402
     validate_api,
     validate_lambda,
     validate_user_pool,
+    verify_exact_tags,
     verify_tags,
 )
 
@@ -51,6 +53,7 @@ class ResourceTagContractTests(unittest.TestCase):
                             "App": APP_NAME,
                             "Stage": stage,
                             "ManagedBy": "aws-cli",
+                            "Unrelated": "preserved",
                         }
                     },
                     APP_NAME,
@@ -85,16 +88,95 @@ class ResourceTagContractTests(unittest.TestCase):
 
     def test_api_identity_mismatch_fails_closed(self):
         validate_api(
-            {"ApiId": "prod123456", "Name": "journalm8-prod-api"},
+            {
+                "ApiId": "prod123456",
+                "Name": "journalm8-prod-api",
+                "ProtocolType": "HTTP",
+            },
             "prod123456",
             "journalm8-prod-api",
         )
-        with self.assertRaisesRegex(TagContractError, "does not match"):
-            validate_api(
-                {"ApiId": "prod123456", "Name": "journalm8-staging-api"},
-                "prod123456",
-                "journalm8-prod-api",
-            )
+        for response in (
+            {
+                "ApiId": "prod123456",
+                "Name": "journalm8-staging-api",
+                "ProtocolType": "HTTP",
+            },
+            {
+                "ApiId": "prod123456",
+                "Name": "journalm8-prod-api",
+                "ProtocolType": "WEBSOCKET",
+            },
+            {"ApiId": "prod123456", "Name": "journalm8-prod-api"},
+        ):
+            with self.subTest(response=response):
+                with self.assertRaisesRegex(TagContractError, "does not match"):
+                    validate_api(
+                        response,
+                        "prod123456",
+                        "journalm8-prod-api",
+                    )
+
+    def test_production_embedded_api_tags_require_exact_canonical_map(self):
+        canonical = {
+            "Tags": {
+                "App": APP_NAME,
+                "Stage": "prod",
+                "ManagedBy": "aws-cli",
+            }
+        }
+        verify_exact_tags(canonical, APP_NAME, "prod")
+
+        invalid_responses = (
+            {},
+            {"Tags": []},
+            {"Tags": {"App": APP_NAME, "Stage": "prod"}},
+            {
+                "Tags": {
+                    **canonical["Tags"],
+                    "Unrelated": "rejected",
+                }
+            },
+            {
+                "Tags": {
+                    "App": APP_NAME,
+                    "Stage": "dev",
+                    "ManagedBy": "aws-cli",
+                }
+            },
+            {
+                "Tags": {
+                    "App": APP_NAME,
+                    "Stage": "staging",
+                    "ManagedBy": "aws-cli",
+                }
+            },
+            {
+                "Tags": {
+                    "App": "other",
+                    "Stage": "prod",
+                    "ManagedBy": "aws-cli",
+                }
+            },
+            {
+                "Tags": {
+                    "App": APP_NAME,
+                    "Stage": "prod",
+                    "ManagedBy": "console",
+                }
+            },
+            {
+                "Tags": {
+                    "App": APP_NAME,
+                    "Stage": "prod",
+                    "ManagedBy": 3,
+                }
+            },
+        )
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                with self.assertRaises(TagContractError):
+                    verify_exact_tags(response, APP_NAME, "prod")
 
     def test_cognito_identity_requires_exact_name_account_and_region(self):
         pool_id = "us-east-1_ProdPool123"
@@ -260,6 +342,68 @@ class DeploymentTagWiringTests(unittest.TestCase):
                 "jm8_resource_tag_contract.py",
             )
         }
+
+    @staticmethod
+    def _run_api_tag_helper(
+        function_name,
+        stage,
+        api_document,
+        tag_document=None,
+    ):
+        environment = os.environ.copy()
+        environment.update({
+            "APP_NAME": APP_NAME,
+            "AWS_PROFILE": f"jm8-{stage}",
+            "AWS_REGION": REGION,
+            "EXPECTED_AWS_ACCOUNT_ID": ACCOUNT_ID,
+            "JM8_TEST_API_DOCUMENT": json.dumps(api_document),
+            "JM8_TEST_TAG_DOCUMENT": json.dumps(
+                tag_document if tag_document is not None else {}
+            ),
+            "STAGE": stage,
+        })
+        script = r'''
+source "$1"
+helper_function="$2"
+api_id="$3"
+expected_name="$4"
+
+aws() {
+  printf 'AWS_CALL:%s %s\n' "$1" "$2" >&2
+  case "$1:$2" in
+    apigatewayv2:get-api)
+      printf '%s' "$JM8_TEST_API_DOCUMENT"
+      ;;
+    apigatewayv2:get-tags)
+      printf '%s' "$JM8_TEST_TAG_DOCUMENT"
+      ;;
+    apigatewayv2:tag-resource)
+      return 0
+      ;;
+    *)
+      return 97
+      ;;
+  esac
+}
+
+"$helper_function" "$api_id" "$expected_name"
+'''
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "api-tag-helper-test",
+                str(BIN_DIR / "jm8_resource_tags.sh"),
+                function_name,
+                api_document.get("ApiId", "prod123456"),
+                f"{APP_NAME}-{stage}-api",
+            ],
+            capture_output=True,
+            env=environment,
+            text=True,
+            check=False,
+        )
 
     @staticmethod
     def _lambda_create_blocks(source):
@@ -647,6 +791,139 @@ class DeploymentTagWiringTests(unittest.TestCase):
             helper.index("aws apigatewayv2 tag-resource"),
         )
         self.assertGreaterEqual(helper.count("aws apigatewayv2 get-tags"), 2)
+
+    def test_production_api_helpers_use_only_get_api_embedded_tags(self):
+        api_document = {
+            "ApiId": "j56qvbzzpe",
+            "Name": "journalm8-prod-api",
+            "ProtocolType": "HTTP",
+            "Tags": {
+                "App": APP_NAME,
+                "Stage": "prod",
+                "ManagedBy": "aws-cli",
+            },
+        }
+        for function_name in (
+            "jm8_verify_http_api_tags",
+            "jm8_reconcile_http_api_tags",
+        ):
+            with self.subTest(function=function_name):
+                result = self._run_api_tag_helper(
+                    function_name,
+                    "prod",
+                    api_document,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    re.findall(r"AWS_CALL:apigatewayv2 ([a-z-]+)", result.stderr),
+                    ["get-api"],
+                )
+                self.assertNotIn("get-tags", result.stderr)
+                self.assertNotIn("tag-resource", result.stderr)
+
+    def test_production_api_embedded_tag_mismatches_fail_without_retagging(self):
+        canonical = {
+            "ApiId": "j56qvbzzpe",
+            "Name": "journalm8-prod-api",
+            "ProtocolType": "HTTP",
+            "Tags": {
+                "App": APP_NAME,
+                "Stage": "prod",
+                "ManagedBy": "aws-cli",
+            },
+        }
+        invalid_tag_maps = (
+            None,
+            [],
+            {},
+            {"App": APP_NAME, "Stage": "prod"},
+            {**canonical["Tags"], "Unrelated": "rejected"},
+            {**canonical["Tags"], "App": "other"},
+            {**canonical["Tags"], "Stage": "dev"},
+            {**canonical["Tags"], "Stage": "staging"},
+            {**canonical["Tags"], "ManagedBy": "console"},
+        )
+        for tags in invalid_tag_maps:
+            with self.subTest(tags=tags):
+                response = dict(canonical)
+                if tags is None:
+                    response.pop("Tags")
+                else:
+                    response["Tags"] = tags
+                result = self._run_api_tag_helper(
+                    "jm8_reconcile_http_api_tags",
+                    "prod",
+                    response,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(
+                    re.findall(r"AWS_CALL:apigatewayv2 ([a-z-]+)", result.stderr),
+                    ["get-api"],
+                )
+                self.assertNotIn("get-tags", result.stderr)
+                self.assertNotIn("tag-resource", result.stderr)
+
+    def test_production_api_identity_is_validated_before_embedded_tags(self):
+        for api_document in (
+            {
+                "ApiId": "j56qvbzzpe",
+                "Name": "journalm8-staging-api",
+                "ProtocolType": "HTTP",
+                "Tags": [],
+            },
+            {
+                "ApiId": "j56qvbzzpe",
+                "Name": "journalm8-prod-api",
+                "ProtocolType": "WEBSOCKET",
+                "Tags": {},
+            },
+        ):
+            with self.subTest(api_document=api_document):
+                result = self._run_api_tag_helper(
+                    "jm8_verify_http_api_tags",
+                    "prod",
+                    api_document,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("HTTP API identity does not match", result.stderr)
+                self.assertNotIn("AWS tag response is malformed", result.stderr)
+                self.assertEqual(
+                    re.findall(r"AWS_CALL:apigatewayv2 ([a-z-]+)", result.stderr),
+                    ["get-api"],
+                )
+
+    def test_dev_and_staging_api_reconciliation_remains_idempotent(self):
+        for stage, api_id in (("dev", "dev1234567"), ("staging", "stage12345")):
+            with self.subTest(stage=stage):
+                tags = {
+                    "Tags": {
+                        "App": APP_NAME,
+                        "Stage": stage,
+                        "ManagedBy": "aws-cli",
+                        "Unrelated": "preserved",
+                    }
+                }
+                result = self._run_api_tag_helper(
+                    "jm8_reconcile_http_api_tags",
+                    stage,
+                    {
+                        "ApiId": api_id,
+                        "Name": f"{APP_NAME}-{stage}-api",
+                        "ProtocolType": "HTTP",
+                    },
+                    tags,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    re.findall(r"AWS_CALL:apigatewayv2 ([a-z-]+)", result.stderr),
+                    [
+                        "get-api",
+                        "get-tags",
+                        "tag-resource",
+                        "get-api",
+                        "get-tags",
+                    ],
+                )
 
     def test_cognito_reuse_reconciles_before_child_resources(self):
         source = self.sources["create-auth"]

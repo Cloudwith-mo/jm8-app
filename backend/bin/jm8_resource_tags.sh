@@ -69,17 +69,29 @@ jm8_verify_http_api_tags() {
   local tag_document
 
   jm8_require_resource_tag_context
-  resource_arn="arn:aws:apigateway:${AWS_REGION}::/apis/${api_id}"
   api_document="$(aws apigatewayv2 get-api \
     --api-id "$api_id" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     --output json)"
-  printf '%s' "$api_document" | jm8_tag_contract_command \
+  if ! printf '%s' "$api_document" | jm8_tag_contract_command \
     validate-api \
     --expected-name "$expected_name" \
     --resource-id "$api_id"
+  then
+    return 1
+  fi
 
+  if [ "$STAGE" = "prod" ]; then
+    if ! printf '%s' "$api_document" | jm8_tag_contract_command \
+      verify-exact-tags
+    then
+      return 1
+    fi
+    return 0
+  fi
+
+  resource_arn="arn:aws:apigateway:${AWS_REGION}::/apis/${api_id}"
   tag_document="$(aws apigatewayv2 get-tags \
     --resource-arn "$resource_arn" \
     --profile "$AWS_PROFILE" \
@@ -100,18 +112,30 @@ jm8_reconcile_http_api_tags() {
     echo "HTTP API name does not match the stage contract." >&2
     return 1
   fi
-  resource_arn="arn:aws:apigateway:${AWS_REGION}::/apis/${api_id}"
 
   api_document="$(aws apigatewayv2 get-api \
     --api-id "$api_id" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     --output json)"
-  printf '%s' "$api_document" | jm8_tag_contract_command \
+  if ! printf '%s' "$api_document" | jm8_tag_contract_command \
     validate-api \
     --expected-name "$expected_name" \
     --resource-id "$api_id"
+  then
+    return 1
+  fi
 
+  if [ "$STAGE" = "prod" ]; then
+    if ! printf '%s' "$api_document" | jm8_tag_contract_command \
+      verify-exact-tags
+    then
+      return 1
+    fi
+    return 0
+  fi
+
+  resource_arn="arn:aws:apigateway:${AWS_REGION}::/apis/${api_id}"
   tag_document="$(aws apigatewayv2 get-tags \
     --resource-arn "$resource_arn" \
     --profile "$AWS_PROFILE" \

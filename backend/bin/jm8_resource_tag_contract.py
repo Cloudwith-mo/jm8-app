@@ -80,6 +80,21 @@ def verify_tags(
         raise TagContractError("Required resource tags were not applied exactly.")
 
 
+def verify_exact_tags(
+    value: dict[str, Any],
+    app_name: str,
+    stage: str,
+) -> None:
+    tags = _tag_map(value)
+    expected = {
+        "App": app_name,
+        "Stage": stage,
+        "ManagedBy": "aws-cli",
+    }
+    if tags != expected:
+        raise TagContractError("Resource tags do not exactly match the contract.")
+
+
 def resolve_api(value: dict[str, Any], expected_name: str) -> str:
     items = value.get("Items")
     if not isinstance(items, list) or value.get("NextToken"):
@@ -106,7 +121,11 @@ def validate_api(
 ) -> None:
     if not re.fullmatch(r"[a-z0-9]{10}", api_id):
         raise TagContractError("HTTP API identifier is malformed.")
-    if value.get("ApiId") != api_id or value.get("Name") != expected_name:
+    if (
+        value.get("ApiId") != api_id
+        or value.get("Name") != expected_name
+        or value.get("ProtocolType") != "HTTP"
+    ):
         raise TagContractError("HTTP API identity does not match the deployment contract.")
 
 
@@ -184,6 +203,7 @@ def _parser() -> argparse.ArgumentParser:
             "validate-lambda",
             "verify-tags",
             "verify-tags-before-reconcile",
+            "verify-exact-tags",
         ),
     )
     parser.add_argument("--app-name", required=True)
@@ -231,6 +251,8 @@ def main() -> None:
                 args.account_id,
                 args.region,
             ))
+        elif args.command == "verify-exact-tags":
+            verify_exact_tags(value, args.app_name, args.stage)
         else:
             verify_tags(
                 value,
