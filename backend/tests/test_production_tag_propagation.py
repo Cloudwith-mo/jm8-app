@@ -266,23 +266,45 @@ class DeploymentTagWiringTests(unittest.TestCase):
         self.assertIn("aws cognito-idp create-user-pool", create_auth)
         self.assertIn("aws apigatewayv2 create-api", create_api)
         self.assertIn(
-            '--user-pool-tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli"',
+            '"{\\"App\\":\\"${APP_NAME}\\",\\"Stage\\":\\"${STAGE}\\",'
+            '\\"ManagedBy\\":\\"aws-cli\\"}"',
             create_auth,
         )
         for tag in ('"App=${APP_NAME}"', '"Stage=${STAGE}"', '"ManagedBy=aws-cli"'):
             self.assertIn(tag, create_api)
 
-    def test_cognito_create_tags_are_one_shell_argument(self):
+    def test_cognito_create_tags_are_one_json_shell_argument(self):
         source = self.sources["create-auth"]
         create_block = source[
             source.index("aws cognito-idp create-user-pool \\"):
             source.index("else\n  echo \"User pool already exists")
         ]
-        self.assertIn(
-            '--user-pool-tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \\\n',
+        match = re.search(
+            r'--user-pool-tags \\\n\s+"((?:\\.|[^"\\])*)" \\',
             create_block,
         )
-        self.assertNotIn('--user-pool-tags \\\n', create_block)
+        self.assertIsNotNone(match)
+        encoded_json = match.group(1)
+        json_template = encoded_json.replace(r'\"', '"')
+
+        for stage in ("dev", "staging", "prod"):
+            with self.subTest(stage=stage):
+                expanded_json = json_template.replace(
+                    "${APP_NAME}", APP_NAME
+                ).replace("${STAGE}", stage)
+                self.assertEqual(
+                    json.loads(expanded_json),
+                    {
+                        "App": APP_NAME,
+                        "Stage": stage,
+                        "ManagedBy": "aws-cli",
+                    },
+                )
+
+        self.assertNotIn(
+            'App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli',
+            create_block,
+        )
         for separate_tag in (
             '"App=${APP_NAME}"',
             '"Stage=${STAGE}"',
@@ -293,8 +315,12 @@ class DeploymentTagWiringTests(unittest.TestCase):
     def test_cognito_create_tags_remain_stage_aware_for_all_supported_stages(self):
         source = self.sources["create-auth"]
         self.assertIn("dev|staging|prod", source)
-        self.assertIn("Stage=${STAGE}", source)
-        for hard_coded_stage in ("Stage=dev", "Stage=staging", "Stage=prod"):
+        self.assertIn(r'\"Stage\":\"${STAGE}\"', source)
+        for hard_coded_stage in (
+            r'\"Stage\":\"dev\"',
+            r'\"Stage\":\"staging\"',
+            r'\"Stage\":\"prod\"',
+        ):
             self.assertNotIn(hard_coded_stage, source)
 
     def test_create_auth_has_safe_shell_argument_boundaries(self):
