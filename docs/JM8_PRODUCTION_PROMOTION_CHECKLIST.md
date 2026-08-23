@@ -115,6 +115,7 @@ These results demonstrate that the design can work; they do not certify producti
 | Secrets Manager object | Required | Create `${APP_NAME}/prod/stripe` in the production account; verify ARN, tags, encryption policy, and exact API-role read permission |
 | Live webhook endpoint | Required | Create the exact production HTTPS endpoint and subscribe only to handled events |
 | Live webhook signing material | Required | Store with the API credential in Secrets Manager; production deployment must reject a missing or malformed webhook field |
+| Pre-webhook bootstrap | Required, one-time only | Before the production API exists, `JM8_STRIPE_BOOTSTRAP_MODE=pre-webhook` may provision and deploy only the exact `journalm8/prod/stripe` secret with an `sk_live_` key and no webhook field. `API_ENDPOINT` must be unset. The mode must fail once `journalm8-prod-api` exists; unset it, create the webhook, store the real `whsec_`, and rerun normal deployment before go-live |
 | Secret runtime validation | Required | Verify the API role can retrieve only the exact secret and the application accepts the production mode without printing values |
 | Return URLs | Required | Verify production-only Checkout success/cancel and Portal return URLs; no staging or localhost values |
 | End-to-end live test | Owner decision | Approve a minimal real transaction/refund/cancellation plan, accounting treatment, and cleanup before executing it |

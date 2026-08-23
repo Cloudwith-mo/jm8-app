@@ -44,6 +44,8 @@ from urllib.parse import urlsplit
 JM8_AWS_ACCOUNT_ID = "114743615542"
 PRODUCTION_AWS_PROFILE = "jm8-prod"
 PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
+STRIPE_BOOTSTRAP_MODE = "pre-webhook"
+PRODUCTION_API_NAME = "journalm8-prod-api"
 
 PRODUCTION_SCOPED_REFERENCE_KEYS = {
     "TABLE_NAME",
@@ -336,6 +338,157 @@ def validate_stripe_credentials(
                 )
 
 
+def production_api_exists(profile: str, region: str) -> bool:
+    """Return whether the exact production API exists, failing closed."""
+    try:
+        result = subprocess.run(
+            [
+                "aws", "apigatewayv2", "get-apis",
+                "--profile", profile,
+                "--region", region,
+                "--output", "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise EnvironmentContractError(
+            "Unable to verify production API absence for Stripe bootstrap"
+        ) from error
+
+    if result.returncode != 0:
+        raise EnvironmentContractError(
+            "Unable to verify production API absence for Stripe bootstrap"
+        )
+
+    try:
+        document = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise EnvironmentContractError(
+            "Production API inventory response is malformed"
+        ) from error
+
+    items = document.get("Items") if isinstance(document, dict) else None
+    if not isinstance(items, list) or not all(
+        isinstance(item, dict) and isinstance(item.get("Name"), str)
+        for item in items
+    ):
+        raise EnvironmentContractError(
+            "Production API inventory response is malformed"
+        )
+
+    return any(item["Name"] == PRODUCTION_API_NAME for item in items)
+
+
+def validate_stripe_bootstrap_context(
+    operation: str,
+    stage: str,
+    actual_account_id: Optional[str],
+) -> bool:
+    """Validate the one-time production pre-webhook bootstrap state."""
+    mode = os.environ.get("JM8_STRIPE_BOOTSTRAP_MODE", "").strip()
+    if not mode:
+        return False
+    if mode != STRIPE_BOOTSTRAP_MODE:
+        raise EnvironmentContractError(
+            "JM8_STRIPE_BOOTSTRAP_MODE must equal pre-webhook when set"
+        )
+
+    op = operation.lower()
+    if op not in {"deploy", "provision-stripe-secret"}:
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap is permitted only for deploy or "
+            "provision-stripe-secret"
+        )
+
+    required_values = {
+        "STAGE": stage,
+        "AWS_PROFILE": os.environ.get("AWS_PROFILE", "").strip(),
+        "EXPECTED_AWS_ACCOUNT_ID": os.environ.get(
+            "EXPECTED_AWS_ACCOUNT_ID", ""
+        ).strip(),
+        "DEPLOY_CONFIRMATION": os.environ.get("DEPLOY_CONFIRMATION", "").strip(),
+        "PRODUCTION_ISOLATION_MODE": os.environ.get(
+            "PRODUCTION_ISOLATION_MODE", ""
+        ).strip(),
+        "API_NAME": os.environ.get("API_NAME", "").strip(),
+    }
+    expected_values = {
+        "STAGE": "prod",
+        "AWS_PROFILE": PRODUCTION_AWS_PROFILE,
+        "EXPECTED_AWS_ACCOUNT_ID": JM8_AWS_ACCOUNT_ID,
+        "DEPLOY_CONFIRMATION": "prod",
+        "PRODUCTION_ISOLATION_MODE": PRODUCTION_ISOLATION_MODE,
+        "API_NAME": PRODUCTION_API_NAME,
+    }
+    for name, expected in expected_values.items():
+        if required_values[name] != expected:
+            raise EnvironmentContractError(
+                f"Stripe pre-webhook bootstrap requires exact {name}"
+            )
+
+    if actual_account_id != JM8_AWS_ACCOUNT_ID:
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap requires the approved AWS account"
+        )
+    if os.environ.get("API_ENDPOINT", "").strip():
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap requires API_ENDPOINT to be unset"
+        )
+
+    price_id = os.environ.get("STRIPE_PRO_MONTHLY_PRICE_ID", "").strip()
+    if not re.fullmatch(r"price_[A-Za-z0-9_]{6,}", price_id):
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap requires a production price ID"
+        )
+    checkout_urls = tuple(
+        os.environ.get(name, "").strip()
+        for name in (
+            "STRIPE_CHECKOUT_SUCCESS_URL",
+            "STRIPE_CHECKOUT_CANCEL_URL",
+            "STRIPE_PORTAL_RETURN_URL",
+        )
+    )
+    if not all(checkout_urls):
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap requires checkout and portal URLs"
+        )
+    validate_non_dev_urls(stage, *checkout_urls)
+
+    app_name = os.environ.get("APP_NAME", "").strip()
+    if f"{app_name}/{stage}/stripe" != "journalm8/prod/stripe":
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap requires the production secret path"
+        )
+
+    if op == "provision-stripe-secret":
+        secret_key = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+        if not re.fullmatch(r"sk_live_[A-Za-z0-9_]{8,}", secret_key):
+            raise EnvironmentContractError(
+                "Stripe pre-webhook bootstrap requires a live-mode key"
+            )
+        if os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip():
+            raise EnvironmentContractError(
+                "Stripe pre-webhook bootstrap requires no webhook secret"
+            )
+    else:
+        if os.environ.get("STRIPE_SECRET_KEY", "").strip() or os.environ.get(
+            "STRIPE_WEBHOOK_SECRET", ""
+        ).strip():
+            raise EnvironmentContractError(
+                "deploy must not receive raw Stripe credentials"
+            )
+
+    if production_api_exists(
+        required_values["AWS_PROFILE"], os.environ.get("AWS_REGION", "").strip()
+    ):
+        raise EnvironmentContractError(
+            "Stripe pre-webhook bootstrap is forbidden after production API creation"
+        )
+    return True
+
+
 def validate_confirmation_gate(stage: str) -> None:
     """
     Enforce confirmation gates to prevent accidental deployments.
@@ -530,7 +683,7 @@ def validate_environment_contract() -> dict:
     # Optional: operation-specific validation via JM8_OPERATION env var
     operation = os.environ.get("JM8_OPERATION", "").strip()
     if operation:
-        validate_operation_specific(operation, stage)
+        validate_operation_specific(operation, stage, actual_account_id)
 
     # Optional: validate ALLOWED_ORIGINS if provided
     allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
@@ -554,7 +707,11 @@ def validate_environment_contract() -> dict:
     }
 
 
-def validate_operation_specific(operation: str, stage: str) -> None:
+def validate_operation_specific(
+    operation: str,
+    stage: str,
+    actual_account_id: Optional[str] = None,
+) -> None:
     """
     Perform operation-specific validation rules.
 
@@ -565,6 +722,9 @@ def validate_operation_specific(operation: str, stage: str) -> None:
     - other operations: no special Stripe checks
     """
     op = operation.lower()
+    stripe_bootstrap = validate_stripe_bootstrap_context(
+        operation, stage, actual_account_id
+    )
 
     if op == "deploy":
         stripe_secret_arn = os.environ.get("STRIPE_SECRET_ARN", "").strip()
@@ -593,6 +753,12 @@ def validate_operation_specific(operation: str, stage: str) -> None:
             )
         # Reuse existing validation logic for mode checks
         validate_stripe_credentials(stage, stripe_secret)
+        if op == "provision-stripe-secret" and stage == "prod" and not stripe_bootstrap:
+            webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+            if not re.fullmatch(r"whsec_[A-Za-z0-9_]{8,}", webhook_secret):
+                raise EnvironmentContractError(
+                    "Production requires STRIPE_WEBHOOK_SECRET"
+                )
 
     if op == "create-auth":
         validate_non_dev_urls(

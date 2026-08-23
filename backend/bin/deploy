@@ -210,6 +210,7 @@ aws secretsmanager get-secret-value \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION" \
   | python3 -c '
+# BEGIN STRIPE_DEPLOY_SECRET_VERIFIER
 from __future__ import annotations
 
 import json
@@ -220,12 +221,18 @@ payload = json.load(sys.stdin)
 if not isinstance(payload, dict):
   raise SystemExit("Stripe secret payload is invalid.")
 stage = sys.argv[1]
+bootstrap_mode = sys.argv[2]
 expected_prefix = "sk_live_" if stage == "prod" else "sk_test_"
 if not str(payload.get("STRIPE_SECRET_KEY") or "").startswith(expected_prefix) or not re.fullmatch(r"sk_(test|live)_[A-Za-z0-9_]{8,}", str(payload.get("STRIPE_SECRET_KEY") or "")):
   raise SystemExit("Stripe API secret is invalid.")
-if stage == "prod" and not re.fullmatch(r"whsec_[A-Za-z0-9_]{8,}", str(payload.get("STRIPE_WEBHOOK_SECRET") or "")):
-  raise SystemExit("Production Stripe webhook secret is missing or invalid.")
-' "$STAGE"
+if stage == "prod":
+  if bootstrap_mode == "pre-webhook":
+    if "STRIPE_WEBHOOK_SECRET" in payload:
+      raise SystemExit("Bootstrap Stripe secret must not contain a webhook secret.")
+  elif not re.fullmatch(r"whsec_[A-Za-z0-9_]{8,}", str(payload.get("STRIPE_WEBHOOK_SECRET") or "")):
+    raise SystemExit("Production Stripe webhook secret is missing or invalid.")
+# END STRIPE_DEPLOY_SECRET_VERIFIER
+' "$STAGE" "${JM8_STRIPE_BOOTSTRAP_MODE:-}"
 
 python3 - "$STRIPE_SECRET_ARN" \
   > .build/api-stripe-secret-policy.json <<'PY_STRIPE_POLICY'

@@ -1,5 +1,10 @@
-import unittest
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
 
 
 BACKEND_ROOT = (
@@ -191,11 +196,107 @@ class StripeSecretDeploymentTests(
         self.assertIn("get-secret-value", self.provision)
         self.assertIn('existing.get("STRIPE_WEBHOOK_SECRET")', self.provision)
         self.assertIn('payload["STRIPE_WEBHOOK_SECRET"] = existing_webhook', self.provision)
+        self.assertIn(
+            'bootstrap_mode == "pre-webhook" and "STRIPE_WEBHOOK_SECRET" in existing',
+            self.provision,
+        )
 
-    def test_production_requires_complete_payload_but_bootstrap_does_not(self):
+    def test_production_payload_validation_has_guarded_bootstrap_mode(self):
         self.assertIn('os.environ.get("STAGE") == "prod"', self.provision)
         self.assertIn("Production requires STRIPE_WEBHOOK_SECRET.", self.provision)
         self.assertIn('STRIPE_WEBHOOK_SECRET="${STRIPE_WEBHOOK_SECRET:-}"', self.provision)
+        self.assertIn('JM8_STRIPE_BOOTSTRAP_MODE") == "pre-webhook"', self.provision)
+
+    def test_provision_payload_requires_webhook_except_exact_bootstrap(self):
+        marker = 'python3 - "$SECRET_PAYLOAD_FILE" <<\'PY\'\n'
+        start = self.provision.index(marker) + len(marker)
+        script = self.provision[start:self.provision.index("\nPY\n", start)]
+        secret_value = "sk_live_bootstrap123456"
+
+        def run(mode=None, key=secret_value, webhook=None):
+            environment = os.environ.copy()
+            environment.update({"STAGE": "prod", "STRIPE_SECRET_KEY": key})
+            for name in ("JM8_STRIPE_BOOTSTRAP_MODE", "STRIPE_WEBHOOK_SECRET"):
+                environment.pop(name, None)
+            if mode is not None:
+                environment["JM8_STRIPE_BOOTSTRAP_MODE"] = mode
+            if webhook is not None:
+                environment["STRIPE_WEBHOOK_SECRET"] = webhook
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "secret.json"
+                result = subprocess.run(
+                    [sys.executable, "-", str(output)],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    check=False,
+                )
+                payload = json.loads(output.read_text()) if output.exists() else None
+                return result, payload
+
+        normal_missing, _ = run()
+        self.assertNotEqual(normal_missing.returncode, 0)
+
+        bootstrap, payload = run(mode="pre-webhook")
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+        self.assertEqual(payload, {"STRIPE_SECRET_KEY": secret_value})
+
+        test_key, _ = run(mode="pre-webhook", key="sk_test_rejected123456")
+        self.assertNotEqual(test_key.returncode, 0)
+        with_webhook, _ = run(
+            mode="pre-webhook", webhook="whsec_rejected123456"
+        )
+        self.assertNotEqual(with_webhook.returncode, 0)
+        for result in (normal_missing, bootstrap, test_key, with_webhook):
+            self.assertNotIn(secret_value, result.stdout + result.stderr)
+
+    def test_deploy_payload_verifier_requires_post_api_webhook(self):
+        marker_start = "# BEGIN STRIPE_DEPLOY_SECRET_VERIFIER\n"
+        marker_end = "# END STRIPE_DEPLOY_SECRET_VERIFIER"
+        verifier = self.deploy[
+            self.deploy.index(marker_start) + len(marker_start):
+            self.deploy.index(marker_end)
+        ]
+        live_key = "sk_live_deploy123456"
+        webhook = "whsec_deploy123456"
+
+        def verify(payload, mode=""):
+            return subprocess.run(
+                [sys.executable, "-c", verifier, "prod", mode],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        normal_missing = verify({"STRIPE_SECRET_KEY": live_key})
+        self.assertNotEqual(normal_missing.returncode, 0)
+        normal_complete = verify({
+            "STRIPE_SECRET_KEY": live_key,
+            "STRIPE_WEBHOOK_SECRET": webhook,
+        })
+        self.assertEqual(normal_complete.returncode, 0, normal_complete.stderr)
+        bootstrap = verify({"STRIPE_SECRET_KEY": live_key}, "pre-webhook")
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+        bootstrap_with_webhook = verify({
+            "STRIPE_SECRET_KEY": live_key,
+            "STRIPE_WEBHOOK_SECRET": webhook,
+        }, "pre-webhook")
+        self.assertNotEqual(bootstrap_with_webhook.returncode, 0)
+        bootstrap_test_key = verify(
+            {"STRIPE_SECRET_KEY": "sk_test_rejected123456"}, "pre-webhook"
+        )
+        self.assertNotEqual(bootstrap_test_key.returncode, 0)
+        for result in (
+            normal_missing,
+            normal_complete,
+            bootstrap,
+            bootstrap_with_webhook,
+            bootstrap_test_key,
+        ):
+            self.assertNotIn(live_key, result.stdout + result.stderr)
+            self.assertNotIn(webhook, result.stdout + result.stderr)
 
     def test_temporary_secret_file_is_cleaned(
         self,

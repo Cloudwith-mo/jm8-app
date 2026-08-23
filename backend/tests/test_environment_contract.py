@@ -37,6 +37,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_allowed_origins,
     validate_environment_contract,
     validate_operation_specific,
+    production_api_exists,
     validate_production_isolation_controls,
     validate_production_resource_references,
 )
@@ -91,7 +92,10 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "RAW_BUCKET",
         "DEPLOY_CONFIRMATION",
         "STRIPE_SECRET_KEY",
+        "STRIPE_WEBHOOK_SECRET",
         "STRIPE_SECRET_ARN",
+        "STRIPE_PRO_MONTHLY_PRICE_ID",
+        "JM8_STRIPE_BOOTSTRAP_MODE",
         "ALLOWED_ORIGINS",
         "ENV_NAME",
         "JM8_OPERATION",
@@ -154,6 +158,34 @@ class TestEnvironmentContractValidation(EnvironmentIsolationTestCase):
         """Valid stages pass."""
         for valid_stage in ["dev", "staging", "prod"]:
             validate_stage(valid_stage)
+
+    @patch("jm8_environment_contract.subprocess.run")
+    def test_production_api_lookup_matches_only_exact_name(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"Items":[{"Name":"journalm8-staging-api"}]}',
+            stderr="",
+        )
+        self.assertFalse(production_api_exists("jm8-prod", "us-east-1"))
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"Items":[{"Name":"journalm8-prod-api"}]}',
+            stderr="",
+        )
+        self.assertTrue(production_api_exists("jm8-prod", "us-east-1"))
+
+    @patch("jm8_environment_contract.subprocess.run")
+    def test_production_api_lookup_failures_are_not_absence(self, mock_run):
+        for result in (
+            MagicMock(returncode=1, stdout="", stderr="AccessDenied"),
+            MagicMock(returncode=0, stdout="not-json", stderr=""),
+            MagicMock(returncode=0, stdout='{"Items":{}}', stderr=""),
+        ):
+            with self.subTest(result=result):
+                mock_run.return_value = result
+                with self.assertRaises(EnvironmentContractError):
+                    production_api_exists("jm8-prod", "us-east-1")
 
 
 class TestResourceNamingAndURLs(EnvironmentIsolationTestCase):
@@ -445,7 +477,25 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
                 "arn:aws:secretsmanager:us-east-1:114743615542:"
                 "secret:journalm8/prod/stripe-ABC123"
             ),
+            "STRIPE_PRO_MONTHLY_PRICE_ID": "price_prod123456",
+            "STRIPE_CHECKOUT_SUCCESS_URL": "https://app.journalm8.com/settings?checkout=success",
+            "STRIPE_CHECKOUT_CANCEL_URL": "https://app.journalm8.com/settings?checkout=cancelled",
+            "STRIPE_PORTAL_RETURN_URL": "https://app.journalm8.com/settings",
         }
+
+    def _stripe_bootstrap_environment(self, operation: str) -> dict[str, str]:
+        environment = self._production_environment()
+        environment.update({
+            "JM8_OPERATION": operation,
+            "JM8_STRIPE_BOOTSTRAP_MODE": "pre-webhook",
+        })
+        environment.pop("API_ENDPOINT", None)
+        environment.pop("STRIPE_WEBHOOK_SECRET", None)
+        if operation == "provision-stripe-secret":
+            environment["STRIPE_SECRET_KEY"] = "sk_live_bootstrap123456"
+        else:
+            environment["STRIPE_SECRET_KEY"] = ""
+        return environment
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_valid_dev_environment(self, mock_sts):
@@ -498,6 +548,131 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "stage-scoped-same-account",
         )
         mock_sts.assert_called_once_with("jm8-prod", "us-east-1")
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_normal_production_secret_provision_still_requires_webhook(
+        self, mock_sts
+    ):
+        mock_sts.return_value = "114743615542"
+        environment = self._production_environment()
+        environment.update({
+            "JM8_OPERATION": "provision-stripe-secret",
+            "STRIPE_SECRET_KEY": "sk_live_normal123456",
+        })
+        environment.pop("STRIPE_WEBHOOK_SECRET", None)
+        environment.pop("JM8_STRIPE_BOOTSTRAP_MODE", None)
+        os.environ.update(environment)
+
+        with self.assertRaisesRegex(
+            EnvironmentContractError, "STRIPE_WEBHOOK_SECRET"
+        ):
+            validate_environment_contract()
+
+    @patch("jm8_environment_contract.production_api_exists", return_value=False)
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_exact_pre_webhook_mode_accepts_provision_and_deploy(
+        self, mock_sts, mock_api_exists
+    ):
+        mock_sts.return_value = "114743615542"
+        for operation in ("provision-stripe-secret", "deploy"):
+            with self.subTest(operation=operation):
+                os.environ.update(self._stripe_bootstrap_environment(operation))
+                validate_environment_contract()
+        self.assertEqual(mock_api_exists.call_count, 2)
+
+    @patch("jm8_environment_contract.production_api_exists", return_value=False)
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_pre_webhook_mode_rejects_non_exact_acknowledgment(
+        self, mock_sts, mock_api_exists
+    ):
+        mock_sts.return_value = "114743615542"
+        environment = self._stripe_bootstrap_environment(
+            "provision-stripe-secret"
+        )
+        environment["JM8_STRIPE_BOOTSTRAP_MODE"] = "bootstrap"
+        os.environ.update(environment)
+
+        with self.assertRaisesRegex(
+            EnvironmentContractError, "JM8_STRIPE_BOOTSTRAP_MODE"
+        ):
+            validate_environment_contract()
+        mock_api_exists.assert_not_called()
+
+    @patch("jm8_environment_contract.production_api_exists", return_value=False)
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_pre_webhook_mode_rejects_test_key_without_exposing_it(
+        self, mock_sts, mock_api_exists
+    ):
+        mock_sts.return_value = "114743615542"
+        secret_value = "sk_test_must_not_leak123456"
+        environment = self._stripe_bootstrap_environment(
+            "provision-stripe-secret"
+        )
+        environment["STRIPE_SECRET_KEY"] = secret_value
+        os.environ.update(environment)
+
+        with self.assertRaises(EnvironmentContractError) as captured:
+            validate_environment_contract()
+        self.assertNotIn(secret_value, str(captured.exception))
+        mock_api_exists.assert_not_called()
+
+    @patch("jm8_environment_contract.production_api_exists", return_value=True)
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_pre_webhook_mode_rejects_existing_production_api(
+        self, mock_sts, mock_api_exists
+    ):
+        mock_sts.return_value = "114743615542"
+        os.environ.update(self._stripe_bootstrap_environment("deploy"))
+
+        with self.assertRaisesRegex(EnvironmentContractError, "forbidden after"):
+            validate_environment_contract()
+        mock_api_exists.assert_called_once_with("jm8-prod", "us-east-1")
+
+    @patch("jm8_environment_contract.production_api_exists", return_value=False)
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_pre_webhook_mode_rejects_set_api_endpoint(
+        self, mock_sts, mock_api_exists
+    ):
+        mock_sts.return_value = "114743615542"
+        environment = self._stripe_bootstrap_environment("deploy")
+        environment["API_ENDPOINT"] = "https://prod.execute-api.us-east-1.amazonaws.com"
+        os.environ.update(environment)
+
+        with self.assertRaisesRegex(EnvironmentContractError, "API_ENDPOINT"):
+            validate_environment_contract()
+        mock_api_exists.assert_not_called()
+
+    @patch("jm8_environment_contract.production_api_exists", return_value=False)
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_pre_webhook_deploy_rejects_raw_stripe_credentials(
+        self, mock_sts, mock_api_exists
+    ):
+        mock_sts.return_value = "114743615542"
+        for variable, secret_value in (
+            ("STRIPE_SECRET_KEY", "sk_live_must_not_leak123456"),
+            ("STRIPE_WEBHOOK_SECRET", "whsec_must_not_leak123456"),
+        ):
+            with self.subTest(variable=variable):
+                environment = self._stripe_bootstrap_environment("deploy")
+                environment[variable] = secret_value
+                os.environ.update(environment)
+                with self.assertRaises(EnvironmentContractError) as captured:
+                    validate_environment_contract()
+                self.assertNotIn(secret_value, str(captured.exception))
+        mock_api_exists.assert_not_called()
+
+    def test_pre_webhook_mode_rejects_dev_and_staging(self):
+        for stage in ("dev", "staging"):
+            with self.subTest(stage=stage):
+                environment = self._stripe_bootstrap_environment(
+                    "provision-stripe-secret"
+                )
+                environment["STAGE"] = stage
+                os.environ.update(environment)
+                with self.assertRaisesRegex(EnvironmentContractError, "exact STAGE"):
+                    validate_operation_specific(
+                        "provision-stripe-secret", stage, "114743615542"
+                    )
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_prod_rejects_dev_profile_before_sts(self, mock_sts):
