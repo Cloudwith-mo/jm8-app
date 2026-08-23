@@ -393,6 +393,77 @@ class PolicyGenerationTests(unittest.TestCase):
                     )
                     self.assertIn("Condition", statement)
 
+    def test_api_gateway_access_log_delivery_control_plane_is_exact(self):
+        policies = generate_policies()
+        observability = policies[
+            "journalm8-prod-deployer-observability"
+        ]["Statement"]
+        statement = next(
+            item
+            for item in observability
+            if item["Sid"] == "ManageApiGatewayAccessLogDelivery"
+        )
+        approved_actions = {
+            "logs:CreateLogDelivery",
+            "logs:DeleteLogDelivery",
+            "logs:DescribeLogGroups",
+            "logs:DescribeResourcePolicies",
+            "logs:GetLogDelivery",
+            "logs:ListLogDeliveries",
+            "logs:PutResourcePolicy",
+            "logs:UpdateLogDelivery",
+        }
+        self.assertEqual(set(statement["Action"]), approved_actions)
+        self.assertEqual(len(statement["Action"]), 8)
+        self.assertEqual(statement["Resource"], "*")
+        self.assertEqual(
+            statement["Condition"],
+            {"StringEquals": {"aws:RequestedRegion": "us-east-1"}},
+        )
+
+        unscoped_logs_statements = [
+            item
+            for document in policies.values()
+            for item in document["Statement"]
+            if item["Resource"] == "*"
+            and any(action.startswith("logs:") for action in item["Action"])
+        ]
+        self.assertEqual(unscoped_logs_statements, [statement])
+
+        all_logs_actions = {
+            action
+            for document in policies.values()
+            for item in document["Statement"]
+            for action in item["Action"]
+            if action.startswith("logs:")
+        }
+        self.assertEqual(
+            all_logs_actions,
+            approved_actions
+            | {
+                "logs:CreateLogGroup",
+                "logs:PutMetricFilter",
+                "logs:PutRetentionPolicy",
+            },
+        )
+        for forbidden in (
+            "logs:*",
+            "logs:CancelExportTask",
+            "logs:CreateExportTask",
+            "logs:DeleteLogGroup",
+            "logs:DeleteSubscriptionFilter",
+            "logs:DescribeSubscriptionFilters",
+            "logs:FilterLogEvents",
+            "logs:GetLogEvents",
+            "logs:GetLogRecord",
+            "logs:GetQueryResults",
+            "logs:PutSubscriptionFilter",
+            "logs:StartQuery",
+            "logs:StopQuery",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, all_logs_actions)
+
     def test_opaque_api_ids_are_gated_by_exact_production_tags(self):
         statements = generate_policies()[
             "journalm8-prod-deployer-compute"
@@ -406,6 +477,11 @@ class PolicyGenerationTests(unittest.TestCase):
             statement
             for statement in statements
             if statement["Sid"] == "ManageTaggedProductionHttpApi"
+        )
+        self.assertEqual(create["Action"], ["apigateway:POST"])
+        self.assertEqual(
+            create["Resource"],
+            "arn:aws:apigateway:us-east-1::/apis",
         )
         self.assertEqual(
             create["Condition"],
@@ -426,6 +502,14 @@ class PolicyGenerationTests(unittest.TestCase):
                     "aws:TagKeys": "false",
                 },
             },
+        )
+        self.assertEqual(
+            manage["Action"],
+            ["apigateway:GET", "apigateway:PATCH", "apigateway:POST"],
+        )
+        self.assertEqual(
+            manage["Resource"],
+            "arn:aws:apigateway:us-east-1::/apis/*",
         )
         self.assertEqual(
             manage["Condition"],

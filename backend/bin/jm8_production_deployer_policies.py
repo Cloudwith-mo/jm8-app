@@ -55,15 +55,24 @@ AWS_LAMBDA_BASIC_POLICY_ARN = (
     "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 )
 BEDROCK_PROFILE_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+LOG_DELIVERY_CONTROL_PLANE_ACTIONS = {
+    "logs:CreateLogDelivery",
+    "logs:DeleteLogDelivery",
+    "logs:DescribeLogGroups",
+    "logs:DescribeResourcePolicies",
+    "logs:GetLogDelivery",
+    "logs:ListLogDeliveries",
+    "logs:PutResourcePolicy",
+    "logs:UpdateLogDelivery",
+}
 RESOURCE_STAR_ACTIONS = {
     "cloudfront:CreateDistribution",
     "cloudfront:CreateOriginAccessControl",
     "cognito-idp:CreateUserPool",
     "cognito-idp:DescribeUserPoolDomain",
     "cognito-idp:ListUserPools",
-    "logs:DescribeLogGroups",
-    "logs:PutResourcePolicy",
     "states:ListStateMachines",
+    *LOG_DELIVERY_CONTROL_PLANE_ACTIONS,
 }
 
 
@@ -544,14 +553,8 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             log_group_arns,
         ),
         _statement(
-            "ReadLogGroupInventory",
-            ("logs:DescribeLogGroups",),
-            "*",
-            requested_region_condition,
-        ),
-        _statement(
-            "ManageAccountLogDeliveryPolicies",
-            ("logs:PutResourcePolicy",),
+            "ManageApiGatewayAccessLogDelivery",
+            LOG_DELIVERY_CONTROL_PLANE_ACTIONS,
             "*",
             requested_region_condition,
         ),
