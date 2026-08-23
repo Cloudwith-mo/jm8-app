@@ -323,6 +323,49 @@ class DeploymentTagWiringTests(unittest.TestCase):
         ):
             self.assertNotIn(hard_coded_stage, source)
 
+    def test_cognito_reconcile_tags_are_one_json_shell_argument(self):
+        helper = self.sources["jm8_resource_tags.sh"]
+        reconcile_block = helper[
+            helper.index("jm8_reconcile_cognito_user_pool_tags()"):
+            helper.index("jm8_reconcile_lambda_tags()")
+        ]
+        match = re.search(
+            r'aws cognito-idp tag-resource .*?--tags \\\n'
+            r'\s+"((?:\\.|[^"\\])*)" \\',
+            reconcile_block,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        encoded_json = match.group(1)
+        json_template = encoded_json.replace(r'\"', '"')
+
+        for stage in ("dev", "staging", "prod"):
+            with self.subTest(stage=stage):
+                expanded_json = json_template.replace(
+                    "${APP_NAME}", APP_NAME
+                ).replace("${STAGE}", stage)
+                self.assertEqual(
+                    json.loads(expanded_json),
+                    {
+                        "App": APP_NAME,
+                        "Stage": stage,
+                        "ManagedBy": "aws-cli",
+                    },
+                )
+
+        self.assertNotIn(
+            'App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli',
+            reconcile_block,
+        )
+        for separate_tag in (
+            '"App=${APP_NAME}"',
+            '"Stage=${STAGE}"',
+            '"ManagedBy=aws-cli"',
+        ):
+            self.assertNotIn(separate_tag, reconcile_block)
+        self.assertIn('if [ "$APP_NAME" != "journalm8" ]', helper)
+        self.assertIn("dev|staging|prod", helper)
+
     def test_create_auth_has_safe_shell_argument_boundaries(self):
         source = self.sources["create-auth"]
         concatenated_option = re.compile(
@@ -348,9 +391,12 @@ class DeploymentTagWiringTests(unittest.TestCase):
 
     def test_cognito_reuse_reconciles_before_child_resources(self):
         source = self.sources["create-auth"]
+        reconcile_index = source.index("jm8_reconcile_cognito_user_pool_tags")
         self.assertLess(
-            source.index("jm8_reconcile_cognito_user_pool_tags"),
-            source.index("aws cognito-idp list-user-pool-clients"),
+            reconcile_index, source.index("aws cognito-idp list-user-pool-clients")
+        )
+        self.assertLess(
+            reconcile_index, source.index("aws cognito-idp create-user-pool-domain")
         )
         client_block = source[
             source.index("aws cognito-idp create-user-pool-client"):

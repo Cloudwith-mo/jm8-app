@@ -181,9 +181,7 @@ jm8_reconcile_cognito_user_pool_tags() {
   aws cognito-idp tag-resource \
     --resource-arn "$pool_arn" \
     --tags \
-      "App=${APP_NAME}" \
-      "Stage=${STAGE}" \
-      "ManagedBy=aws-cli" \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null
