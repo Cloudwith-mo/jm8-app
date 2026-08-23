@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -262,13 +263,49 @@ class DeploymentTagWiringTests(unittest.TestCase):
     def test_production_create_commands_supply_canonical_tags(self):
         create_auth = self.sources["create-auth"]
         create_api = self.sources["create-api"]
-        self.assertIn("--user-pool-tags", create_auth)
         self.assertIn("aws cognito-idp create-user-pool", create_auth)
         self.assertIn("aws apigatewayv2 create-api", create_api)
-        for source in (create_auth, create_api):
-            self.assertIn('"App=${APP_NAME}"', source)
-            self.assertIn('"Stage=${STAGE}"', source)
-            self.assertIn('"ManagedBy=aws-cli"', source)
+        self.assertIn(
+            '--user-pool-tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli"',
+            create_auth,
+        )
+        for tag in ('"App=${APP_NAME}"', '"Stage=${STAGE}"', '"ManagedBy=aws-cli"'):
+            self.assertIn(tag, create_api)
+
+    def test_cognito_create_tags_are_one_shell_argument(self):
+        source = self.sources["create-auth"]
+        create_block = source[
+            source.index("aws cognito-idp create-user-pool \\"):
+            source.index("else\n  echo \"User pool already exists")
+        ]
+        self.assertIn(
+            '--user-pool-tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \\\n',
+            create_block,
+        )
+        self.assertNotIn('--user-pool-tags \\\n', create_block)
+        for separate_tag in (
+            '"App=${APP_NAME}"',
+            '"Stage=${STAGE}"',
+            '"ManagedBy=aws-cli"',
+        ):
+            self.assertNotIn(separate_tag, create_block)
+
+    def test_cognito_create_tags_remain_stage_aware_for_all_supported_stages(self):
+        source = self.sources["create-auth"]
+        self.assertIn("dev|staging|prod", source)
+        self.assertIn("Stage=${STAGE}", source)
+        for hard_coded_stage in ("Stage=dev", "Stage=staging", "Stage=prod"):
+            self.assertNotIn(hard_coded_stage, source)
+
+    def test_create_auth_has_safe_shell_argument_boundaries(self):
+        source = self.sources["create-auth"]
+        concatenated_option = re.compile(
+            r'''(?:"[^"\n]*"|'[^'\n]*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|'''
+            r'''\$[A-Za-z_][A-Za-z0-9_]*)(--[a-z][a-z0-9-]*)'''
+        )
+        self.assertEqual(concatenated_option.findall(source), [])
+        for forbidden in ("|| true", "eval ", "set -x"):
+            self.assertNotIn(forbidden, source)
 
     def test_api_reuse_reconciles_before_any_update(self):
         source = self.sources["create-api"]

@@ -69,10 +69,7 @@ if [[ -z "$USER_POOL_ID" ]]; then
       --auto-verified-attributes email \
       --account-recovery-setting 'RecoveryMechanisms=[{Priority=1,Name=verified_email}]' \
       --policies 'PasswordPolicy={MinimumLength=8,RequireUppercase=true,RequireLowercase=true,RequireNumbers=true,RequireSymbols=false,TemporaryPasswordValidityDays=7}' \
-      --user-pool-tags \
-        "App=${APP_NAME}" \
-        "Stage=${STAGE}" \
-        "ManagedBy=aws-cli" \
+      --user-pool-tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
       --profile "$AWS_PROFILE" \
       --region "$AWS_REGION" \
       --query 'UserPool.Id' \
