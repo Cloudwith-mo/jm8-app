@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
 
@@ -376,6 +377,105 @@ class DeploymentTagWiringTests(unittest.TestCase):
         for forbidden in ("|| true", "eval ", "set -x"):
             self.assertNotIn(forbidden, source)
 
+    def test_create_auth_requires_final_app_client_verification(self):
+        source = self.sources["create-auth"]
+        client_branch_end = source.index(
+            'fi\n\necho "Checking Cognito Hosted UI domain'
+        )
+        describe_index = source.index(
+            "aws cognito-idp describe-user-pool-client"
+        )
+        verifier_index = source.index("# BEGIN COGNITO_APP_CLIENT_VERIFIER")
+        environment_write_index = source.index('COGNITO_ENV_TEMP="$(mktemp')
+        success_index = source.index('echo "Cognito auth foundation ready:"')
+
+        self.assertEqual(
+            source.count("aws cognito-idp describe-user-pool-client"), 1
+        )
+        self.assertGreater(describe_index, client_branch_end)
+        self.assertLess(describe_index, verifier_index)
+        self.assertLess(verifier_index, environment_write_index)
+        self.assertLess(verifier_index, success_index)
+        self.assertIn('--user-pool-id "$USER_POOL_ID"', source)
+        self.assertIn('--client-id "$APP_CLIENT_ID"', source)
+        self.assertIn("if ! printf '%s' \"$APP_CLIENT_DOCUMENT\"", source)
+        self.assertIn("unset APP_CLIENT_DOCUMENT", source)
+
+    def test_app_client_verifier_accepts_only_the_exact_contract(self):
+        source = self.sources["create-auth"]
+        marker_start = "# BEGIN COGNITO_APP_CLIENT_VERIFIER\n"
+        marker_end = "# END COGNITO_APP_CLIENT_VERIFIER"
+        verifier = source[
+            source.index(marker_start) + len(marker_start):source.index(marker_end)
+        ]
+        client_id = "test-client-id"
+        client_name = "journalm8-prod-web"
+        callback_url = "https://prod.example.com/callback"
+        logout_url = "https://prod.example.com"
+        expected_client = {
+            "ClientId": client_id,
+            "ClientName": client_name,
+            "GenerateSecret": False,
+            "AllowedOAuthFlowsUserPoolClient": True,
+            "AllowedOAuthFlows": ["code"],
+            "AllowedOAuthScopes": ["openid", "email", "profile"],
+            "CallbackURLs": [callback_url],
+            "LogoutURLs": [logout_url],
+            "SupportedIdentityProviders": ["COGNITO"],
+        }
+        command = [
+            sys.executable,
+            "-c",
+            verifier,
+            client_id,
+            client_name,
+            callback_url,
+            logout_url,
+        ]
+
+        accepted = subprocess.run(
+            command,
+            input=json.dumps({"UserPoolClient": expected_client}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+        mismatches = {
+            "ClientId": "other-client-id",
+            "ClientName": "journalm8-staging-web",
+            "GenerateSecret": True,
+            "AllowedOAuthFlowsUserPoolClient": False,
+            "AllowedOAuthFlows": ["implicit"],
+            "AllowedOAuthScopes": ["openid", "email"],
+            "CallbackURLs": ["https://staging.example.com/callback"],
+            "LogoutURLs": ["https://staging.example.com"],
+            "SupportedIdentityProviders": ["Google"],
+        }
+        for field, mismatched_value in mismatches.items():
+            with self.subTest(field=field):
+                client = dict(expected_client)
+                client[field] = mismatched_value
+                rejected = subprocess.run(
+                    command,
+                    input=json.dumps({"UserPoolClient": client}),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertNotIn(mismatched_value.__repr__(), rejected.stderr)
+
+        malformed = subprocess.run(
+            command,
+            input="not-json",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(malformed.returncode, 0)
+
     def test_api_reuse_reconciles_before_any_update(self):
         source = self.sources["create-api"]
         self.assertLess(
@@ -404,7 +504,7 @@ class DeploymentTagWiringTests(unittest.TestCase):
         ]
         domain_block = source[
             source.index("aws cognito-idp create-user-pool-domain"):
-            source.index("fi\n\nCOGNITO_ISSUER")
+            source.index("fi\n\nAPP_CLIENT_DOCUMENT")
         ]
         self.assertNotIn("--tags", client_block)
         self.assertNotIn("--tags", domain_block)

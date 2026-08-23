@@ -213,6 +213,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "cognito-idp:CreateUserPoolDomain",
                 "cognito-idp:CreateUserPoolClient",
                 "cognito-idp:DescribeUserPool",
+                "cognito-idp:DescribeUserPoolClient",
                 "cognito-idp:ListTagsForResource",
                 "cognito-idp:ListUserPoolClients",
             ),
