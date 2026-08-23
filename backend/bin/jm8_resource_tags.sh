@@ -123,9 +123,7 @@ jm8_reconcile_http_api_tags() {
   aws apigatewayv2 tag-resource \
     --resource-arn "$resource_arn" \
     --tags \
-      "App=${APP_NAME}" \
-      "Stage=${STAGE}" \
-      "ManagedBy=aws-cli" \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null
@@ -233,9 +231,7 @@ jm8_reconcile_lambda_tags() {
   aws lambda tag-resource \
     --resource "$function_arn" \
     --tags \
-      "App=${APP_NAME}" \
-      "Stage=${STAGE}" \
-      "ManagedBy=aws-cli" \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null

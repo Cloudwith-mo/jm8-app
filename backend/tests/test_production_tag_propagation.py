@@ -269,6 +269,42 @@ class DeploymentTagWiringTests(unittest.TestCase):
             flags=re.DOTALL,
         )
 
+    def _assert_one_canonical_json_tag_argument(self, block, service):
+        match = re.search(
+            rf'aws {re.escape(service)} tag-resource .*?--tags \\\n'
+            r'\s+"((?:\\.|[^"\\])*)" \\\n\s+--profile ',
+            block,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(block.count("--tags"), 1)
+        json_template = match.group(1).replace(r'\"', '"')
+
+        for stage in ("dev", "staging", "prod"):
+            with self.subTest(service=service, stage=stage):
+                expanded_json = json_template.replace(
+                    "${APP_NAME}", APP_NAME
+                ).replace("${STAGE}", stage)
+                self.assertEqual(
+                    json.loads(expanded_json),
+                    {
+                        "App": APP_NAME,
+                        "Stage": stage,
+                        "ManagedBy": "aws-cli",
+                    },
+                )
+
+        self.assertNotIn(
+            "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli",
+            block,
+        )
+        for separate_tag in (
+            '"App=${APP_NAME}"',
+            '"Stage=${STAGE}"',
+            '"ManagedBy=aws-cli"',
+        ):
+            self.assertNotIn(separate_tag, block)
+
     def test_production_create_commands_supply_canonical_tags(self):
         create_auth = self.sources["create-auth"]
         create_api = self.sources["create-api"]
@@ -279,8 +315,52 @@ class DeploymentTagWiringTests(unittest.TestCase):
             '\\"ManagedBy\\":\\"aws-cli\\"}"',
             create_auth,
         )
-        for tag in ('"App=${APP_NAME}"', '"Stage=${STAGE}"', '"ManagedBy=aws-cli"'):
-            self.assertIn(tag, create_api)
+        self.assertIn(
+            '"{\\"App\\":\\"${APP_NAME}\\",\\"Stage\\":\\"${STAGE}\\",'
+            '\\"ManagedBy\\":\\"aws-cli\\"}"',
+            create_api,
+        )
+
+    def test_api_create_tags_are_one_json_shell_argument(self):
+        source = self.sources["create-api"]
+        create_block = source[
+            source.index("aws apigatewayv2 create-api \\"):
+            source.index('echo "Created API: $API_ID"')
+        ]
+        match = re.search(
+            r'--tags \\\n\s+"((?:\\.|[^"\\])*)" \\\n\s+--query ',
+            create_block,
+        )
+        self.assertIsNotNone(match)
+        self.assertEqual(create_block.count("--tags"), 1)
+        json_template = match.group(1).replace(r'\"', '"')
+
+        for stage in ("dev", "staging", "prod"):
+            with self.subTest(stage=stage):
+                expanded_json = json_template.replace(
+                    "${APP_NAME}", APP_NAME
+                ).replace("${STAGE}", stage)
+                self.assertEqual(
+                    json.loads(expanded_json),
+                    {
+                        "App": APP_NAME,
+                        "Stage": stage,
+                        "ManagedBy": "aws-cli",
+                    },
+                )
+
+        self.assertNotIn(
+            "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli",
+            create_block,
+        )
+        for separate_tag in (
+            '"App=${APP_NAME}"',
+            '"Stage=${STAGE}"',
+            '"ManagedBy=aws-cli"',
+        ):
+            self.assertNotIn(separate_tag, create_block)
+        for list_tag_prefix in ("key=App", "Key=App"):
+            self.assertNotIn(list_tag_prefix, create_block)
 
     def test_cognito_create_tags_are_one_json_shell_argument(self):
         source = self.sources["create-auth"]
@@ -338,42 +418,106 @@ class DeploymentTagWiringTests(unittest.TestCase):
             helper.index("jm8_reconcile_cognito_user_pool_tags()"):
             helper.index("jm8_reconcile_lambda_tags()")
         ]
-        match = re.search(
-            r'aws cognito-idp tag-resource .*?--tags \\\n'
-            r'\s+"((?:\\.|[^"\\])*)" \\',
+        self._assert_one_canonical_json_tag_argument(
             reconcile_block,
-            flags=re.DOTALL,
+            "cognito-idp",
         )
-        self.assertIsNotNone(match)
-        encoded_json = match.group(1)
-        json_template = encoded_json.replace(r'\"', '"')
-
-        for stage in ("dev", "staging", "prod"):
-            with self.subTest(stage=stage):
-                expanded_json = json_template.replace(
-                    "${APP_NAME}", APP_NAME
-                ).replace("${STAGE}", stage)
-                self.assertEqual(
-                    json.loads(expanded_json),
-                    {
-                        "App": APP_NAME,
-                        "Stage": stage,
-                        "ManagedBy": "aws-cli",
-                    },
-                )
-
-        self.assertNotIn(
-            'App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli',
-            reconcile_block,
-        )
-        for separate_tag in (
-            '"App=${APP_NAME}"',
-            '"Stage=${STAGE}"',
-            '"ManagedBy=aws-cli"',
-        ):
-            self.assertNotIn(separate_tag, reconcile_block)
         self.assertIn('if [ "$APP_NAME" != "journalm8" ]', helper)
         self.assertIn("dev|staging|prod", helper)
+
+    def test_api_reconcile_tags_are_one_json_shell_argument(self):
+        helper = self.sources["jm8_resource_tags.sh"]
+        reconcile_block = helper[
+            helper.index("jm8_reconcile_http_api_tags()"):
+            helper.index("jm8_resolve_cognito_user_pool_id()")
+        ]
+        self._assert_one_canonical_json_tag_argument(
+            reconcile_block,
+            "apigatewayv2",
+        )
+
+    def test_lambda_reconcile_tags_are_one_json_shell_argument(self):
+        helper = self.sources["jm8_resource_tags.sh"]
+        reconcile_block = helper[
+            helper.index("jm8_reconcile_lambda_tags()"):
+        ]
+        self._assert_one_canonical_json_tag_argument(
+            reconcile_block,
+            "lambda",
+        )
+
+    def test_all_shared_tag_resource_maps_use_json(self):
+        helper = self.sources["jm8_resource_tags.sh"]
+        self.assertEqual(
+            re.findall(r"aws ([a-z0-9-]+) tag-resource", helper),
+            ["apigatewayv2", "cognito-idp", "lambda"],
+        )
+        self.assertEqual(
+            helper.count(
+                '"{\\"App\\":\\"${APP_NAME}\\",'
+                '\\"Stage\\":\\"${STAGE}\\",'
+                '\\"ManagedBy\\":\\"aws-cli\\"}"'
+            ),
+            3,
+        )
+
+    def test_map_valued_api_tags_remain_distinct_from_list_interfaces(self):
+        helper = self.sources["jm8_resource_tags.sh"]
+        self.assertNotIn("aws stepfunctions", helper)
+        self.assertNotIn("aws iam", helper)
+
+        create_api = self.sources["create-api"]
+        self.assertIn(
+            '--tags \\\n'
+            '      "{\\"App\\":\\"${APP_NAME}\\",'
+            '\\"Stage\\":\\"${STAGE}\\",'
+            '\\"ManagedBy\\":\\"aws-cli\\"}" \\',
+            create_api,
+        )
+
+        historical = self.sources["deploy-historical-reanalysis-workflow"]
+        state_machine_create = historical[
+            historical.index("aws stepfunctions create-state-machine"):
+            historical.index('--query "stateMachineArn"')
+        ]
+        self.assertIn(
+            '--tags \\\n'
+            '        "key=App,value=${APP_NAME}" \\\n'
+            '        "key=Stage,value=${STAGE}" \\\n'
+            '        "key=ManagedBy,value=aws-cli" \\',
+            state_machine_create,
+        )
+
+        cloudformation = (
+            BIN_DIR / "create-frontend-hosting"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '--tags "App=$APP_NAME" "Stage=$STAGE" '
+            '"ManagedBy=aws-cli"',
+            cloudformation,
+        )
+
+        dynamodb = (BIN_DIR / "create-resources").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '--tags \\\n'
+            '      Key=App,Value="$APP_NAME" \\\n'
+            '      Key=Stage,Value="$STAGE" \\\n'
+            '      Key=ManagedBy,Value=aws-cli \\',
+            dynamodb,
+        )
+
+        secrets_manager = (BIN_DIR / "provision-stripe-secret").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '--tags \\\n'
+            '        "Key=App,Value=${APP_NAME}" \\\n'
+            '        "Key=Stage,Value=${STAGE}" \\\n'
+            '        "Key=ManagedBy,Value=aws-cli" \\',
+            secrets_manager,
+        )
 
     def test_create_auth_has_safe_shell_argument_boundaries(self):
         source = self.sources["create-auth"]

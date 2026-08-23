@@ -53,9 +53,7 @@ if [ -z "$API_ID" ]; then
     --protocol-type HTTP \
     --cors-configuration "$CORS_CONFIGURATION" \
     --tags \
-      "App=${APP_NAME}" \
-      "Stage=${STAGE}" \
-      "ManagedBy=aws-cli" \
+      "{\"App\":\"${APP_NAME}\",\"Stage\":\"${STAGE}\",\"ManagedBy\":\"aws-cli\"}" \
     --query "ApiId" \
     --output text \
     --profile "$AWS_PROFILE" \
