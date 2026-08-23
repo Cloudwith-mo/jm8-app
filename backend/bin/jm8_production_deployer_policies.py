@@ -255,6 +255,19 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
 
     api_collection_arn = f"arn:aws:apigateway:{region}::/apis"
     api_resource_arn = f"arn:aws:apigateway:{region}::/apis/*"
+    api_tag_on_create_arn = (
+        f"arn:aws:apigateway:{region}::/tags/"
+        f"arn%3Aaws%3Aapigateway%3A{region}%3A%3A%2Fv2%2Fapis%2F*"
+    )
+    required_api_request_tag_presence = {
+        "aws:RequestTag/App": "false",
+        "aws:RequestTag/ManagedBy": "false",
+        "aws:RequestTag/Stage": "false",
+        "aws:TagKeys": "false",
+    }
+    exact_api_request_tag_keys = {
+        "aws:TagKeys": ["App", "ManagedBy", "Stage"],
+    }
     compute = _policy(
         _statement(
             "ManageProductionLambdaFunctions",
@@ -300,8 +313,25 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "StringEquals": {
                     "apigateway:Request/ApiName": "journalm8-prod-api",
                     "aws:RequestTag/App": APP_NAME,
+                    "aws:RequestTag/ManagedBy": "aws-cli",
                     "aws:RequestTag/Stage": STAGE,
-                }
+                },
+                "ForAllValues:StringEquals": exact_api_request_tag_keys,
+                "Null": required_api_request_tag_presence,
+            },
+        ),
+        _statement(
+            "TagProductionHttpApiDuringCreation",
+            ("apigateway:POST",),
+            api_tag_on_create_arn,
+            {
+                "StringEquals": {
+                    "aws:RequestTag/App": APP_NAME,
+                    "aws:RequestTag/ManagedBy": "aws-cli",
+                    "aws:RequestTag/Stage": STAGE,
+                },
+                "ForAllValues:StringEquals": exact_api_request_tag_keys,
+                "Null": required_api_request_tag_presence,
             },
         ),
         _statement(

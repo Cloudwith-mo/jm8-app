@@ -413,8 +413,18 @@ class PolicyGenerationTests(unittest.TestCase):
                 "StringEquals": {
                     "apigateway:Request/ApiName": "journalm8-prod-api",
                     "aws:RequestTag/App": "journalm8",
+                    "aws:RequestTag/ManagedBy": "aws-cli",
                     "aws:RequestTag/Stage": "prod",
-                }
+                },
+                "ForAllValues:StringEquals": {
+                    "aws:TagKeys": ["App", "ManagedBy", "Stage"],
+                },
+                "Null": {
+                    "aws:RequestTag/App": "false",
+                    "aws:RequestTag/ManagedBy": "false",
+                    "aws:RequestTag/Stage": "false",
+                    "aws:TagKeys": "false",
+                },
             },
         )
         self.assertEqual(
@@ -426,6 +436,162 @@ class PolicyGenerationTests(unittest.TestCase):
                 }
             },
         )
+
+    def test_http_api_tag_on_create_statement_is_exact_and_separate(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-compute"
+        ]["Statement"]
+        create = next(
+            statement
+            for statement in statements
+            if statement["Sid"] == "CreateTaggedProductionHttpApi"
+        )
+        tag_on_create = next(
+            statement
+            for statement in statements
+            if statement["Sid"] == "TagProductionHttpApiDuringCreation"
+        )
+        expected_resource = (
+            "arn:aws:apigateway:us-east-1::/tags/"
+            "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fv2%2Fapis%2F*"
+        )
+
+        self.assertEqual(tag_on_create["Effect"], "Allow")
+        self.assertEqual(tag_on_create["Action"], ["apigateway:POST"])
+        self.assertEqual(tag_on_create["Resource"], expected_resource)
+        self.assertEqual(
+            tag_on_create["Condition"],
+            {
+                "StringEquals": {
+                    "aws:RequestTag/App": "journalm8",
+                    "aws:RequestTag/ManagedBy": "aws-cli",
+                    "aws:RequestTag/Stage": "prod",
+                },
+                "ForAllValues:StringEquals": {
+                    "aws:TagKeys": ["App", "ManagedBy", "Stage"],
+                },
+                "Null": {
+                    "aws:RequestTag/App": "false",
+                    "aws:RequestTag/ManagedBy": "false",
+                    "aws:RequestTag/Stage": "false",
+                    "aws:TagKeys": "false",
+                },
+            },
+        )
+        self.assertNotIn(
+            "apigateway:Request/ApiName",
+            tag_on_create["Condition"]["StringEquals"],
+        )
+        self.assertEqual(create["Resource"], "arn:aws:apigateway:us-east-1::/apis")
+        self.assertEqual(
+            create["Condition"]["StringEquals"][
+                "apigateway:Request/ApiName"
+            ],
+            "journalm8-prod-api",
+        )
+
+        tag_resources = [
+            statement["Resource"]
+            for statement in statements
+            if "/tags/" in statement["Resource"]
+        ]
+        self.assertEqual(tag_resources, [expected_resource])
+        self.assertNotIn("arn:aws:apigateway:us-east-1::/tags/*", tag_resources)
+
+    def test_http_api_tag_on_create_rejects_noncanonical_requests(self):
+        statement = next(
+            statement
+            for statement in generate_policies()[
+                "journalm8-prod-deployer-compute"
+            ]["Statement"]
+            if statement["Sid"] == "TagProductionHttpApiDuringCreation"
+        )
+
+        def authorized(action, resource, request_tags):
+            if action not in statement["Action"]:
+                return False
+            if not fnmatchcase(resource, statement["Resource"]):
+                return False
+
+            condition = statement["Condition"]
+            for key, expected in condition["StringEquals"].items():
+                tag_key = key.removeprefix("aws:RequestTag/")
+                if request_tags.get(tag_key) != expected:
+                    return False
+
+            allowed_keys = set(
+                condition["ForAllValues:StringEquals"]["aws:TagKeys"]
+            )
+            if not request_tags or not set(request_tags).issubset(allowed_keys):
+                return False
+
+            for key, expected_null in condition["Null"].items():
+                if key == "aws:TagKeys":
+                    is_null = not request_tags
+                else:
+                    tag_key = key.removeprefix("aws:RequestTag/")
+                    is_null = tag_key not in request_tags
+                if is_null != (expected_null == "true"):
+                    return False
+            return True
+
+        exact_resource = (
+            "arn:aws:apigateway:us-east-1::/tags/"
+            "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fv2%2Fapis%2Fprod123"
+        )
+        canonical_tags = {
+            "App": "journalm8",
+            "Stage": "prod",
+            "ManagedBy": "aws-cli",
+        }
+        self.assertTrue(
+            authorized("apigateway:POST", exact_resource, canonical_tags)
+        )
+
+        for missing_key in canonical_tags:
+            with self.subTest(missing=missing_key):
+                tags = dict(canonical_tags)
+                del tags[missing_key]
+                self.assertFalse(
+                    authorized("apigateway:POST", exact_resource, tags)
+                )
+
+        tags_with_extra = {**canonical_tags, "Owner": "unapproved"}
+        self.assertFalse(
+            authorized("apigateway:POST", exact_resource, tags_with_extra)
+        )
+
+        incorrect_values = (
+            ("App", "journalm8-dev"),
+            ("App", "journalm8-staging"),
+            ("Stage", "dev"),
+            ("Stage", "staging"),
+            ("ManagedBy", "console"),
+        )
+        for key, value in incorrect_values:
+            with self.subTest(key=key, value=value):
+                tags = dict(canonical_tags)
+                tags[key] = value
+                self.assertFalse(
+                    authorized("apigateway:POST", exact_resource, tags)
+                )
+
+        self.assertFalse(
+            authorized("apigateway:GET", exact_resource, canonical_tags)
+        )
+        for unrelated_resource in (
+            "arn:aws:apigateway:us-east-1::/tags/*",
+            "arn:aws:apigateway:us-east-1::/tags/unrelated",
+            "arn:aws:apigateway:us-east-1::/apis/prod123",
+        ):
+            with self.subTest(resource=unrelated_resource):
+                self.assertFalse(
+                    authorized(
+                        "apigateway:POST",
+                        unrelated_resource,
+                        canonical_tags,
+                    )
+                )
 
     def test_opaque_cloudfront_writes_require_cloudformation_forwarding(self):
         statements = generate_policies()[
