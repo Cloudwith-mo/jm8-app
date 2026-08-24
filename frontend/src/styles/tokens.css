@@ -1,0 +1,60 @@
+:root {
+  --jm8-brand-50: #f8f6ff;
+  --jm8-brand-100: #f0ebff;
+  --jm8-brand-200: #e3d8ff;
+  --jm8-brand-300: #cab8ff;
+  --jm8-brand-400: #a98cff;
+  --jm8-brand-500: #825cf6;
+  --jm8-brand-600: #6d3de7;
+  --jm8-brand-700: #592fc2;
+  --jm8-brand-800: #48279b;
+  --jm8-brand-900: #33206b;
+  --jm8-gradient-brand: linear-gradient(135deg, #7041ed 0%, #5525df 100%);
+  --jm8-gradient-soft: linear-gradient(145deg, #ffffff 0%, #faf9ff 100%);
+
+  --jm8-bg: #fafafd;
+  --jm8-surface: #ffffff;
+  --jm8-surface-subtle: #fcfbff;
+  --jm8-surface-muted: #f4f3f8;
+  --jm8-text: #11101a;
+  --jm8-text-soft: #4c4a59;
+  --jm8-text-muted: #777484;
+  --jm8-border: #e5e4eb;
+  --jm8-border-strong: #d7d5df;
+  --jm8-success: #16865f;
+  --jm8-success-bg: #eaf8f2;
+  --jm8-warning: #a8610a;
+  --jm8-warning-bg: #fff6e4;
+  --jm8-danger: #c83d56;
+  --jm8-danger-bg: #fff0f2;
+
+  --jm8-shadow-xs: 0 1px 2px rgba(26, 23, 36, 0.04);
+  --jm8-shadow-sm: 0 5px 16px rgba(35, 29, 49, 0.055);
+  --jm8-shadow-md: 0 12px 32px rgba(35, 27, 54, 0.08);
+  --jm8-shadow-lg: 0 22px 54px rgba(35, 25, 58, 0.11);
+
+  --jm8-radius-sm: 8px;
+  --jm8-radius-md: 10px;
+  --jm8-radius-lg: 14px;
+  --jm8-radius-xl: 18px;
+  --jm8-radius-pill: 999px;
+
+  --jm8-space-1: 4px;
+  --jm8-space-2: 8px;
+  --jm8-space-3: 12px;
+  --jm8-space-4: 16px;
+  --jm8-space-5: 20px;
+  --jm8-space-6: 24px;
+  --jm8-space-8: 32px;
+  --jm8-space-10: 40px;
+  --jm8-space-12: 48px;
+  --jm8-space-16: 64px;
+
+  --jm8-font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --jm8-font-display: var(--jm8-font-sans);
+  --jm8-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --jm8-focus-ring: 0 0 0 3px rgba(109, 61, 231, 0.24);
+  --jm8-sidebar-width: 236px;
+  --jm8-breakpoint-mobile: 760px;
+  --jm8-breakpoint-tablet: 1080px;
+}
