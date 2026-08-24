@@ -9,7 +9,7 @@ Environment Contract:
 - APP_NAME must equal journalm8
 - STAGE must be exactly dev, staging, or prod
 - AWS_REGION must be explicitly set
-- AWS_PROFILE must be explicitly set
+- AWS_PROFILE must be jm8-dev for dev/staging and jm8-prod for prod
 - EXPECTED_AWS_ACCOUNT_ID must be explicitly configured and match actual STS account
 - dev/staging/prod currently require account 114743615542
 - prod requires AWS_PROFILE=jm8-prod and explicit same-account isolation acknowledgment
@@ -42,7 +42,12 @@ from urllib.parse import urlsplit
 
 
 JM8_AWS_ACCOUNT_ID = "114743615542"
-PRODUCTION_AWS_PROFILE = "jm8-prod"
+CANONICAL_AWS_PROFILE_BY_STAGE = {
+    "dev": "jm8-dev",
+    "staging": "jm8-dev",
+    "prod": "jm8-prod",
+}
+PRODUCTION_AWS_PROFILE = CANONICAL_AWS_PROFILE_BY_STAGE["prod"]
 PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
 STRIPE_BOOTSTRAP_MODE = "pre-webhook"
 PRODUCTION_API_NAME = "journalm8-prod-api"
@@ -124,6 +129,17 @@ def validate_stage(stage: str) -> None:
     if stage not in allowed_stages:
         raise EnvironmentContractError(
             f"STAGE must be one of {sorted(allowed_stages)}, got '{stage}'"
+        )
+
+
+def validate_stage_aws_profile(stage: str, aws_profile: str) -> None:
+    """Require the repository's canonical deployment profile for each stage."""
+    expected_profile = CANONICAL_AWS_PROFILE_BY_STAGE.get(stage)
+    if expected_profile is None:
+        raise EnvironmentContractError("Cannot validate AWS_PROFILE for invalid STAGE")
+    if aws_profile != expected_profile:
+        raise EnvironmentContractError(
+            f"STAGE={stage} requires AWS_PROFILE={expected_profile}"
         )
 
 
@@ -670,6 +686,7 @@ def validate_environment_contract() -> dict:
     # Basic validation
     validate_app_name(app_name)
     validate_stage(stage)
+    validate_stage_aws_profile(stage, aws_profile)
 
     # Production controls are checked before STS so an unapproved profile or
     # incomplete same-account acknowledgment cannot initiate even a read call.
@@ -796,6 +813,10 @@ def validate_operation_specific(
                 )
 
     if op == "create-auth":
+        validate_stage_aws_profile(
+            stage,
+            os.environ.get("AWS_PROFILE", "").strip(),
+        )
         validate_non_dev_urls(
             stage,
             os.environ.get("CALLBACK_URL", "").strip(),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -29,6 +31,7 @@ from jm8_cognito_branding import (  # noqa: E402
     canonical_logo,
     generate_assets,
     inspect_customization,
+    main as branding_main,
     validate_app_client,
     validate_boundary,
     validate_css,
@@ -44,10 +47,11 @@ POOL_SUFFIX = "JM8Pool123"
 
 
 def boundary(stage: str = "prod") -> BrandingBoundary:
+    profile = "jm8-prod" if stage == "prod" else "jm8-dev"
     return BrandingBoundary(
         app_name=APP_NAME,
         stage=stage,
-        aws_profile=f"jm8-{stage}",
+        aws_profile=profile,
         account_id=ACCOUNT_ID,
         region=REGION,
         deploy_confirmation=stage if stage in {"staging", "prod"} else "",
@@ -97,6 +101,17 @@ class FakeAws:
         self.calls.append((service, operation, arguments))
         expected = self.expected
         boundary_value = expected.boundary
+
+        def require_argument(name: str, value: str) -> None:
+            try:
+                actual = arguments[arguments.index(name) + 1]
+            except (ValueError, IndexError) as error:
+                raise AssertionError(f"Missing AWS argument: {name}") from error
+            if actual != value:
+                raise AssertionError(
+                    f"Incorrect AWS argument boundary for {operation}: {name}"
+                )
+
         if (service, operation) == ("sts", "get-caller-identity"):
             return {
                 "Account": boundary_value.account_id,
@@ -113,6 +128,7 @@ class FakeAws:
                 }]
             }
         if operation == "describe-user-pool":
+            require_argument("--user-pool-id", expected.user_pool_id)
             return {
                 "UserPool": {
                     "Id": expected.user_pool_id,
@@ -121,6 +137,7 @@ class FakeAws:
                 }
             }
         if operation == "list-tags-for-resource":
+            require_argument("--resource-arn", expected.user_pool_arn)
             return {
                 "Tags": {
                     "App": APP_NAME,
@@ -129,6 +146,7 @@ class FakeAws:
                 }
             }
         if operation == "list-user-pool-clients":
+            require_argument("--user-pool-id", expected.user_pool_id)
             return {
                 "UserPoolClients": [{
                     "ClientId": expected.app_client_id,
@@ -136,8 +154,11 @@ class FakeAws:
                 }]
             }
         if operation == "describe-user-pool-client":
+            require_argument("--user-pool-id", expected.user_pool_id)
+            require_argument("--client-id", expected.app_client_id)
             return client_document(expected)
         if operation == "describe-user-pool-domain":
+            require_argument("--domain", boundary_value.domain_prefix)
             return {
                 "DomainDescription": {
                     "Domain": boundary_value.domain_prefix,
@@ -147,8 +168,12 @@ class FakeAws:
                 }
             }
         if operation == "get-ui-customization":
+            require_argument("--user-pool-id", expected.user_pool_id)
+            require_argument("--client-id", expected.app_client_id)
             return {"UICustomization": copy.deepcopy(self.customization)}
         if operation == "set-ui-customization":
+            require_argument("--user-pool-id", expected.user_pool_id)
+            require_argument("--client-id", expected.app_client_id)
             self.set_count += 1
             css_index = arguments.index("--css") + 1
             self.customization = {
@@ -247,6 +272,94 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
         for changes in mutations:
             with self.subTest(changes=changes), self.assertRaises(CognitoBrandingError):
                 validate_boundary(BrandingBoundary(**{**original.__dict__, **changes}))
+
+    def test_noncanonical_stage_profile_combinations_fail_closed(self):
+        for stage, profile in (
+            ("staging", "jm8-prod"),
+            ("staging", "arbitrary-profile"),
+            ("staging", "jm8-staging"),
+            ("prod", "jm8-dev"),
+            ("prod", "arbitrary-profile"),
+            ("dev", "jm8-prod"),
+        ):
+            rejected = boundary(stage)
+            rejected = BrandingBoundary(
+                **{**rejected.__dict__, "aws_profile": profile}
+            )
+            with self.subTest(stage=stage, profile=profile):
+                with self.assertRaisesRegex(
+                    CognitoBrandingError,
+                    "AWS profile does not match the stage",
+                ):
+                    validate_boundary(rejected)
+
+    def test_create_auth_staging_arguments_reach_real_apply_path_with_jm8_dev(self):
+        expected = target("staging")
+        aws = FakeAws(expected)
+
+        class LogoResponse:
+            status = 200
+            headers = {"Content-Type": "image/png"}
+
+            def __init__(self, request) -> None:
+                self.url = request.full_url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def geturl(self):
+                return self.url
+
+            def read(self, _limit):
+                return canonical_logo()
+
+        arguments = [
+            "jm8_cognito_branding.py",
+            "apply",
+            "--app-name",
+            APP_NAME,
+            "--stage",
+            "staging",
+            "--aws-profile",
+            "jm8-dev",
+            "--expected-account-id",
+            ACCOUNT_ID,
+            "--aws-region",
+            REGION,
+            "--deploy-confirmation",
+            "staging",
+            "--production-isolation-mode",
+            "",
+            "--user-pool-id",
+            expected.user_pool_id,
+            "--app-client-id",
+            expected.app_client_id,
+            "--callback-url",
+            expected.callback_url,
+            "--logout-url",
+            expected.logout_url,
+        ]
+        with (
+            patch("sys.argv", arguments),
+            patch("jm8_cognito_branding.AwsCli", return_value=aws) as aws_cli,
+            patch(
+                "jm8_cognito_branding.urlopen",
+                side_effect=lambda request, timeout: LogoResponse(request),
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            branding_main()
+
+        aws_cli.assert_called_once_with("jm8-dev", REGION)
+        self.assertEqual(aws.set_count, 1)
+        self.assertIn(
+            ("cognito-idp", "set-ui-customization"),
+            {(service, operation) for service, operation, _ in aws.calls},
+        )
+        self.assertIn("reconciled", output.getvalue())
 
     def test_target_rejects_cross_stage_or_malformed_values(self):
         original = target("prod")
@@ -460,6 +573,12 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
 
     def test_create_auth_uses_one_shared_reconciler_before_environment_output(self):
         source = CREATE_AUTH.read_text(encoding="utf-8")
+        helper_source = (BIN_DIR / "jm8_cognito_branding.py").read_text(
+            encoding="utf-8"
+        )
+        environment_source = (BIN_DIR / "jm8_environment_contract.py").read_text(
+            encoding="utf-8"
+        )
         helper_index = source.index('python3 "$COGNITO_BRANDING_HELPER" apply')
         domain_index = source.index('echo "Checking Cognito Hosted UI domain')
         environment_index = source.index('COGNITO_ENV_TEMP="$(mktemp')
@@ -468,6 +587,10 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
         self.assertEqual(source.count('jm8_cognito_branding.py'), 1)
         self.assertEqual(source.count('set-ui-customization'), 0)
         self.assertIn("--managed-login-version 1", source)
+        self.assertNotIn("PROFILE_BY_STAGE", helper_source)
+        self.assertNotIn('"jm8-staging"', helper_source)
+        self.assertIn("validate_stage_aws_profile", helper_source)
+        self.assertIn('"staging": "jm8-dev"', environment_source)
         for argument in (
             '--app-name "$APP_NAME"',
             '--stage "$STAGE"',

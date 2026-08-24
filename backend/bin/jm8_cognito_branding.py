@@ -19,17 +19,20 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from jm8_environment_contract import (
+    EnvironmentContractError,
+    JM8_AWS_ACCOUNT_ID,
+    PRODUCTION_ISOLATION_MODE as ENVIRONMENT_PRODUCTION_ISOLATION_MODE,
+    validate_stage,
+    validate_stage_aws_profile,
+)
+
 
 APP_NAME = "journalm8"
-ACCOUNT_ID = "114743615542"
+ACCOUNT_ID = JM8_AWS_ACCOUNT_ID
 REGION = "us-east-1"
 CLASSIC_HOSTED_UI_VERSION = 1
-PROFILE_BY_STAGE = {
-    "dev": "jm8-dev",
-    "staging": "jm8-staging",
-    "prod": "jm8-prod",
-}
-PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
+PRODUCTION_ISOLATION_MODE = ENVIRONMENT_PRODUCTION_ISOLATION_MODE
 CANONICAL_TAGS = {
     "App": APP_NAME,
     "ManagedBy": "aws-cli",
@@ -140,9 +143,13 @@ def _fail(message: str) -> None:
 def validate_boundary(boundary: BrandingBoundary) -> None:
     if boundary.app_name != APP_NAME:
         _fail("Cognito branding requires the canonical application name.")
-    if boundary.stage not in PROFILE_BY_STAGE:
+    try:
+        validate_stage(boundary.stage)
+    except EnvironmentContractError:
         _fail("Cognito branding stage is invalid.")
-    if boundary.aws_profile != PROFILE_BY_STAGE[boundary.stage]:
+    try:
+        validate_stage_aws_profile(boundary.stage, boundary.aws_profile)
+    except EnvironmentContractError:
         _fail("Cognito branding AWS profile does not match the stage.")
     if boundary.account_id != ACCOUNT_ID:
         _fail("Cognito branding account does not match the approved account.")

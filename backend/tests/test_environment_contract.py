@@ -28,6 +28,7 @@ from jm8_environment_contract import (  # noqa: E402
     get_actual_aws_account_id,
     validate_app_name,
     validate_stage,
+    validate_stage_aws_profile,
     validate_aws_configuration,
     validate_stage_account_mapping,
     validate_resource_names,
@@ -336,6 +337,31 @@ class TestAccountMapping(EnvironmentIsolationTestCase):
             validate_stage_account_mapping("prod", "999999999999")
 
 
+class TestStageProfileMapping(EnvironmentIsolationTestCase):
+
+    def test_canonical_stage_profiles_are_exact(self):
+        for stage, profile in (
+            ("dev", "jm8-dev"),
+            ("staging", "jm8-dev"),
+            ("prod", "jm8-prod"),
+        ):
+            with self.subTest(stage=stage, profile=profile):
+                validate_stage_aws_profile(stage, profile)
+
+    def test_noncanonical_stage_profiles_fail_closed(self):
+        for stage, profile in (
+            ("staging", "jm8-prod"),
+            ("staging", "arbitrary-profile"),
+            ("staging", "jm8-staging"),
+            ("prod", "jm8-dev"),
+            ("prod", "arbitrary-profile"),
+            ("dev", "jm8-prod"),
+        ):
+            with self.subTest(stage=stage, profile=profile):
+                with self.assertRaises(EnvironmentContractError):
+                    validate_stage_aws_profile(stage, profile)
+
+
 class TestProductionIsolationControls(EnvironmentIsolationTestCase):
 
     def test_exact_owner_approved_controls_pass(self):
@@ -533,7 +559,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "APP_NAME": "journalm8",
             "STAGE": "staging",
             "AWS_REGION": "us-east-1",
-            "AWS_PROFILE": "jm8-staging",
+            "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
@@ -912,7 +938,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "STAGE": "staging",
             "ENV_NAME": "dev",
             "AWS_REGION": "us-east-1",
-            "AWS_PROFILE": "jm8-staging",
+            "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
@@ -930,7 +956,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "APP_NAME": "journalm8",
             "STAGE": "staging",
             "AWS_REGION": "us-east-1",
-            "AWS_PROFILE": "jm8-staging",
+            "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
@@ -982,7 +1008,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "APP_NAME": "journalm8",
             "STAGE": "staging",
             "AWS_REGION": "us-east-1",
-            "AWS_PROFILE": "jm8-staging",
+            "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
@@ -1003,7 +1029,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "APP_NAME": "journalm8",
             "STAGE": "staging",
             "AWS_REGION": "us-east-1",
-            "AWS_PROFILE": "jm8-staging",
+            "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
@@ -1271,12 +1297,24 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
         self.assertIn("ALLOWED_ORIGINS", str(ctx.exception))
 
     def test_create_auth_rejects_non_dev_localhost_callback(self):
+        os.environ["AWS_PROFILE"] = "jm8-dev"
         os.environ["CALLBACK_URL"] = "http://localhost:5173/callback"
         os.environ["LOGOUT_URL"] = "https://staging.example.com"
 
         with self.assertRaises(EnvironmentContractError) as ctx:
             validate_operation_specific("create-auth", "staging")
         self.assertIn("localhost", str(ctx.exception))
+
+    def test_create_auth_staging_uses_canonical_dev_profile(self):
+        os.environ["AWS_PROFILE"] = "jm8-dev"
+        os.environ["CALLBACK_URL"] = "https://staging.example.com/callback"
+        os.environ["LOGOUT_URL"] = "https://staging.example.com"
+
+        validate_operation_specific("create-auth", "staging")
+
+        os.environ["AWS_PROFILE"] = "jm8-staging"
+        with self.assertRaises(EnvironmentContractError):
+            validate_operation_specific("create-auth", "staging")
 
 
 class TestTemplatesAndIgnoreRules(EnvironmentIsolationTestCase):
