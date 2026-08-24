@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, Menu, Sprout, X } from "lucide-react";
+import { BookOpen, CalendarDays, Image as ImageIcon, Menu, Upload, UserRound, X } from "lucide-react";
 import ArchiveSidebar, {
   type ArchiveSection,
 } from "../components/layout/ArchiveSidebar";
 import ArchiveTopbar from "../components/layout/ArchiveTopbar";
-import SelectedEntryPanel from "../components/layout/SelectedEntryPanel";
-import ArchiveChips, { type ArchiveChipFilter } from "../components/archive/ArchiveChips";
 import EntryCard from "../components/archive/EntryCard";
+import EntryDetailView from "../components/archive/EntryDetailView";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
 import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
@@ -20,8 +19,9 @@ import AuthLandingPage from "./AuthLandingPage";
 import {
   BrandMark,
   EmptyState,
+  ErrorState,
   IconButton,
-  PageHeader,
+  LoadingState,
 } from "../components/ui/V2Primitives";
 import UsageMeter from "../components/usage/UsageMeter";
 import AccountPlanCard from "../components/account/AccountPlanCard";
@@ -53,6 +53,7 @@ import {
   getUsage,
   listEntries,
   reviewEntry,
+  retryOcrJob,
   runOcr,
   waitForOcrCompletion,
   uploadFileToS3,
@@ -82,22 +83,38 @@ function getEntrySearchText(entry: JournalEntry) {
     .toLowerCase();
 }
 
-function getEntryDateValue(entry: JournalEntry) {
-  return entry.createdAt ? new Date(entry.createdAt).getTime() : 0;
+function getValidEntryDate(entry: JournalEntry) {
+  if (!entry.createdAt) return null;
+  const date = new Date(entry.createdAt);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function groupEntries(entries: JournalEntry[]) {
-  const groups: Record<string, JournalEntry[]> = {};
+  const groups = new Map<string, { label: string; months: Map<string, { label: string; entries: JournalEntry[] }> }>();
 
   for (const entry of entries) {
-    const date = entry.createdAt ? new Date(entry.createdAt) : new Date();
-    const label = date.toLocaleString([], { month: "long", year: "numeric" });
-
-    if (!groups[label]) groups[label] = [];
-    groups[label].push(entry);
+    const date = getValidEntryDate(entry);
+    const yearKey = date ? String(date.getFullYear()) : "undated";
+    const monthKey = date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}` : "undated";
+    const year = groups.get(yearKey) || { label: date ? String(date.getFullYear()) : "Date unavailable", months: new Map() };
+    const month = year.months.get(monthKey) || { label: date ? date.toLocaleString([], { month: "long" }) : "Date unavailable", entries: [] };
+    month.entries.push(entry);
+    year.months.set(monthKey, month);
+    groups.set(yearKey, year);
   }
 
-  return groups;
+  return Array.from(groups, ([key, year]) => ({ key, label: year.label, months: Array.from(year.months, ([monthKey, month]) => ({ key: monthKey, ...month })) }));
+}
+
+function getEntryRouteId() {
+  return new URL(window.location.href).searchParams.get("entry");
+}
+
+function setEntryRoute(entryId: string | null, mode: "push" | "replace" = "push") {
+  const url = new URL(window.location.href);
+  if (entryId) url.searchParams.set("entry", entryId);
+  else url.searchParams.delete("entry");
+  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -110,7 +127,10 @@ export default function ArchivePage() {
   const [statusMessage, setStatusMessage] = useState("Loading archive...");
   const [modalMode, setModalMode] = useState<ModalMode>(null);
   const [isBusy, setIsBusy] = useState(false);
-  const [isSelectedPanelOpen, setIsSelectedPanelOpen] = useState(false);
+  const [isEntryDetailOpen, setIsEntryDetailOpen] = useState(false);
+  const [isArchiveLoading, setIsArchiveLoading] = useState(true);
+  const [archiveError, setArchiveError] = useState("");
+  const [isEntryLoading, setIsEntryLoading] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [activeSection, setActiveSection] =
     useState<ArchiveSection>("archive");
@@ -119,7 +139,6 @@ export default function ArchivePage() {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("newest");
-  const [chipFilter, setChipFilter] = useState<ArchiveChipFilter>({ type: "all", value: "all" });
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [authUser, setAuthUser] = useState<AuthUser | null>(getCurrentUser());
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -173,27 +192,11 @@ export default function ArchivePage() {
           if (statusFilter === "NOT_ANALYZED") {
             return entry.analysisStatus !== "COMPLETED";
           }
-
-          if (!(entry.status === statusFilter || entry.analysisStatus === statusFilter)) {
-            return false;
-          }
-        }
-
-        if (chipFilter.type === "year") {
-          const entryYear = entry.createdAt
-            ? String(new Date(entry.createdAt).getFullYear())
-            : "";
-
-          return entryYear === chipFilter.value;
-        }
-
-        if (chipFilter.type === "theme") {
-          const fallbackTheme = entry.sourceType === "image" ? "OCR" : "Typed";
-          const themes = [...(entry.analysis?.themes || []), fallbackTheme];
-
-          return themes.some(
-            (theme) => theme.toLowerCase() === chipFilter.value.toLowerCase()
-          );
+          if (statusFilter === "ANALYZED") return entry.analysisStatus === "COMPLETED";
+          if (statusFilter === "REVIEWED") return entry.reviewStatus === "REVIEWED";
+          if (statusFilter === "OCR_COMPLETED") return entry.ocrStatus === "COMPLETED";
+          if (statusFilter === "OCR_FAILED") return entry.ocrStatus === "FAILED";
+          return entry.status === statusFilter;
         }
 
         return true;
@@ -203,8 +206,8 @@ export default function ArchivePage() {
         return getEntrySearchText(entry).includes(query);
       })
       .sort((a, b) => {
-        const aTime = getEntryDateValue(a);
-        const bTime = getEntryDateValue(b);
+        const aTime = getValidEntryDate(a)?.getTime() ?? 0;
+        const bTime = getValidEntryDate(b)?.getTime() ?? 0;
 
         if (sortOrder === "oldest") {
           return aTime - bTime;
@@ -212,9 +215,18 @@ export default function ArchivePage() {
 
         return bTime - aTime;
       });
-  }, [entries, searchQuery, sourceFilter, statusFilter, sortOrder, chipFilter]);
+  }, [entries, searchQuery, sourceFilter, statusFilter, sortOrder]);
 
   const groupedEntries = useMemo(() => groupEntries(filteredEntries), [filteredEntries]);
+  const archiveStats = useMemo(() => {
+    const datedYears = new Set(entries.map(getValidEntryDate).filter(Boolean).map((date) => date!.getFullYear()));
+    return {
+      loaded: entries.length,
+      years: datedYears.size,
+      analyzed: entries.filter((entry) => entry.analysisStatus === "COMPLETED").length,
+      scanned: entries.filter((entry) => entry.sourceType === "image").length,
+    };
+  }, [entries]);
 
   function dismissToast(id: string) {
     setToasts((currentToasts) => currentToasts.filter((toast) => toast.id !== id));
@@ -248,7 +260,8 @@ export default function ArchivePage() {
     if (
       section !== "archive"
     ) {
-      setIsSelectedPanelOpen(false);
+      setIsEntryDetailOpen(false);
+      setEntryRoute(null, "replace");
     }
   }
 
@@ -434,25 +447,33 @@ export default function ArchivePage() {
     if (nextSelectedEntryId) {
       const selected = await getEntry(nextSelectedEntryId);
       setSelectedEntry(selected.entry);
-      setIsSelectedPanelOpen(true);
-      return;
-    }
-
-    if (result.entries.length > 0 && !selectedEntry) {
-      setSelectedEntry(result.entries[0]);
-      setIsSelectedPanelOpen(false);
+      setIsEntryDetailOpen(true);
+      if (getEntryRouteId() !== nextSelectedEntryId) {
+        setEntryRoute(nextSelectedEntryId, "replace");
+      }
     }
   }
 
-  async function openEntry(entryId: string) {
+  async function openEntry(entryId: string, updateRoute = true) {
+    setIsEntryLoading(true);
     try {
-      updateStatus("Entry selected.");
       const result = await getEntry(entryId);
       setSelectedEntry(result.entry);
-      setIsSelectedPanelOpen(true);
+      setIsEntryDetailOpen(true);
+      if (updateRoute) setEntryRoute(entryId);
+      updateStatus("Entry loaded.");
     } catch (error) {
       updateStatus(getErrorMessage(error, "Failed to open entry."), "error", "Could not open entry");
+      if (!updateRoute) setEntryRoute(null, "replace");
+    } finally {
+      setIsEntryLoading(false);
     }
+  }
+
+  function closeEntryDetail() {
+    setIsEntryDetailOpen(false);
+    setSelectedEntry(null);
+    setEntryRoute(null, "push");
   }
 
   async function handleCreateText(text: string) {
@@ -581,12 +602,26 @@ export default function ArchivePage() {
     }
   }
 
+  async function handleRetrySelectedOcr() {
+    if (!selectedEntry) return;
+    setIsBusy(true);
+    updateStatus("Retrying OCR for this journal page...", "loading", "OCR retrying");
+    try {
+      await retryOcrJob(selectedEntry.entryId);
+      await refreshEntries(selectedEntry.entryId);
+      updateStatus("OCR retry started.", "success", "OCR retry started");
+    } catch (error) {
+      updateStatus(getErrorMessage(error, "OCR retry failed."), "error", "OCR retry failed");
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   function clearFilters() {
     setSearchQuery("");
     setSourceFilter("all");
     setStatusFilter("all");
     setSortOrder("newest");
-    setChipFilter({ type: "all", value: "all" });
     updateStatus("Filters cleared.", "info", "Filters reset");
   }
 
@@ -689,8 +724,9 @@ export default function ArchivePage() {
       );
 
       setEntries(remainingEntries);
-      setSelectedEntry(remainingEntries[0] || null);
-      setIsSelectedPanelOpen(Boolean(remainingEntries[0]));
+      setSelectedEntry(null);
+      setIsEntryDetailOpen(false);
+      setEntryRoute(null, "replace");
 
       updateStatus("Entry deleted from archive.", "success", "Entry deleted");
     } catch (error) {
@@ -727,12 +763,14 @@ export default function ArchivePage() {
         setAccountEntitlement(null);
         setEntitlementError("");
         updateStatus("Sign in to load your private archive.", "info", "Login required");
+        setIsArchiveLoading(false);
         return;
       }
 
       try {
+        const routedEntryId = getEntryRouteId();
         await Promise.all([
-          refreshEntries(),
+          refreshEntries(routedEntryId || undefined),
           refreshUsage({
             silent: true,
           }),
@@ -742,12 +780,31 @@ export default function ArchivePage() {
         ]);
 
         updateStatus("Archive loaded.");
+        setArchiveError("");
       } catch (error) {
-        updateStatus(getErrorMessage(error, "Failed to load archive."), "error", "Archive failed");
+        const message = getErrorMessage(error, "Failed to load archive.");
+        setArchiveError(message);
+        updateStatus(message, "error", "Archive failed");
+      } finally {
+        setIsArchiveLoading(false);
       }
     }
 
     bootstrap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    function handlePopState() {
+      const entryId = getEntryRouteId();
+      if (entryId) void openEntry(entryId, false);
+      else {
+        setSelectedEntry(null);
+        setIsEntryDetailOpen(false);
+      }
+    }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -778,6 +835,27 @@ export default function ArchivePage() {
     );
   }
 
+  function renderAccountSurface() {
+    return (
+      <details className="phase2-account-surface">
+        <summary aria-label="Open account, plan, and usage">
+          <span className="phase2-account-avatar"><UserRound size={17} /></span>
+          <span><strong>{accountEntitlement?.plan.label || "Account"}</strong><small>Plan & usage</small></span>
+        </summary>
+        <div className="phase2-account-popover">
+          <AuthStatus user={authUser} isAuthReady={isAuthReady} onLogin={loginWithCognito} onLogout={logoutFromCognito} />
+          <AccountPlanCard
+            entitlement={accountEntitlement} isLoading={isEntitlementLoading} errorMessage={entitlementError}
+            isCheckoutLoading={isCheckoutLoading} isPortalLoading={isPortalLoading}
+            onRetry={() => void refreshEntitlement()} onUpgrade={() => void handleUpgrade()}
+            onManageSubscription={() => void handleManageSubscription()}
+          />
+          <UsageMeter usage={usage} isLoading={isUsageLoading} errorMessage={usageError} onRetry={() => void refreshUsage()} />
+        </div>
+      </details>
+    );
+  }
+
   return (
     <main
       className={
@@ -796,7 +874,7 @@ export default function ArchivePage() {
         />
         <BrandMark compact />
         <IconButton
-          icon={<Sprout size={20} />}
+          icon={<Upload size={20} />}
           onClick={() => {
             if (
               activeSection !==
@@ -808,15 +886,13 @@ export default function ArchivePage() {
               return;
             }
 
-            setIsSelectedPanelOpen(
-              true
-            );
+            setModalMode("upload");
           }}
           label={
             activeSection !==
             "archive"
               ? "Return to archive"
-              : "Open selected entry"
+              : "Upload journal"
           }
         />
       </header>
@@ -868,192 +944,82 @@ export default function ArchivePage() {
       />
 
       <section className="archive-main">
-        <AuthStatus
-          user={authUser}
-          isAuthReady={isAuthReady}
-          onLogin={loginWithCognito}
-          onLogout={logoutFromCognito}
-        />
-
-        {authUser && (
-          <AccountPlanCard
-            entitlement={
-              accountEntitlement
-            }
-            isLoading={
-              isEntitlementLoading
-            }
-            errorMessage={
-              entitlementError
-            }
-            isCheckoutLoading={
-              isCheckoutLoading
-            }
-            isPortalLoading={
-              isPortalLoading
-            }
-            onRetry={() => {
-              void refreshEntitlement();
-            }}
-            onUpgrade={() => {
-              void handleUpgrade();
-            }}
-            onManageSubscription={() => {
-              void handleManageSubscription();
-            }}
-          />
-        )}
-
-        {authUser && (
-          <UsageMeter
-            usage={usage}
-            isLoading={
-              isUsageLoading
-            }
-            errorMessage={
-              usageError
-            }
-            onRetry={() => {
-              void refreshUsage();
-            }}
-          />
-        )}
-
         {authUser &&
           activeSection ===
             "archive" && (
             <>
-              <ArchiveTopbar
-                searchQuery={
-                  searchQuery
-                }
-                sourceFilter={
-                  sourceFilter
-                }
-                statusFilter={
-                  statusFilter
-                }
-                sortOrder={
-                  sortOrder
-                }
-                resultCount={
-                  filteredEntries.length
-                }
-                totalCount={
-                  entries.length
-                }
-                onSearchChange={
-                  setSearchQuery
-                }
-                onSourceFilterChange={
-                  setSourceFilter
-                }
-                onStatusFilterChange={
-                  setStatusFilter
-                }
-                onSortOrderChange={
-                  setSortOrder
-                }
-                onClearFilters={
-                  clearFilters
-                }
-              />
-
-              <ArchiveChips
-                entries={entries}
-                activeFilter={
-                  chipFilter
-                }
-                onFilterChange={
-                  setChipFilter
-                }
-              />
-
-              <PageHeader
-                eyebrow={
-                  <>
-                    <Sprout size={16} />
-                    Private journal archive
-                  </>
-                }
-                title="Your journal timeline"
-                description="A calm, searchable record of your entries, reflections, and analysis."
-              />
-
-              {Object.keys(
-                groupedEntries
-              ).length === 0 ? (
-                <EmptyState
-                  title="No matching entries found"
-                  description="Try clearing filters or searching for another mood, theme, or keyword."
+              {isEntryDetailOpen && selectedEntry ? (
+                <EntryDetailView
+                  entry={selectedEntry} isBusy={isBusy}
+                  analysisAllowed={usage?.operations.entryAnalysis.allowed ?? true}
+                  analysisRemaining={usage?.operations.entryAnalysis.remaining ?? null}
+                  onBack={closeEntryDetail} onReview={() => setModalMode("review")}
+                  onAnalyze={handleAnalyzeSelected} onRetryOcr={handleRetrySelectedOcr}
+                  onCopyTranscript={handleCopyTranscript} onExportTranscript={handleExportTranscript}
+                  onDownloadImage={handleDownloadImage} onDelete={handleDeleteSelected}
                 />
+              ) : isEntryLoading ? (
+                <LoadingState label="Loading journal entry…" />
               ) : (
-                Object.entries(
-                  groupedEntries
-                ).map(
-                  ([
-                    group,
-                    groupEntries,
-                  ]) => (
-                    <section
-                      className="month-section"
-                      key={group}
-                    >
-                      <header className="month-heading">
-                        <button>
-                          <ChevronDown
-                            size={18}
-                          />
-                        </button>
+                <div className="phase2-archive-view">
+                  <header className="phase2-archive-header">
+                    <div><h1>Archive</h1><p>All your journals. Every page. Always yours.</p></div>
+                    <div className="phase2-archive-header-actions">
+                      <button type="button" className="phase2-upload-button" onClick={() => setModalMode("upload")}><Upload size={16} /> Upload</button>
+                      {renderAccountSurface()}
+                    </div>
+                  </header>
 
-                        <h2>
-                          {group}
-                        </h2>
+                  <ArchiveTopbar
+                    searchQuery={searchQuery} sourceFilter={sourceFilter} statusFilter={statusFilter}
+                    sortOrder={sortOrder} resultCount={filteredEntries.length} totalCount={entries.length}
+                    onSearchChange={setSearchQuery} onSourceFilterChange={setSourceFilter}
+                    onStatusFilterChange={setStatusFilter} onSortOrderChange={setSortOrder} onClearFilters={clearFilters}
+                  />
 
-                        <span>
-                          {
-                            groupEntries.length
-                          }{" "}
-                          entries
-                        </span>
-                      </header>
+                  {isArchiveLoading ? <LoadingState label="Loading your private archive…" /> :
+                    archiveError ? <ErrorState title="Archive could not be loaded" description={archiveError} /> :
+                    groupedEntries.length === 0 ? <EmptyState
+                      title={entries.length ? "No matching entries found" : "Your archive is ready for its first entry"}
+                      description={entries.length ? "Try clearing filters or searching for another keyword." : "Upload a journal page or create a typed entry to begin."}
+                    /> : (
+                      <section className="phase2-archive-groups" aria-label="Journal entries grouped by year and month">
+                        {groupedEntries.map((year) => (
+                          <details className="phase2-year-group" key={year.key} open>
+                            <summary><span>{year.label}</span><small>{year.months.reduce((count, month) => count + month.entries.length, 0)} entries</small></summary>
+                            <div className="phase2-year-content">
+                              {year.months.map((month) => (
+                                <section className="phase2-month-group" key={month.key} aria-labelledby={`month-${year.key}-${month.key}`}>
+                                  <h2 id={`month-${year.key}-${month.key}`}>{month.label}</h2>
+                                  <div className="phase2-entry-grid">
+                                    {month.entries.map((entry) => <EntryCard key={entry.entryId} entry={entry}
+                                      isSelected={selectedEntry?.entryId === entry.entryId} onClick={() => void openEntry(entry.entryId)} />)}
+                                  </div>
+                                </section>
+                              ))}
+                            </div>
+                          </details>
+                        ))}
+                      </section>
+                    )}
 
-                      <div className="entry-grid">
-                        {groupEntries.map(
-                          (entry) => (
-                            <EntryCard
-                              key={
-                                entry.entryId
-                              }
-                              entry={
-                                entry
-                              }
-                              isSelected={
-                                selectedEntry
-                                  ?.entryId ===
-                                entry.entryId
-                              }
-                              onClick={() =>
-                                openEntry(
-                                  entry.entryId
-                                )
-                              }
-                            />
-                          )
-                        )}
-                      </div>
-                    </section>
-                  )
-                )
+                  {!isArchiveLoading && !archiveError && entries.length > 0 && (
+                    <dl className="phase2-archive-stats" aria-label="Statistics for currently loaded archive entries">
+                      <div><BookOpen size={19} /><dt>Loaded entries</dt><dd>{archiveStats.loaded}</dd></div>
+                      <div><CalendarDays size={19} /><dt>Years represented</dt><dd>{archiveStats.years}</dd></div>
+                      <div><ImageIcon size={19} /><dt>Scanned pages</dt><dd>{archiveStats.scanned}</dd></div>
+                      <div><span className="phase2-stat-spark">✦</span><dt>Analyzed entries</dt><dd>{archiveStats.analyzed}</dd></div>
+                    </dl>
+                  )}
+                  <div className="archive-status" role="status">{isBusy ? `Working: ${statusMessage}` : statusMessage}</div>
+                </div>
               )}
-
-              <div className="archive-status">
-                {isBusy
-                  ? `Working: ${statusMessage}`
-                  : statusMessage}
-              </div>
             </>
           )}
+
+        {authUser && activeSection !== "archive" && (
+          <div className="phase2-secondary-account-row">{renderAccountSurface()}</div>
+        )}
 
         {authUser &&
           activeSection ===
@@ -1111,35 +1077,6 @@ export default function ArchivePage() {
             />
           )}
       </section>
-
-      <button
-        className={isSelectedPanelOpen ? "selected-panel-backdrop visible" : "selected-panel-backdrop"}
-        onClick={() => setIsSelectedPanelOpen(false)}
-        aria-label="Close selected entry drawer"
-      />
-
-      <SelectedEntryPanel
-        entry={selectedEntry}
-        isBusy={isBusy}
-        isOpen={isSelectedPanelOpen}
-        analysisAllowed={
-          usage?.operations
-            .entryAnalysis.allowed
-          ?? true
-        }
-        analysisRemaining={
-          usage?.operations
-            .entryAnalysis.remaining
-          ?? null
-        }
-        onClose={() => setIsSelectedPanelOpen(false)}
-        onReview={() => setModalMode("review")}
-        onAnalyze={handleAnalyzeSelected}
-        onCopyTranscript={handleCopyTranscript}
-        onExportTranscript={handleExportTranscript}
-        onDownloadImage={handleDownloadImage}
-        onDelete={handleDeleteSelected}
-      />
 
       <ActionModal
         mode={modalMode}

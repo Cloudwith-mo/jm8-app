@@ -1,4 +1,4 @@
-import { Check, MoreHorizontal } from "lucide-react";
+import { FileText, Image as ImageIcon } from "lucide-react";
 import type { JournalEntry } from "../../types/journal";
 
 type EntryCardProps = {
@@ -7,29 +7,16 @@ type EntryCardProps = {
   onClick: () => void;
 };
 
-function getPreview(entry: JournalEntry) {
-  return entry.cleanText || entry.rawText || "No transcript available yet.";
-}
-
-function getTitle(entry: JournalEntry) {
-  if (entry.sourceType === "image") return "Scanned journal page";
-  return "Typed reflection";
-}
-
-function getTags(entry: JournalEntry) {
-  const themes = entry.analysis?.themes || [];
-
-  if (themes.length > 0) return themes.slice(0, 3);
-
-  if (entry.sourceType === "image") return ["ocr", "journal"];
-
-  return ["reflection"];
+function validDate(value?: string) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function formatEntryDate(value?: string) {
-  if (!value) return "No date";
-
-  return new Date(value).toLocaleDateString([], {
+  const date = validDate(value);
+  if (!date) return "Date unavailable";
+  return date.toLocaleDateString([], {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -37,61 +24,51 @@ function formatEntryDate(value?: string) {
 }
 
 function formatEntryTime(value?: string) {
-  if (!value) return "";
-
-  return new Date(value).toLocaleTimeString([], {
+  const date = validDate(value);
+  if (!date) return null;
+  return date.toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
   });
 }
 
 export default function EntryCard({ entry, isSelected, onClick }: EntryCardProps) {
-  const tags = getTags(entry);
+  const transcript = entry.cleanText || entry.rawText;
+  const time = formatEntryTime(entry.createdAt);
+  const sourceLabel = entry.sourceType === "image"
+    ? "Scanned journal"
+    : entry.sourceType === "typed"
+      ? "Typed entry"
+      : "Source unavailable";
+  const status = entry.analysisStatus || entry.reviewStatus || entry.ocrStatus || entry.status;
 
   return (
-    <article className={isSelected ? "entry-card selected" : "entry-card"} onClick={onClick}>
-      <button className="entry-card-click-target" aria-label="Open entry" />
-
-      <div className={entry.imagePreviewUrl ? "notebook-preview has-real-image" : "notebook-preview"}>
-        {isSelected && (
-          <div className="selected-check">
-            <Check size={16} />
-          </div>
-        )}
-
+    <button
+      type="button"
+      className={isSelected ? "phase2-entry-card selected" : "phase2-entry-card"}
+      onClick={onClick}
+      aria-label={`Open ${sourceLabel.toLowerCase()} from ${formatEntryDate(entry.createdAt)}`}
+    >
+      <span className={entry.imagePreviewUrl ? "phase2-entry-visual has-image" : "phase2-entry-visual typed"}>
         {entry.imagePreviewUrl ? (
-          <img src={entry.imagePreviewUrl} alt="Journal page preview" />
+          <img src={entry.imagePreviewUrl} alt="" />
         ) : (
-          <div className="paper-lines">
-            <span>{entry.sourceType === "image" ? "GROWTH IS" : "TODAY I"}</span>
-            <span>{entry.sourceType === "image" ? "UNCOMFORTABLE." : "REFLECTED."}</span>
-          </div>
+          <span className="phase2-typed-preview">
+            <FileText size={24} aria-hidden="true" />
+            {transcript ? <span>{transcript}</span> : <small>Transcript unavailable</small>}
+          </span>
         )}
-      </div>
+      </span>
 
-      <div className="entry-card-body">
-        <div className="entry-meta-row">
-          <strong>{formatEntryDate(entry.createdAt)}</strong>
-          <span>•</span>
-          <small>{formatEntryTime(entry.createdAt)}</small>
-          <em className={entry.status?.includes("FAILED") ? "status-badge failed" : "status-badge"}>
-            {entry.status || "NEW"}
-          </em>
-        </div>
-
-        <h3>{getTitle(entry)}</h3>
-        <p>{getPreview(entry)}</p>
-
-        <div className="entry-tags">
-          {tags.map((tag) => (
-            <span key={tag}>{tag}</span>
-          ))}
-        </div>
-      </div>
-
-      <button className="entry-more">
-        <MoreHorizontal size={17} />
-      </button>
-    </article>
+      <span className="phase2-entry-card-copy">
+        <span className="phase2-entry-card-date">{formatEntryDate(entry.createdAt)}</span>
+        <strong>{sourceLabel}</strong>
+        <span className="phase2-entry-card-meta">
+          {entry.sourceType === "image" ? <ImageIcon size={13} /> : <FileText size={13} />}
+          {time && <span>{time}</span>}
+          {status && <span className="phase2-entry-status">{status.replaceAll("_", " ")}</span>}
+        </span>
+      </span>
+    </button>
   );
 }
