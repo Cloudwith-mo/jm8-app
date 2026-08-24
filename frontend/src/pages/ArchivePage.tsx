@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, LayoutGrid, List, Menu, Sprout, X } from "lucide-react";
+import { ChevronDown, Menu, Sprout, X } from "lucide-react";
 import ArchiveSidebar, {
   type ArchiveSection,
 } from "../components/layout/ArchiveSidebar";
@@ -16,6 +16,13 @@ import InsightsTrendsPanel from "../components/insights/InsightsTrendsPanel";
 import ReportsPanel from "../components/insights/ReportsPanel";
 import AskJm8Panel from "../components/insights/AskJm8Panel";
 import AuthStatus from "../components/layout/AuthStatus";
+import AuthLandingPage from "./AuthLandingPage";
+import {
+  BrandMark,
+  EmptyState,
+  IconButton,
+  PageHeader,
+} from "../components/ui/V2Primitives";
 import UsageMeter from "../components/usage/UsageMeter";
 import AccountPlanCard from "../components/account/AccountPlanCard";
 import type { JournalEntry } from "../types/journal";
@@ -30,6 +37,7 @@ import {
   handleCognitoCallback,
   loginWithCognito,
   logoutFromCognito,
+  signupWithCognito,
   type AuthUser,
 } from "../auth/cognito";
 import {
@@ -743,6 +751,33 @@ export default function ArchivePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!isMobileNavOpen) return;
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsMobileNavOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [isMobileNavOpen]);
+
+  if (!isAuthReady || !authUser) {
+    return (
+      <AuthLandingPage
+        isReady={isAuthReady}
+        onSignIn={() => {
+          void loginWithCognito();
+        }}
+        onCreateAccount={() => {
+          void signupWithCognito();
+        }}
+      />
+    );
+  }
+
   return (
     <main
       className={
@@ -752,11 +787,16 @@ export default function ArchivePage() {
       }
     >
       <header className="mobile-app-header">
-        <button onClick={() => setIsMobileNavOpen(true)} aria-label="Open navigation">
-          <Menu size={20} />
-        </button>
-        <strong>JOURNALM8</strong>
-        <button
+        <IconButton
+          label="Open navigation"
+          icon={<Menu size={20} />}
+          onClick={() => setIsMobileNavOpen(true)}
+          aria-expanded={isMobileNavOpen}
+          aria-controls="jm8-mobile-navigation"
+        />
+        <BrandMark compact />
+        <IconButton
+          icon={<Sprout size={20} />}
           onClick={() => {
             if (
               activeSection !==
@@ -772,23 +812,28 @@ export default function ArchivePage() {
               true
             );
           }}
-          aria-label={
+          label={
             activeSection !==
             "archive"
               ? "Return to archive"
               : "Open selected entry"
           }
-        >
-          <Sprout size={20} />
-        </button>
+        />
       </header>
 
-      <div
+      <button
+        type="button"
         className={isMobileNavOpen ? "mobile-nav-backdrop visible" : "mobile-nav-backdrop"}
         onClick={() => setIsMobileNavOpen(false)}
+        aria-label="Close navigation"
       />
 
-      <div className={isMobileNavOpen ? "mobile-sidebar-shell open" : "mobile-sidebar-shell"}>
+      <div
+        id="jm8-mobile-navigation"
+        className={isMobileNavOpen ? "mobile-sidebar-shell open" : "mobile-sidebar-shell"}
+        aria-hidden={!isMobileNavOpen}
+        inert={!isMobileNavOpen}
+      >
         <button
           className="mobile-sidebar-close"
           onClick={() => setIsMobileNavOpen(false)}
@@ -874,29 +919,6 @@ export default function ArchivePage() {
           />
         )}
 
-        {isAuthReady && !authUser && (
-          <section className="auth-required-card">
-            <h2>
-              Sign in to access your
-              private journal archive
-            </h2>
-
-            <p>
-              JM8 protects entries and
-              historical analysis jobs
-              with your Cognito identity.
-            </p>
-
-            <button
-              onClick={
-                loginWithCognito
-              }
-            >
-              Login with Cognito
-            </button>
-          </section>
-        )}
-
         {authUser &&
           activeSection ===
             "archive" && (
@@ -947,48 +969,24 @@ export default function ArchivePage() {
                 }
               />
 
-              <div className="archive-heading-row">
-                <div>
-                  <p className="archive-kicker">
+              <PageHeader
+                eyebrow={
+                  <>
                     <Sprout size={16} />
-                    Private journal
-                    archive
-                  </p>
-
-                  <h1>
-                    Your Journal Timeline
-                  </h1>
-                </div>
-
-                <div className="view-toggle">
-                  <button className="active">
-                    <LayoutGrid
-                      size={18}
-                    />
-                  </button>
-
-                  <button>
-                    <List size={18} />
-                  </button>
-                </div>
-              </div>
+                    Private journal archive
+                  </>
+                }
+                title="Your journal timeline"
+                description="A calm, searchable record of your entries, reflections, and analysis."
+              />
 
               {Object.keys(
                 groupedEntries
               ).length === 0 ? (
-                <section className="empty-archive">
-                  <h2>
-                    No matching entries
-                    found
-                  </h2>
-
-                  <p>
-                    Try clearing filters
-                    or searching for
-                    another mood, theme,
-                    or keyword.
-                  </p>
-                </section>
+                <EmptyState
+                  title="No matching entries found"
+                  description="Try clearing filters or searching for another mood, theme, or keyword."
+                />
               ) : (
                 Object.entries(
                   groupedEntries

@@ -384,6 +384,69 @@ class PolicyGenerationTests(unittest.TestCase):
         self.assertNotEqual(statement["Resource"], "*")
         self.assertNotIn("cognito-idp:*", statement["Action"])
 
+    def test_classic_hosted_ui_branding_actions_are_exact_and_pool_scoped(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-foundation"
+        ]["Statement"]
+        matches = [
+            statement
+            for statement in statements
+            if statement["Sid"] == "ManageProductionClassicHostedUiBranding"
+        ]
+        self.assertEqual(len(matches), 1)
+        statement = matches[0]
+        expected_resource = (
+            f"arn:aws:cognito-idp:us-east-1:{ACCOUNT_ID}:userpool/*"
+        )
+        self.assertEqual(
+            statement["Action"],
+            [
+                "cognito-idp:GetUICustomization",
+                "cognito-idp:SetUICustomization",
+            ],
+        )
+        self.assertEqual(statement["Resource"], expected_resource)
+        self.assertEqual(
+            statement["Condition"],
+            {
+                "StringEquals": {
+                    "aws:ResourceTag/App": "journalm8",
+                    "aws:ResourceTag/Stage": "prod",
+                }
+            },
+        )
+
+        def authorized(resource_arn, resource_tags):
+            return (
+                fnmatchcase(resource_arn, expected_resource)
+                and resource_tags.get("App") == "journalm8"
+                and resource_tags.get("Stage") == "prod"
+            )
+
+        self.assertTrue(
+            authorized(
+                f"arn:aws:cognito-idp:us-east-1:{ACCOUNT_ID}:"
+                "userpool/us-east-1_Production",
+                {"App": "journalm8", "Stage": "prod"},
+            )
+        )
+        self.assertFalse(
+            authorized(
+                f"arn:aws:cognito-idp:us-east-1:{ACCOUNT_ID}:"
+                "userpool/us-east-1_Staging",
+                {"App": "journalm8", "Stage": "staging"},
+            )
+        )
+        self.assertFalse(
+            authorized(
+                "arn:aws:cognito-idp:us-east-1:999999999999:"
+                "userpool/us-east-1_Production",
+                {"App": "journalm8", "Stage": "prod"},
+            )
+        )
+        self.assertNotEqual(statement["Resource"], "*")
+        self.assertNotIn("cognito-idp:*", statement["Action"])
+
     def test_resource_star_is_isolated_and_conditioned(self):
         for document in generate_policies().values():
             for statement in document["Statement"]:

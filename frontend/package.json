@@ -10,15 +10,14 @@
     "build:staging": "VITE_APP_STAGE=staging tsc -b && VITE_APP_STAGE=staging vite build --mode staging",
     "build:production": "tsc -b && vite build --mode production",
     "build:prod": "npm run build:production",
-    "test": "node --test scripts/frontend_env_contract.test.mjs",
+    "test": "node --test scripts/*.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-router-dom": "^7.18.1"
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

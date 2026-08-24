@@ -122,7 +122,7 @@ export function isAuthenticated() {
   return Boolean(getAccessToken());
 }
 
-export async function loginWithCognito() {
+async function beginCognitoAuthorization(path: "/oauth2/authorize" | "/signup") {
   const { domain, clientId, redirectUri } = getRequiredConfig();
 
   const codeVerifier = randomString();
@@ -139,7 +139,15 @@ export async function loginWithCognito() {
     code_challenge: codeChallenge,
   });
 
-  window.location.assign(`${domain}/oauth2/authorize?${params.toString()}`);
+  window.location.assign(`${domain}${path}?${params.toString()}`);
+}
+
+export async function loginWithCognito() {
+  await beginCognitoAuthorization("/oauth2/authorize");
+}
+
+export async function signupWithCognito() {
+  await beginCognitoAuthorization("/signup");
 }
 
 async function exchangeCognitoCallback() {

@@ -34,6 +34,7 @@ esac
 COGNITO_ENV_FILE="$SCRIPT_DIR/../infra/environments/generated/${STAGE}.cognito.env"
 COGNITO_ENV_DIR="$(dirname "$COGNITO_ENV_FILE")"
 COGNITO_ENV_TEMP=""
+COGNITO_BRANDING_HELPER="$SCRIPT_DIR/jm8_cognito_branding.py"
 
 cleanup_cognito_env_temp() {
   if [ -n "$COGNITO_ENV_TEMP" ]; then
@@ -140,72 +141,25 @@ else
   aws cognito-idp create-user-pool-domain \
     --domain "$COGNITO_DOMAIN_PREFIX" \
     --user-pool-id "$USER_POOL_ID" \
+    --managed-login-version 1 \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" >/dev/null
 fi
 
-APP_CLIENT_DOCUMENT="$(
-  aws cognito-idp describe-user-pool-client \
-    --user-pool-id "$USER_POOL_ID" \
-    --client-id "$APP_CLIENT_ID" \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    --output json
-)"
-if ! printf '%s' "$APP_CLIENT_DOCUMENT" | python3 -c '
-# BEGIN COGNITO_APP_CLIENT_VERIFIER
-import json
-import sys
+python3 "$COGNITO_BRANDING_HELPER" apply \
+  --app-name "$APP_NAME" \
+  --stage "$STAGE" \
+  --aws-profile "$AWS_PROFILE" \
+  --expected-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+  --aws-region "$AWS_REGION" \
+  --deploy-confirmation "${DEPLOY_CONFIRMATION:-}" \
+  --production-isolation-mode "${PRODUCTION_ISOLATION_MODE:-}" \
+  --user-pool-id "$USER_POOL_ID" \
+  --app-client-id "$APP_CLIENT_ID" \
+  --callback-url "$CALLBACK_URL" \
+  --logout-url "$LOGOUT_URL"
 
-
-def fail():
-    print("Cognito app-client configuration verification failed.", file=sys.stderr)
-    raise SystemExit(1)
-
-
-def exact_string_values(actual, expected):
-    return (
-        isinstance(actual, list)
-        and all(isinstance(value, str) for value in actual)
-        and len(actual) == len(expected)
-        and set(actual) == set(expected)
-    )
-
-
-try:
-    document = json.load(sys.stdin)
-except (json.JSONDecodeError, TypeError):
-    fail()
-
-client = document.get("UserPoolClient") if isinstance(document, dict) else None
-if not isinstance(client, dict):
-    fail()
-
-expected_id, expected_name, callback_url, logout_url = sys.argv[1:]
-generate_secret = client.get("GenerateSecret", False)
-if (
-    client.get("ClientId") != expected_id
-    or client.get("ClientName") != expected_name
-    or generate_secret is not False
-    or client.get("AllowedOAuthFlowsUserPoolClient") is not True
-    or not exact_string_values(client.get("AllowedOAuthFlows"), ["code"])
-    or not exact_string_values(
-        client.get("AllowedOAuthScopes"), ["openid", "email", "profile"]
-    )
-    or not exact_string_values(client.get("CallbackURLs"), [callback_url])
-    or not exact_string_values(client.get("LogoutURLs"), [logout_url])
-    or not exact_string_values(
-        client.get("SupportedIdentityProviders"), ["COGNITO"]
-    )
-):
-    fail()
-# END COGNITO_APP_CLIENT_VERIFIER
-' "$APP_CLIENT_ID" "$APP_CLIENT_NAME" "$CALLBACK_URL" "$LOGOUT_URL"; then
-  echo "Cognito app-client verification failed." >&2
-  exit 1
-fi
-unset APP_CLIENT_DOCUMENT
-echo "Cognito app client verified."
+echo "Cognito app client and Hosted UI branding verified."
 
 COGNITO_ISSUER="https://cognito-idp.${AWS_REGION}.amazonaws.com/${USER_POOL_ID}"
 COGNITO_DOMAIN="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com"

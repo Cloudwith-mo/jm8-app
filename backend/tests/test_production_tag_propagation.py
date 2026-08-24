@@ -14,6 +14,12 @@ BIN_DIR = BACKEND_ROOT / "bin"
 sys.path.insert(0, str(BIN_DIR))
 
 from jm8_production_deployer_policies import generate_policies  # noqa: E402
+from jm8_cognito_branding import (  # noqa: E402
+    BrandingBoundary,
+    BrandingTarget,
+    CognitoBrandingError,
+    validate_app_client,
+)
 from jm8_resource_tag_contract import (  # noqa: E402
     TagContractError,
     _context,
@@ -678,37 +684,46 @@ aws() {
         client_branch_end = source.index(
             'fi\n\necho "Checking Cognito Hosted UI domain'
         )
-        describe_index = source.index(
-            "aws cognito-idp describe-user-pool-client"
+        verifier_index = source.index(
+            'python3 "$COGNITO_BRANDING_HELPER" apply'
         )
-        verifier_index = source.index("# BEGIN COGNITO_APP_CLIENT_VERIFIER")
         environment_write_index = source.index('COGNITO_ENV_TEMP="$(mktemp')
         success_index = source.index('echo "Cognito auth foundation ready:"')
 
-        self.assertEqual(
-            source.count("aws cognito-idp describe-user-pool-client"), 1
-        )
-        self.assertGreater(describe_index, client_branch_end)
-        self.assertLess(describe_index, verifier_index)
+        self.assertGreater(verifier_index, client_branch_end)
         self.assertLess(verifier_index, environment_write_index)
         self.assertLess(verifier_index, success_index)
         self.assertIn('--user-pool-id "$USER_POOL_ID"', source)
-        self.assertIn('--client-id "$APP_CLIENT_ID"', source)
-        self.assertIn("if ! printf '%s' \"$APP_CLIENT_DOCUMENT\"", source)
-        self.assertIn("unset APP_CLIENT_DOCUMENT", source)
+        self.assertIn('--app-client-id "$APP_CLIENT_ID"', source)
+        helper = (BIN_DIR / "jm8_cognito_branding.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"describe-user-pool-client"', helper)
+        self.assertIn("validate_app_client(", helper)
+        self.assertIn("verify_aws_identity_and_target(aws, target)", helper)
 
     def test_app_client_verifier_accepts_only_the_exact_contract(self):
-        source = self.sources["create-auth"]
-        marker_start = "# BEGIN COGNITO_APP_CLIENT_VERIFIER\n"
-        marker_end = "# END COGNITO_APP_CLIENT_VERIFIER"
-        verifier = source[
-            source.index(marker_start) + len(marker_start):source.index(marker_end)
-        ]
-        client_id = "test-client-id"
+        client_id = "a" * 26
         client_name = "journalm8-prod-web"
         callback_url = "https://prod.example.com/callback"
         logout_url = "https://prod.example.com"
+        target = BrandingTarget(
+            boundary=BrandingBoundary(
+                app_name="journalm8",
+                stage="prod",
+                aws_profile="jm8-prod",
+                account_id=ACCOUNT_ID,
+                region=REGION,
+                deploy_confirmation="prod",
+                production_isolation_mode="stage-scoped-same-account",
+            ),
+            user_pool_id="us-east-1_Production123",
+            app_client_id=client_id,
+            callback_url=callback_url,
+            logout_url=logout_url,
+        )
         expected_client = {
+            "UserPoolId": target.user_pool_id,
             "ClientId": client_id,
             "ClientName": client_name,
             "AllowedOAuthFlowsUserPoolClient": True,
@@ -718,39 +733,21 @@ aws() {
             "LogoutURLs": [logout_url],
             "SupportedIdentityProviders": ["COGNITO"],
         }
-        command = [
-            sys.executable,
-            "-c",
-            verifier,
-            client_id,
-            client_name,
-            callback_url,
-            logout_url,
-        ]
 
-        def verify(client):
-            return subprocess.run(
-                command,
-                input=json.dumps({"UserPoolClient": client}),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-        omitted = verify(dict(expected_client))
-        self.assertEqual(omitted.returncode, 0, omitted.stderr)
+        validate_app_client({"UserPoolClient": dict(expected_client)}, target)
 
         explicit_false_client = dict(expected_client)
         explicit_false_client["GenerateSecret"] = False
-        explicit_false = verify(explicit_false_client)
-        self.assertEqual(explicit_false.returncode, 0, explicit_false.stderr)
+        validate_app_client(
+            {"UserPoolClient": explicit_false_client}, target
+        )
 
         for invalid_generate_secret in (True, None, 0, 1, "false", {}, []):
             with self.subTest(generate_secret=invalid_generate_secret):
                 client = dict(expected_client)
                 client["GenerateSecret"] = invalid_generate_secret
-                rejected = verify(client)
-                self.assertNotEqual(rejected.returncode, 0)
+                with self.assertRaises(CognitoBrandingError):
+                    validate_app_client({"UserPoolClient": client}, target)
 
         mismatches = {
             "ClientId": "other-client-id",
@@ -766,18 +763,14 @@ aws() {
             with self.subTest(field=field):
                 client = dict(expected_client)
                 client[field] = mismatched_value
-                rejected = verify(client)
-                self.assertNotEqual(rejected.returncode, 0)
-                self.assertNotIn(mismatched_value.__repr__(), rejected.stderr)
+                with self.assertRaises(CognitoBrandingError) as rejected:
+                    validate_app_client({"UserPoolClient": client}, target)
+                self.assertNotIn(
+                    mismatched_value.__repr__(), str(rejected.exception)
+                )
 
-        malformed = subprocess.run(
-            command,
-            input="not-json",
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertNotEqual(malformed.returncode, 0)
+        with self.assertRaises(CognitoBrandingError):
+            validate_app_client("not-json", target)
 
     def test_api_reuse_reconciles_before_any_update(self):
         source = self.sources["create-api"]
@@ -940,7 +933,7 @@ aws() {
         ]
         domain_block = source[
             source.index("aws cognito-idp create-user-pool-domain"):
-            source.index("fi\n\nAPP_CLIENT_DOCUMENT")
+            source.index('fi\n\npython3 "$COGNITO_BRANDING_HELPER" apply')
         ]
         self.assertNotIn("--tags", client_block)
         self.assertNotIn("--tags", domain_block)
