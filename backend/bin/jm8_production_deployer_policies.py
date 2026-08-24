@@ -230,6 +230,15 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             production_tag_condition,
         ),
         _statement(
+            "ManageProductionClassicHostedUiBranding",
+            (
+                "cognito-idp:GetUICustomization",
+                "cognito-idp:SetUICustomization",
+            ),
+            f"arn:aws:cognito-idp:{region}:{ACCOUNT_ID}:userpool/*",
+            production_tag_condition,
+        ),
+        _statement(
             "TagVerifiedProductionUserPool",
             ("cognito-idp:TagResource",),
             f"arn:aws:cognito-idp:{region}:{ACCOUNT_ID}:userpool/*",
