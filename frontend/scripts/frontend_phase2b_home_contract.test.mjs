@@ -27,7 +27,7 @@ test("entry deep links override Home while preserving browser navigation", () =>
   assert.match(page, /searchParams\.set\("entry", entryId\)/);
   assert.match(page, /window\.history\[mode === "push" \? "pushState" : "replaceState"\]/);
   assert.match(page, /addEventListener\("popstate", handlePopState\)/);
-  assert.match(page, /setActiveSection\(getSectionRoute\(\)\)/);
+  assert.match(page, /const routedSection = getSectionRoute\(\);[\s\S]*setActiveSection\(routedSection\)/);
   assert.match(page, /if \(entryId\) void openEntry\(entryId, false\)/);
   assert.doesNotMatch(JSON.stringify(packageJson.dependencies), /react-router/);
 });

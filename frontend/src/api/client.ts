@@ -18,6 +18,9 @@ import {
 import type {
   InsightsReportResponse,
 } from "../types/reports";
+import {
+  parseInsightsReportResponse,
+} from "./reportsValidation";
 import type {
   AskJm8HistoryDeleteResponse,
   AskJm8HistoryDetailResponse,
@@ -395,26 +398,30 @@ function getReportPath(
 
 
 export async function getWeeklyReport(
-  period?: string
+  period?: string,
+  signal?: AbortSignal,
 ): Promise<InsightsReportResponse> {
-  return apiRequest(
+  return parseInsightsReportResponse(await apiRequest<unknown>(
     getReportPath(
       "/reports/weekly",
       period
-    )
-  );
+    ),
+    { signal }
+  ), "WEEKLY", period);
 }
 
 
 export async function getMonthlyReport(
-  period?: string
+  period?: string,
+  signal?: AbortSignal,
 ): Promise<InsightsReportResponse> {
-  return apiRequest(
+  return parseInsightsReportResponse(await apiRequest<unknown>(
     getReportPath(
       "/reports/monthly",
       period
-    )
-  );
+    ),
+    { signal }
+  ), "MONTHLY", period);
 }
 
 

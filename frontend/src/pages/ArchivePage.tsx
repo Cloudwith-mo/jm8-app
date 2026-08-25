@@ -33,6 +33,8 @@ import type {
 import type {
   AccountEntitlement,
 } from "../types/accountEntitlement";
+import type { InsightsReportType } from "../types/reports";
+import { isReportWindow } from "../api/reportsValidation";
 import {
   getCurrentUser,
   handleCognitoCallback,
@@ -117,6 +119,16 @@ function getThemeRouteId() {
   return /^theme-[a-f0-9]{8}$/.test(value) ? value : "invalid-theme-route";
 }
 
+type ReportRoute = { type: InsightsReportType; window: string | null };
+
+function getReportRoute(): ReportRoute {
+  const url = new URL(window.location.href);
+  const period = url.searchParams.get("period");
+  const type: InsightsReportType = period === "monthly" ? "MONTHLY" : "WEEKLY";
+  const candidate = period === "weekly" || period === "monthly" ? url.searchParams.get("window") : null;
+  return { type, window: candidate && isReportWindow(type, candidate) ? candidate : null };
+}
+
 const ROUTABLE_SECTIONS: ArchiveSection[] = [
   "home", "archive", "insights", "themes", "reports", "askJm8", "ocrJobs", "analysisJobs",
 ];
@@ -132,8 +144,23 @@ function setSectionRoute(section: ArchiveSection, mode: "push" | "replace" = "pu
   const url = new URL(window.location.href);
   url.searchParams.delete("entry");
   if (section !== "themes") url.searchParams.delete("theme");
+  if (section !== "reports") {
+    url.searchParams.delete("period");
+    url.searchParams.delete("window");
+  }
   if (section === "home") url.searchParams.delete("view");
   else url.searchParams.set("view", section);
+  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+}
+
+function setReportRoute(route: ReportRoute, mode: "push" | "replace" = "push") {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("entry");
+  url.searchParams.delete("theme");
+  url.searchParams.set("view", "reports");
+  url.searchParams.set("period", route.type === "WEEKLY" ? "weekly" : "monthly");
+  if (route.window && isReportWindow(route.type, route.window)) url.searchParams.set("window", route.window);
+  else url.searchParams.delete("window");
   window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
 }
 
@@ -171,6 +198,7 @@ export default function ArchivePage() {
     useState<ArchiveSection>(() => getSectionRoute());
   const [selectedThemeRouteId, setSelectedThemeRouteId] =
     useState<string | null>(() => getThemeRouteId());
+  const [reportRoute, setReportRouteState] = useState<ReportRoute>(() => getReportRoute());
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -300,7 +328,13 @@ export default function ArchivePage() {
     setSelectedEntry(null);
     setIsEntryDetailOpen(false);
     if (section !== "themes") setSelectedThemeRouteId(null);
-    setSectionRoute(section);
+    if (section === "reports") {
+      const nextReportRoute = getReportRoute();
+      setReportRouteState(nextReportRoute);
+      setReportRoute(nextReportRoute);
+    } else {
+      setSectionRoute(section);
+    }
   }
 
   function selectTheme(themeId: string, mode: "push" | "replace" = "push") {
@@ -308,6 +342,16 @@ export default function ArchivePage() {
     setSelectedThemeRouteId(themeId);
     setActiveSection("themes");
     setThemeRoute(themeId, mode);
+  }
+
+  function selectReport(route: ReportRoute, mode: "push" | "replace" = "push") {
+    const safeRoute = {
+      type: route.type,
+      window: route.window && isReportWindow(route.type, route.window) ? route.window : null,
+    };
+    setReportRouteState(safeRoute);
+    setActiveSection("reports");
+    setReportRoute(safeRoute, mode);
   }
 
   async function refreshUsage({
@@ -831,8 +875,12 @@ export default function ArchivePage() {
 
       try {
         const routedEntryId = getEntryRouteId();
-        setActiveSection(getSectionRoute());
+        const routedSection = getSectionRoute();
+        const routedReport = getReportRoute();
+        setActiveSection(routedSection);
         setSelectedThemeRouteId(getThemeRouteId());
+        setReportRouteState(routedReport);
+        if (routedSection === "reports") setReportRoute(routedReport, "replace");
         await Promise.all([
           refreshEntries(routedEntryId || undefined),
           refreshUsage({
@@ -861,8 +909,12 @@ export default function ArchivePage() {
   useEffect(() => {
     function handlePopState() {
       const entryId = getEntryRouteId();
-      setActiveSection(getSectionRoute());
+      const routedSection = getSectionRoute();
+      const routedReport = getReportRoute();
+      setActiveSection(routedSection);
       setSelectedThemeRouteId(getThemeRouteId());
+      setReportRouteState(routedReport);
+      if (routedSection === "reports") setReportRoute(routedReport, "replace");
       if (entryId) void openEntry(entryId, false);
       else {
         setSelectedEntry(null);
@@ -1111,6 +1163,9 @@ export default function ArchivePage() {
             "reports" && (
             <ReportsPanel
               onNotify={showToast}
+              reportType={reportRoute.type}
+              reportWindow={reportRoute.window}
+              onNavigate={selectReport}
             />
           )}
 
