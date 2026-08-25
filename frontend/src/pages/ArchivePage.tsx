@@ -111,8 +111,14 @@ function getEntryRouteId() {
   return new URL(window.location.href).searchParams.get("entry");
 }
 
+function getThemeRouteId() {
+  const value = new URL(window.location.href).searchParams.get("theme");
+  if (value === null) return null;
+  return /^theme-[a-f0-9]{8}$/.test(value) ? value : "invalid-theme-route";
+}
+
 const ROUTABLE_SECTIONS: ArchiveSection[] = [
-  "home", "archive", "insights", "insightsTrends", "reports", "askJm8", "ocrJobs", "analysisJobs",
+  "home", "archive", "insights", "themes", "reports", "askJm8", "ocrJobs", "analysisJobs",
 ];
 
 function getSectionRoute(): ArchiveSection {
@@ -125,8 +131,17 @@ function getSectionRoute(): ArchiveSection {
 function setSectionRoute(section: ArchiveSection, mode: "push" | "replace" = "push") {
   const url = new URL(window.location.href);
   url.searchParams.delete("entry");
+  if (section !== "themes") url.searchParams.delete("theme");
   if (section === "home") url.searchParams.delete("view");
   else url.searchParams.set("view", section);
+  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+}
+
+function setThemeRoute(themeId: string, mode: "push" | "replace" = "push") {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("entry");
+  url.searchParams.set("view", "themes");
+  url.searchParams.set("theme", themeId);
   window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
 }
 
@@ -154,6 +169,8 @@ export default function ArchivePage() {
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [activeSection, setActiveSection] =
     useState<ArchiveSection>(() => getSectionRoute());
+  const [selectedThemeRouteId, setSelectedThemeRouteId] =
+    useState<string | null>(() => getThemeRouteId());
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -282,7 +299,15 @@ export default function ArchivePage() {
     setIsMobileNavOpen(false);
     setSelectedEntry(null);
     setIsEntryDetailOpen(false);
+    if (section !== "themes") setSelectedThemeRouteId(null);
     setSectionRoute(section);
+  }
+
+  function selectTheme(themeId: string, mode: "push" | "replace" = "push") {
+    if (!/^theme-[a-f0-9]{8}$/.test(themeId)) return;
+    setSelectedThemeRouteId(themeId);
+    setActiveSection("themes");
+    setThemeRoute(themeId, mode);
   }
 
   async function refreshUsage({
@@ -807,6 +832,7 @@ export default function ArchivePage() {
       try {
         const routedEntryId = getEntryRouteId();
         setActiveSection(getSectionRoute());
+        setSelectedThemeRouteId(getThemeRouteId());
         await Promise.all([
           refreshEntries(routedEntryId || undefined),
           refreshUsage({
@@ -836,6 +862,7 @@ export default function ArchivePage() {
     function handlePopState() {
       const entryId = getEntryRouteId();
       setActiveSection(getSectionRoute());
+      setSelectedThemeRouteId(getThemeRouteId());
       if (entryId) void openEntry(entryId, false);
       else {
         setSelectedEntry(null);
@@ -1069,9 +1096,13 @@ export default function ArchivePage() {
 
         {authUser &&
           activeSection ===
-            "insightsTrends" && (
+            "themes" && (
             <InsightsTrendsPanel
               onNotify={showToast}
+              entries={entries}
+              selectedThemeId={selectedThemeRouteId}
+              onSelectTheme={selectTheme}
+              onOpenEntry={(entryId) => void openEntry(entryId)}
             />
           )}
 

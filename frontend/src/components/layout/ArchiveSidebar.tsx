@@ -22,7 +22,7 @@ export type ArchiveSection =
   | "home"
   | "archive"
   | "insights"
-  | "insightsTrends"
+  | "themes"
   | "reports"
   | "askJm8"
   | "ocrJobs"
@@ -64,7 +64,7 @@ const navItems: SidebarNavItem[] = [
   {
     label: "Themes",
     icon: Sparkles,
-    section: "insightsTrends",
+    section: "themes",
   },
   {
     label: "Reports",

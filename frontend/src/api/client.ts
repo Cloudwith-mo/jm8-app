@@ -10,6 +10,11 @@ import type {
   InsightsOverviewResponse,
   InsightsThemesResponse,
 } from "../types/insights";
+import {
+  parseInsightsMoodsResponse,
+  parseInsightsOverviewResponse,
+  parseInsightsThemesResponse,
+} from "./insightsValidation";
 import type {
   InsightsReportResponse,
 } from "../types/reports";
@@ -343,27 +348,30 @@ export async function deleteEntry(entryId: string) {
 }
 
 
-export async function getInsightsOverview():
+export async function getInsightsOverview(signal?: AbortSignal):
 Promise<InsightsOverviewResponse> {
-  return apiRequest(
-    "/insights/overview"
-  );
+  return parseInsightsOverviewResponse(await apiRequest<unknown>(
+    "/insights/overview",
+    { signal }
+  ));
 }
 
 
-export async function getInsightsThemes():
+export async function getInsightsThemes(signal?: AbortSignal):
 Promise<InsightsThemesResponse> {
-  return apiRequest(
-    "/insights/themes"
-  );
+  return parseInsightsThemesResponse(await apiRequest<unknown>(
+    "/insights/themes",
+    { signal }
+  ));
 }
 
 
-export async function getInsightsMoods():
+export async function getInsightsMoods(signal?: AbortSignal):
 Promise<InsightsMoodsResponse> {
-  return apiRequest(
-    "/insights/moods"
-  );
+  return parseInsightsMoodsResponse(await apiRequest<unknown>(
+    "/insights/moods",
+    { signal }
+  ));
 }
 
 
