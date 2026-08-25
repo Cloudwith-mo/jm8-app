@@ -6,6 +6,7 @@ import ArchiveSidebar, {
 import ArchiveTopbar from "../components/layout/ArchiveTopbar";
 import EntryCard from "../components/archive/EntryCard";
 import EntryDetailView from "../components/archive/EntryDetailView";
+import HomeDashboard from "../components/home/HomeDashboard";
 import ActionModal from "../components/archive/ActionModal";
 import ToastStack, { type ToastKind, type ToastMessage } from "../components/ui/ToastStack";
 import HistoricalJobsPanel from "../components/analysis/HistoricalJobsPanel";
@@ -110,6 +111,25 @@ function getEntryRouteId() {
   return new URL(window.location.href).searchParams.get("entry");
 }
 
+const ROUTABLE_SECTIONS: ArchiveSection[] = [
+  "home", "archive", "insights", "insightsTrends", "reports", "askJm8", "ocrJobs", "analysisJobs",
+];
+
+function getSectionRoute(): ArchiveSection {
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("entry")) return "archive";
+  const view = url.searchParams.get("view");
+  return ROUTABLE_SECTIONS.find((section) => section === view) || "home";
+}
+
+function setSectionRoute(section: ArchiveSection, mode: "push" | "replace" = "push") {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("entry");
+  if (section === "home") url.searchParams.delete("view");
+  else url.searchParams.set("view", section);
+  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+}
+
 function setEntryRoute(entryId: string | null, mode: "push" | "replace" = "push") {
   const url = new URL(window.location.href);
   if (entryId) url.searchParams.set("entry", entryId);
@@ -133,7 +153,7 @@ export default function ArchivePage() {
   const [isEntryLoading, setIsEntryLoading] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [activeSection, setActiveSection] =
-    useState<ArchiveSection>("archive");
+    useState<ArchiveSection>(() => getSectionRoute());
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -254,15 +274,15 @@ export default function ArchivePage() {
   function navigateToSection(
     section: ArchiveSection
   ) {
+    if (section === activeSection && !isEntryDetailOpen) {
+      setIsMobileNavOpen(false);
+      return;
+    }
     setActiveSection(section);
     setIsMobileNavOpen(false);
-
-    if (
-      section !== "archive"
-    ) {
-      setIsEntryDetailOpen(false);
-      setEntryRoute(null, "replace");
-    }
+    setSelectedEntry(null);
+    setIsEntryDetailOpen(false);
+    setSectionRoute(section);
   }
 
   async function refreshUsage({
@@ -448,6 +468,7 @@ export default function ArchivePage() {
       const selected = await getEntry(nextSelectedEntryId);
       setSelectedEntry(selected.entry);
       setIsEntryDetailOpen(true);
+      setActiveSection("archive");
       if (getEntryRouteId() !== nextSelectedEntryId) {
         setEntryRoute(nextSelectedEntryId, "replace");
       }
@@ -460,6 +481,7 @@ export default function ArchivePage() {
       const result = await getEntry(entryId);
       setSelectedEntry(result.entry);
       setIsEntryDetailOpen(true);
+      setActiveSection("archive");
       if (updateRoute) setEntryRoute(entryId);
       updateStatus("Entry loaded.");
     } catch (error) {
@@ -473,7 +495,21 @@ export default function ArchivePage() {
   function closeEntryDetail() {
     setIsEntryDetailOpen(false);
     setSelectedEntry(null);
-    setEntryRoute(null, "push");
+    setActiveSection("archive");
+    setSectionRoute("archive", "push");
+  }
+
+  async function handleContinueWriting(entryId: string) {
+    setIsBusy(true);
+    try {
+      const result = await getEntry(entryId);
+      setSelectedEntry(result.entry);
+      setModalMode("review");
+    } catch (error) {
+      updateStatus(getErrorMessage(error, "Failed to open the entry editor."), "error", "Could not continue entry");
+    } finally {
+      setIsBusy(false);
+    }
   }
 
   async function handleCreateText(text: string) {
@@ -726,7 +762,8 @@ export default function ArchivePage() {
       setEntries(remainingEntries);
       setSelectedEntry(null);
       setIsEntryDetailOpen(false);
-      setEntryRoute(null, "replace");
+      setActiveSection("archive");
+      setSectionRoute("archive", "replace");
 
       updateStatus("Entry deleted from archive.", "success", "Entry deleted");
     } catch (error) {
@@ -769,6 +806,7 @@ export default function ArchivePage() {
 
       try {
         const routedEntryId = getEntryRouteId();
+        setActiveSection(getSectionRoute());
         await Promise.all([
           refreshEntries(routedEntryId || undefined),
           refreshUsage({
@@ -797,6 +835,7 @@ export default function ArchivePage() {
   useEffect(() => {
     function handlePopState() {
       const entryId = getEntryRouteId();
+      setActiveSection(getSectionRoute());
       if (entryId) void openEntry(entryId, false);
       else {
         setSelectedEntry(null);
@@ -859,7 +898,7 @@ export default function ArchivePage() {
   return (
     <main
       className={
-        activeSection === "archive"
+        activeSection === "archive" || activeSection === "home"
           ? "jm8-archive-shell"
           : "jm8-archive-shell jobs-view"
       }
@@ -875,25 +914,8 @@ export default function ArchivePage() {
         <BrandMark compact />
         <IconButton
           icon={<Upload size={20} />}
-          onClick={() => {
-            if (
-              activeSection !==
-              "archive"
-            ) {
-              navigateToSection(
-                "archive"
-              );
-              return;
-            }
-
-            setModalMode("upload");
-          }}
-          label={
-            activeSection !==
-            "archive"
-              ? "Return to archive"
-              : "Upload journal"
-          }
+          onClick={() => setModalMode("upload")}
+          label="Upload journal"
         />
       </header>
 
@@ -944,6 +966,22 @@ export default function ArchivePage() {
       />
 
       <section className="archive-main">
+        {authUser && activeSection === "home" && (
+          <HomeDashboard
+            user={authUser}
+            entries={entries}
+            isLoading={isArchiveLoading}
+            errorMessage={archiveError}
+            accountSurface={renderAccountSurface()}
+            onOpenEntry={(entryId) => void openEntry(entryId)}
+            onContinueWriting={(entryId) => void handleContinueWriting(entryId)}
+            onNewEntry={() => setModalMode("write")}
+            onUpload={() => setModalMode("upload")}
+            onAskJm8={() => navigateToSection("askJm8")}
+            onViewArchive={() => navigateToSection("archive")}
+          />
+        )}
+
         {authUser &&
           activeSection ===
             "archive" && (
@@ -1017,7 +1055,7 @@ export default function ArchivePage() {
             </>
           )}
 
-        {authUser && activeSection !== "archive" && (
+        {authUser && activeSection !== "archive" && activeSection !== "home" && (
           <div className="phase2-secondary-account-row">{renderAccountSurface()}</div>
         )}
 

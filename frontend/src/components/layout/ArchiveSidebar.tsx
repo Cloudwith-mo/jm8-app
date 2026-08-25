@@ -6,6 +6,7 @@ import {
   CloudUpload,
   FileText,
   History,
+  House,
   ImagePlus,
   MessageCircle,
   Sparkles,
@@ -18,6 +19,7 @@ import type { AuthUser } from "../../auth/cognito";
 import { BrandMark } from "../ui/V2Primitives";
 
 export type ArchiveSection =
+  | "home"
   | "archive"
   | "insights"
   | "insightsTrends"
@@ -44,6 +46,11 @@ type SidebarNavItem = {
 };
 
 const navItems: SidebarNavItem[] = [
+  {
+    label: "Home",
+    icon: House,
+    section: "home",
+  },
   {
     label: "Archive",
     icon: Archive,
@@ -82,9 +89,9 @@ const navItems: SidebarNavItem[] = [
 ];
 
 function getDisplayName(user: AuthUser | null) {
-  if (user?.name) return user.name;
-  if (user?.email) return user.email.split("@")[0];
-  return "Guest";
+  if (user?.name?.trim()) return user.name.trim();
+  if (user?.email) return user.email;
+  return "JM8 member";
 }
 
 function getInitial(user: AuthUser | null) {
@@ -100,7 +107,7 @@ export default function ArchiveSidebar({
   onUpload,
 }: ArchiveSidebarProps) {
   const displayName = getDisplayName(user);
-  const emailOrHandle = user?.email || "@journalm8";
+  const emailOrHandle = user?.name && user.email ? user.email : "Authenticated account";
   const ocrJobs = entries.filter((entry) => entry.sourceType === "image").length;
 
   return (
