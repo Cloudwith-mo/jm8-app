@@ -6,12 +6,14 @@ import {
   parseInsightsOverviewResponse,
   parseInsightsThemesResponse,
 } from "../src/api/insightsValidation.ts";
+import { parseAppRoute, serializeAppRoute } from "../src/navigation/appRoute.ts";
 
 function source(relativePath) {
   return fs.readFileSync(new URL(`../${relativePath}`, import.meta.url), "utf8");
 }
 
 const page = source("src/pages/ArchivePage.tsx");
+const appRoute = source("src/navigation/appRoute.ts");
 const sidebar = source("src/components/layout/ArchiveSidebar.tsx");
 const insights = source("src/components/insights/InsightsOverviewPanel.tsx");
 const themes = source("src/components/insights/InsightsTrendsPanel.tsx");
@@ -67,11 +69,11 @@ function moodsFixture() {
 test("Insights and Themes are separate URL-addressable sidebar destinations", () => {
   assert.match(sidebar, /label: "Insights"[\s\S]*section: "insights"/);
   assert.match(sidebar, /label: "Themes"[\s\S]*section: "themes"/);
-  assert.match(page, /"home", "archive", "insights", "themes"/);
-  assert.match(page, /searchParams\.set\("view", "themes"\)/);
-  assert.match(page, /searchParams\.set\("theme", themeId\)/);
+  assert.match(appRoute, /"home", "archive", "insights", "themes"/);
+  assert.match(appRoute, /route\.view === "themes"/);
+  assert.match(appRoute, /searchParams\.set\("theme", route\.themeId\)/);
   assert.match(page, /addEventListener\("popstate", handlePopState\)/);
-  assert.match(page, /setSelectedThemeRouteId\(getThemeRouteId\(\)\)/);
+  assert.match(page, /setSelectedThemeRouteId\(routedApp\.themeId\)/);
   assert.doesNotMatch(page + sidebar, /insightsTrends/);
   assert.doesNotMatch(JSON.stringify(packageJson.dependencies), /router/i);
 });
@@ -80,10 +82,10 @@ test("theme selections use opaque deterministic identifiers and preserve entry-d
   assert.match(themes, /getThemeRouteId\(value: string\)/);
   assert.match(themes, /Math\.imul\(hash, 0x01000193\)/);
   assert.match(themes, /onSelectTheme\(id\)/);
-  assert.doesNotMatch(page, /searchParams\.set\("theme", theme\.value\)/);
+  assert.doesNotMatch(appRoute, /searchParams\.set\("theme", theme\.value\)/);
   assert.match(themes, /onOpenEntry\(entry\.entryId\)/);
   assert.match(page, /onOpenEntry=\{\(entryId\) => void openEntry\(entryId\)\}/);
-  assert.match(page, /searchParams\.set\("entry", entryId\)/);
+  assert.match(appRoute, /searchParams\.set\("entry", route\.entryId\)/);
 });
 
 test("Insights uses only real overview and mood contracts without duplicate theme requests", () => {
@@ -139,11 +141,12 @@ test("loading, empty, partial, retry, and protected-endpoint failures stay expli
 });
 
 test("malformed theme URL identifiers cannot be accepted or written", () => {
-  assert.match(page, /\^theme-\[a-f0-9\]\{8\}\$/);
-  assert.match(page, /: "invalid-theme-route"/);
+  assert.match(appRoute, /\^theme-\[a-f0-9\]\{8\}\$/);
+  assert.equal(parseAppRoute("https://app.test/?view=themes&theme=discipline").themeId, null);
   assert.match(page, /if \(!\/\^theme-\[a-f0-9\]\{8\}\$\/\.test\(themeId\)\) return/);
-  assert.match(page, /searchParams\.set\("theme", themeId\)/);
-  assert.doesNotMatch(page, /searchParams\.set\("theme", (?:value|theme\.value|selected\.value)\)/);
+  const valid = parseAppRoute("https://app.test/?view=themes&theme=theme-0123abcd");
+  assert.match(serializeAppRoute(valid, "https://app.test/"), /theme=theme-0123abcd/);
+  assert.doesNotMatch(appRoute, /searchParams\.set\("theme", (?:value|theme\.value|selected\.value)\)/);
 });
 
 test("all insights response families accept canonical API shapes", () => {

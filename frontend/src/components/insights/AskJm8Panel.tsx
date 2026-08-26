@@ -492,6 +492,12 @@ export default function AskJm8Panel({
   const historyPageRequestRef =
     useRef<string | null>(null);
 
+  const historySelectionControllerRef =
+    useRef<AbortController | null>(null);
+
+  const historySelectionRequestRef =
+    useRef(0);
+
   const loadedHistoryCursorsRef =
     useRef<Set<string>>(
       new Set()
@@ -517,7 +523,7 @@ export default function AskJm8Panel({
     && !isUsageExhausted;
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
 
     async function loadInitialHistory() {
       setIsHistoryLoading(true);
@@ -527,9 +533,10 @@ export default function AskJm8Panel({
         const result =
           await listAskJm8History({
             limit: 20,
+            signal: controller.signal,
           });
 
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setHistory(result.history);
 
           setNextHistoryCursor(
@@ -543,7 +550,7 @@ export default function AskJm8Panel({
             .clear();
         }
       } catch (error) {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setHistoryError(
             getHistoryErrorMessage(
               error
@@ -551,7 +558,7 @@ export default function AskJm8Panel({
           );
         }
       } finally {
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setIsHistoryLoading(false);
         }
       }
@@ -560,7 +567,8 @@ export default function AskJm8Panel({
     void loadInitialHistory();
 
     return () => {
-      cancelled = true;
+      controller.abort();
+      historySelectionControllerRef.current?.abort();
     };
   }, []);
 
@@ -837,6 +845,10 @@ export default function AskJm8Panel({
   async function selectHistoryItem(
     item: AskJm8HistorySummary
   ) {
+    historySelectionControllerRef.current?.abort();
+    const controller = new AbortController();
+    historySelectionControllerRef.current = controller;
+    const request = ++historySelectionRequestRef.current;
     setLoadingHistoryId(
       item.historyId
     );
@@ -845,8 +857,11 @@ export default function AskJm8Panel({
     try {
       const result =
         await getAskJm8History(
-          item.historyId
+          item.historyId,
+          controller.signal,
         );
+
+      if (controller.signal.aborted || request !== historySelectionRequestRef.current) return;
 
       const savedAnswer =
         result.history.answer;
@@ -869,6 +884,7 @@ export default function AskJm8Panel({
       setErrorMessage("");
       setShowHistory(false);
     } catch (error) {
+      if (controller.signal.aborted || request !== historySelectionRequestRef.current) return;
       if (
         isMissingHistoryError(error)
       ) {
@@ -902,7 +918,9 @@ export default function AskJm8Panel({
         message
       );
     } finally {
-      setLoadingHistoryId(null);
+      if (!controller.signal.aborted && request === historySelectionRequestRef.current) {
+        setLoadingHistoryId(null);
+      }
     }
   }
 
@@ -983,6 +1001,9 @@ export default function AskJm8Panel({
 
 
   function startNewQuestion() {
+    historySelectionControllerRef.current?.abort();
+    historySelectionRequestRef.current += 1;
+    setLoadingHistoryId(null);
     setQuestion("");
     setAnswer(null);
     setActiveHistoryId(null);

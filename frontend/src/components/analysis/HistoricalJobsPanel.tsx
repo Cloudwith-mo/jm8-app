@@ -213,6 +213,8 @@ export default function HistoricalJobsPanel({
   onNotify,
 }: HistoricalJobsPanelProps) {
   const notifyRef = useRef(onNotify);
+  const controllerRef = useRef<AbortController | null>(null);
+  const requestRef = useRef(0);
 
   const [
     jobs,
@@ -266,6 +268,10 @@ export default function HistoricalJobsPanel({
     async (
       options: LoadOptions = {}
     ) => {
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      const request = ++requestRef.current;
       if (!options.silent) {
         setIsLoading(true);
       }
@@ -277,10 +283,13 @@ export default function HistoricalJobsPanel({
         ] = await Promise.all([
           listHistoricalReanalysisJobs(
             "ALL",
-            50
+            50,
+            controller.signal,
           ),
-          getHistoricalReanalysisInventory(),
+          getHistoricalReanalysisInventory(controller.signal),
         ]);
+
+        if (controller.signal.aborted || request !== requestRef.current) return;
 
         setJobs(jobsResult.jobs);
 
@@ -294,6 +303,7 @@ export default function HistoricalJobsPanel({
         setErrorMessage("");
         setLastUpdatedAt(new Date());
       } catch (error) {
+        if (controller.signal.aborted || request !== requestRef.current) return;
         const message = getErrorMessage(
           error,
           "Historical jobs could not be loaded."
@@ -309,7 +319,7 @@ export default function HistoricalJobsPanel({
           );
         }
       } finally {
-        if (!options.silent) {
+        if (!controller.signal.aborted && request === requestRef.current) {
           setIsLoading(false);
         }
       }
@@ -319,6 +329,7 @@ export default function HistoricalJobsPanel({
 
   useEffect(() => {
     void loadJobs();
+    return () => controllerRef.current?.abort();
   }, [loadJobs]);
 
   const hasActiveJobs = useMemo(

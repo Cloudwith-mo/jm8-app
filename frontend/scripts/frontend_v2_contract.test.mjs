@@ -105,7 +105,7 @@ test("V2 foundation includes the required reusable primitives and tokens", () =>
     "EmptyState",
     "ErrorState",
   ]) {
-    assert.match(primitives, new RegExp(`export function ${component}`));
+    assert.match(primitives, new RegExp(`export (?:function|const) ${component}`));
   }
 
   for (const token of [

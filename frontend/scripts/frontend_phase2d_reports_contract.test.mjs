@@ -2,12 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { isReportWindow, parseInsightsReportResponse } from "../src/api/reportsValidation.ts";
+import { parseAppRoute, serializeAppRoute } from "../src/navigation/appRoute.ts";
 
 function source(relativePath) {
   return fs.readFileSync(new URL(`../${relativePath}`, import.meta.url), "utf8");
 }
 
 const page = source("src/pages/ArchivePage.tsx");
+const appRoute = source("src/navigation/appRoute.ts");
 const reports = source("src/components/insights/ReportsPanel.tsx");
 const styles = source("src/components/insights/ReportsPanel.css");
 const validator = source("src/api/reportsValidation.ts");
@@ -62,10 +64,11 @@ function emptyFixture() {
 }
 
 test("Reports uses canonical URL-backed weekly and monthly routing", () => {
-  assert.match(page, /period === "monthly" \? "MONTHLY" : "WEEKLY"/);
-  assert.match(page, /searchParams\.set\("period", route\.type === "WEEKLY" \? "weekly" : "monthly"\)/);
-  assert.match(page, /searchParams\.set\("window", route\.window\)/);
-  assert.match(page, /setReportRoute\(routedReport, "replace"\)/);
+  assert.equal(parseAppRoute("https://app.test/?view=reports&period=weekly").report.type, "WEEKLY");
+  assert.equal(parseAppRoute("https://app.test/?view=reports&period=monthly").report.type, "MONTHLY");
+  assert.match(appRoute, /searchParams\.set\("period", route\.report\.type/);
+  assert.match(appRoute, /searchParams\.set\("window", route\.report\.window\)/);
+  assert.match(page, /replaceAppRoute\(routedApp\)/);
   assert.match(page, /addEventListener\("popstate", handlePopState\)/);
   assert.match(reports, /onNavigate\(\{ type: "WEEKLY", window: null \}\)/);
   assert.match(reports, /onNavigate\(\{ type: "MONTHLY", window: null \}\)/);
@@ -73,8 +76,8 @@ test("Reports uses canonical URL-backed weekly and monthly routing", () => {
 });
 
 test("invalid report periods and windows normalize to a safe current weekly or monthly request", () => {
-  assert.match(page, /period === "weekly" \|\| period === "monthly"/);
-  assert.match(page, /isReportWindow\(type, candidate\) \? candidate : null/);
+  assert.match(appRoute, /period === "weekly" \|\| period === "monthly"/);
+  assert.match(appRoute, /isReportWindow\(type, rawWindow\) \? rawWindow : null/);
   assert.equal(isReportWindow("WEEKLY", "2026-W30"), true);
   assert.equal(isReportWindow("WEEKLY", "2026-W54"), false);
   assert.equal(isReportWindow("MONTHLY", "2026-07"), true);
@@ -82,9 +85,10 @@ test("invalid report periods and windows normalize to a safe current weekly or m
 });
 
 test("entry detail retains precedence over report section routing", () => {
-  assert.match(page, /if \(url\.searchParams\.get\("entry"\)\) return "archive"/);
-  assert.match(page, /searchParams\.set\("entry", entryId\)/);
-  assert.match(page, /url\.searchParams\.delete\("entry"\)[\s\S]*url\.searchParams\.set\("view", "reports"\)/);
+  const route = parseAppRoute("https://app.test/?view=reports&period=monthly&entry=entry_abc123");
+  assert.equal(route.view, "archive");
+  assert.equal(route.entryId, "entry_abc123");
+  assert.equal(new URL(serializeAppRoute(route, "https://app.test/")).search, "?entry=entry_abc123");
 });
 
 test("weekly and monthly endpoint responses pass exact runtime validation", () => {

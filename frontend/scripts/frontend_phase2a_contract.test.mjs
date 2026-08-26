@@ -7,6 +7,7 @@ function source(relativePath) {
 }
 
 const archive = source("src/pages/ArchivePage.tsx");
+const appRoute = source("src/navigation/appRoute.ts");
 const topbar = source("src/components/layout/ArchiveTopbar.tsx");
 const card = source("src/components/archive/EntryCard.tsx");
 const detail = source("src/components/archive/EntryDetailView.tsx");
@@ -52,9 +53,9 @@ test("dense entry cards use real thumbnails or returned transcript text only", (
 });
 
 test("entry detail is route-compatible and replaces the selected-entry drawer", () => {
-  assert.match(archive, /searchParams\.get\("entry"\)/);
-  assert.match(archive, /searchParams\.set\("entry", entryId\)/);
-  assert.match(archive, /pushState|replaceState/);
+  assert.match(appRoute, /getAll\("entry"\)/);
+  assert.match(appRoute, /searchParams\.set\("entry", route\.entryId\)/);
+  assert.match(appRoute, /pushState|replaceState/);
   assert.match(archive, /addEventListener\("popstate"/);
   assert.match(archive, /<EntryDetailView/);
   assert.doesNotMatch(archive, /SelectedEntryPanel|selected-panel-backdrop|selected entry drawer/i);

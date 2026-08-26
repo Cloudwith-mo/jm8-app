@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, CalendarDays, Image as ImageIcon, Menu, Upload, UserRound, X } from "lucide-react";
 import ArchiveSidebar, {
   type ArchiveSection,
@@ -33,9 +33,17 @@ import type {
 import type {
   AccountEntitlement,
 } from "../types/accountEntitlement";
-import type { InsightsReportType } from "../types/reports";
-import { isReportWindow } from "../api/reportsValidation";
 import {
+  parseAppRoute,
+  pushAppRoute,
+  replaceAppRoute,
+  type AppRoute,
+  type ReportRoute,
+} from "../navigation/appRoute";
+import {
+  AUTH_SESSION_EXPIRED_EVENT,
+  expireAuthSession,
+  getAuthSessionExpiresAt,
   getCurrentUser,
   handleCognitoCallback,
   loginWithCognito,
@@ -43,6 +51,8 @@ import {
   signupWithCognito,
   type AuthUser,
 } from "../auth/cognito";
+import { isTrustedStripeRedirect } from "../security/externalUrls";
+import { isReportWindow } from "../api/reportsValidation";
 import {
   ApiRequestError,
   analyzeEntry,
@@ -109,74 +119,57 @@ function groupEntries(entries: JournalEntry[]) {
   return Array.from(groups, ([key, year]) => ({ key, label: year.label, months: Array.from(year.months, ([monthKey, month]) => ({ key: monthKey, ...month })) }));
 }
 
+function getAppRoute() {
+  return parseAppRoute(window.location.href);
+}
+
 function getEntryRouteId() {
-  return new URL(window.location.href).searchParams.get("entry");
+  return getAppRoute().entryId;
 }
 
 function getThemeRouteId() {
-  const value = new URL(window.location.href).searchParams.get("theme");
-  if (value === null) return null;
-  return /^theme-[a-f0-9]{8}$/.test(value) ? value : "invalid-theme-route";
+  return getAppRoute().themeId;
 }
-
-type ReportRoute = { type: InsightsReportType; window: string | null };
 
 function getReportRoute(): ReportRoute {
-  const url = new URL(window.location.href);
-  const period = url.searchParams.get("period");
-  const type: InsightsReportType = period === "monthly" ? "MONTHLY" : "WEEKLY";
-  const candidate = period === "weekly" || period === "monthly" ? url.searchParams.get("window") : null;
-  return { type, window: candidate && isReportWindow(type, candidate) ? candidate : null };
+  return getAppRoute().report;
 }
 
-const ROUTABLE_SECTIONS: ArchiveSection[] = [
-  "home", "archive", "insights", "themes", "reports", "askJm8", "ocrJobs", "analysisJobs",
-];
-
 function getSectionRoute(): ArchiveSection {
-  const url = new URL(window.location.href);
-  if (url.searchParams.get("entry")) return "archive";
-  const view = url.searchParams.get("view");
-  return ROUTABLE_SECTIONS.find((section) => section === view) || "home";
+  return getAppRoute().view;
+}
+
+function routeForSection(section: ArchiveSection): AppRoute {
+  return {
+    view: section,
+    entryId: null,
+    themeId: section === "themes" ? getThemeRouteId() : null,
+    report: section === "reports" ? getReportRoute() : { type: "WEEKLY", window: null },
+  };
 }
 
 function setSectionRoute(section: ArchiveSection, mode: "push" | "replace" = "push") {
-  const url = new URL(window.location.href);
-  url.searchParams.delete("entry");
-  if (section !== "themes") url.searchParams.delete("theme");
-  if (section !== "reports") {
-    url.searchParams.delete("period");
-    url.searchParams.delete("window");
-  }
-  if (section === "home") url.searchParams.delete("view");
-  else url.searchParams.set("view", section);
-  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+  const route = routeForSection(section);
+  if (mode === "push") pushAppRoute(route); else replaceAppRoute(route);
 }
 
 function setReportRoute(route: ReportRoute, mode: "push" | "replace" = "push") {
-  const url = new URL(window.location.href);
-  url.searchParams.delete("entry");
-  url.searchParams.delete("theme");
-  url.searchParams.set("view", "reports");
-  url.searchParams.set("period", route.type === "WEEKLY" ? "weekly" : "monthly");
-  if (route.window && isReportWindow(route.type, route.window)) url.searchParams.set("window", route.window);
-  else url.searchParams.delete("window");
-  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+  const nextRoute: AppRoute = { view: "reports", entryId: null, themeId: null, report: route };
+  if (mode === "push") pushAppRoute(nextRoute); else replaceAppRoute(nextRoute);
 }
 
 function setThemeRoute(themeId: string, mode: "push" | "replace" = "push") {
-  const url = new URL(window.location.href);
-  url.searchParams.delete("entry");
-  url.searchParams.set("view", "themes");
-  url.searchParams.set("theme", themeId);
-  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+  const route: AppRoute = {
+    view: "themes", entryId: null, themeId, report: { type: "WEEKLY", window: null },
+  };
+  if (mode === "push") pushAppRoute(route); else replaceAppRoute(route);
 }
 
 function setEntryRoute(entryId: string | null, mode: "push" | "replace" = "push") {
-  const url = new URL(window.location.href);
-  if (entryId) url.searchParams.set("entry", entryId);
-  else url.searchParams.delete("entry");
-  window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", url);
+  const route: AppRoute = entryId
+    ? { view: "archive", entryId, themeId: null, report: { type: "WEEKLY", window: null } }
+    : routeForSection("archive");
+  if (mode === "push") pushAppRoute(route); else replaceAppRoute(route);
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
@@ -199,6 +192,10 @@ export default function ArchivePage() {
   const [selectedThemeRouteId, setSelectedThemeRouteId] =
     useState<string | null>(() => getThemeRouteId());
   const [reportRoute, setReportRouteState] = useState<ReportRoute>(() => getReportRoute());
+  const entryRequestRef = useRef(0);
+  const entryControllerRef = useRef<AbortController | null>(null);
+  const mobileNavTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const mobileNavCloseRef = useRef<HTMLButtonElement | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -217,6 +214,7 @@ export default function ArchivePage() {
     isUsageLoading,
     setIsUsageLoading,
   ] = useState(false);
+
   const [
     usageError,
     setUsageError,
@@ -243,6 +241,38 @@ export default function ArchivePage() {
     isPortalLoading,
     setIsPortalLoading,
   ] = useState(false);
+
+  const clearProtectedClientState = useCallback(() => {
+    entryControllerRef.current?.abort();
+    entryRequestRef.current += 1;
+    setAuthUser(null);
+    setEntries([]);
+    setSelectedEntry(null);
+    setIsEntryDetailOpen(false);
+    setModalMode(null);
+    setUsage(null);
+    setUsageError("");
+    setAccountEntitlement(null);
+    setEntitlementError("");
+    setIsMobileNavOpen(false);
+    setToasts([]);
+    setArchiveError("");
+    setStatusMessage("Sign in to load your private archive.");
+  }, []);
+
+  const closeMobileNavigation = useCallback(() => {
+    setIsMobileNavOpen(false);
+    window.requestAnimationFrame(() => mobileNavTriggerRef.current?.focus());
+  }, []);
+
+  function focusActiveViewHeading() {
+    window.requestAnimationFrame(() => {
+      const heading = document.querySelector<HTMLElement>(".archive-main h1");
+      if (!heading) return;
+      heading.tabIndex = -1;
+      heading.focus();
+    });
+  }
 
   const filteredEntries = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -320,9 +350,12 @@ export default function ArchivePage() {
     section: ArchiveSection
   ) {
     if (section === activeSection && !isEntryDetailOpen) {
-      setIsMobileNavOpen(false);
+      if (isMobileNavOpen) closeMobileNavigation();
       return;
     }
+    entryControllerRef.current?.abort();
+    entryRequestRef.current += 1;
+    setIsEntryLoading(false);
     setActiveSection(section);
     setIsMobileNavOpen(false);
     setSelectedEntry(null);
@@ -335,6 +368,7 @@ export default function ArchivePage() {
     } else {
       setSectionRoute(section);
     }
+    focusActiveViewHeading();
   }
 
   function selectTheme(themeId: string, mode: "push" | "replace" = "push") {
@@ -452,10 +486,10 @@ export default function ArchivePage() {
         result.checkout.checkoutUrl
           ?.trim();
 
-      if (!checkoutUrl) {
+      if (!checkoutUrl || !isTrustedStripeRedirect(checkoutUrl, "checkout")) {
         throw new Error(
           (
-            "Checkout URL was missing "
+            "Checkout URL was missing or invalid "
             + "from the billing response."
           )
         );
@@ -498,10 +532,10 @@ export default function ArchivePage() {
         result.portal.billingPortalUrl
           ?.trim();
 
-      if (!portalUrl) {
+      if (!portalUrl || !isTrustedStripeRedirect(portalUrl, "portal")) {
         throw new Error(
           (
-            "Portal URL was missing "
+            "Portal URL was missing or invalid "
             + "from the billing response."
           )
         );
@@ -534,34 +568,47 @@ export default function ArchivePage() {
     setEntries(result.entries);
 
     if (nextSelectedEntryId) {
-      const selected = await getEntry(nextSelectedEntryId);
-      setSelectedEntry(selected.entry);
+      await loadSelectedEntry(
+        nextSelectedEntryId,
+        getEntryRouteId() === nextSelectedEntryId ? null : "replace",
+      );
+    }
+  }
+
+  async function loadSelectedEntry(
+    entryId: string,
+    routeMode: "push" | "replace" | null,
+  ) {
+    entryControllerRef.current?.abort();
+    const controller = new AbortController();
+    entryControllerRef.current = controller;
+    const request = ++entryRequestRef.current;
+    setIsEntryLoading(true);
+    try {
+      const result = await getEntry(entryId, controller.signal);
+      if (controller.signal.aborted || request !== entryRequestRef.current) return;
+      setSelectedEntry(result.entry);
       setIsEntryDetailOpen(true);
       setActiveSection("archive");
-      if (getEntryRouteId() !== nextSelectedEntryId) {
-        setEntryRoute(nextSelectedEntryId, "replace");
-      }
+      if (routeMode) setEntryRoute(entryId, routeMode);
+      updateStatus("Entry loaded.");
+    } catch (error) {
+      if (controller.signal.aborted || request !== entryRequestRef.current) return;
+      updateStatus(getErrorMessage(error, "Failed to open entry."), "error", "Could not open entry");
+      if (!routeMode) setEntryRoute(null, "replace");
+    } finally {
+      if (!controller.signal.aborted && request === entryRequestRef.current) setIsEntryLoading(false);
     }
   }
 
   async function openEntry(entryId: string, updateRoute = true) {
-    setIsEntryLoading(true);
-    try {
-      const result = await getEntry(entryId);
-      setSelectedEntry(result.entry);
-      setIsEntryDetailOpen(true);
-      setActiveSection("archive");
-      if (updateRoute) setEntryRoute(entryId);
-      updateStatus("Entry loaded.");
-    } catch (error) {
-      updateStatus(getErrorMessage(error, "Failed to open entry."), "error", "Could not open entry");
-      if (!updateRoute) setEntryRoute(null, "replace");
-    } finally {
-      setIsEntryLoading(false);
-    }
+    await loadSelectedEntry(entryId, updateRoute ? "push" : null);
   }
 
   function closeEntryDetail() {
+    entryControllerRef.current?.abort();
+    entryRequestRef.current += 1;
+    setIsEntryLoading(false);
     setIsEntryDetailOpen(false);
     setSelectedEntry(null);
     setActiveSection("archive");
@@ -843,6 +890,22 @@ export default function ArchivePage() {
   }
 
   useEffect(() => {
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, clearProtectedClientState);
+    return () => window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, clearProtectedClientState);
+  }, [clearProtectedClientState]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    const expiresAt = getAuthSessionExpiresAt();
+    if (expiresAt === null || expiresAt <= Date.now()) {
+      expireAuthSession();
+      return;
+    }
+    const timeout = window.setTimeout(expireAuthSession, expiresAt - Date.now());
+    return () => window.clearTimeout(timeout);
+  }, [authUser]);
+
+  useEffect(() => {
     async function bootstrap() {
       let currentUser: AuthUser | null = null;
 
@@ -874,13 +937,14 @@ export default function ArchivePage() {
       }
 
       try {
-        const routedEntryId = getEntryRouteId();
-        const routedSection = getSectionRoute();
-        const routedReport = getReportRoute();
+        const routedApp = getAppRoute();
+        const routedEntryId = routedApp.entryId;
+        const routedSection = routedApp.view;
+        const routedReport = routedApp.report;
         setActiveSection(routedSection);
-        setSelectedThemeRouteId(getThemeRouteId());
+        setSelectedThemeRouteId(routedApp.themeId);
         setReportRouteState(routedReport);
-        if (routedSection === "reports") setReportRoute(routedReport, "replace");
+        replaceAppRoute(routedApp);
         await Promise.all([
           refreshEntries(routedEntryId || undefined),
           refreshUsage({
@@ -908,15 +972,19 @@ export default function ArchivePage() {
 
   useEffect(() => {
     function handlePopState() {
-      const entryId = getEntryRouteId();
-      const routedSection = getSectionRoute();
-      const routedReport = getReportRoute();
+      const routedApp = getAppRoute();
+      const entryId = routedApp.entryId;
+      const routedSection = routedApp.view;
+      const routedReport = routedApp.report;
       setActiveSection(routedSection);
-      setSelectedThemeRouteId(getThemeRouteId());
+      setSelectedThemeRouteId(routedApp.themeId);
       setReportRouteState(routedReport);
-      if (routedSection === "reports") setReportRoute(routedReport, "replace");
+      replaceAppRoute(routedApp);
       if (entryId) void openEntry(entryId, false);
       else {
+        entryControllerRef.current?.abort();
+        entryRequestRef.current += 1;
+        setIsEntryLoading(false);
         setSelectedEntry(null);
         setIsEntryDetailOpen(false);
       }
@@ -929,15 +997,25 @@ export default function ArchivePage() {
   useEffect(() => {
     if (!isMobileNavOpen) return;
 
+    const frame = window.requestAnimationFrame(() => mobileNavCloseRef.current?.focus());
+
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setIsMobileNavOpen(false);
+        closeMobileNavigation();
       }
     }
 
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [isMobileNavOpen]);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [closeMobileNavigation, isMobileNavOpen]);
+
+  function handleLogout() {
+    clearProtectedClientState();
+    logoutFromCognito();
+  }
 
   if (!isAuthReady || !authUser) {
     return (
@@ -961,7 +1039,7 @@ export default function ArchivePage() {
           <span><strong>{accountEntitlement?.plan.label || "Account"}</strong><small>Plan & usage</small></span>
         </summary>
         <div className="phase2-account-popover">
-          <AuthStatus user={authUser} isAuthReady={isAuthReady} onLogin={loginWithCognito} onLogout={logoutFromCognito} />
+          <AuthStatus user={authUser} isAuthReady={isAuthReady} onLogin={loginWithCognito} onLogout={handleLogout} />
           <AccountPlanCard
             entitlement={accountEntitlement} isLoading={isEntitlementLoading} errorMessage={entitlementError}
             isCheckoutLoading={isCheckoutLoading} isPortalLoading={isPortalLoading}
@@ -984,6 +1062,7 @@ export default function ArchivePage() {
     >
       <header className="mobile-app-header">
         <IconButton
+          ref={mobileNavTriggerRef}
           label="Open navigation"
           icon={<Menu size={20} />}
           onClick={() => setIsMobileNavOpen(true)}
@@ -1001,7 +1080,7 @@ export default function ArchivePage() {
       <button
         type="button"
         className={isMobileNavOpen ? "mobile-nav-backdrop visible" : "mobile-nav-backdrop"}
-        onClick={() => setIsMobileNavOpen(false)}
+        onClick={closeMobileNavigation}
         aria-label="Close navigation"
       />
 
@@ -1012,8 +1091,9 @@ export default function ArchivePage() {
         inert={!isMobileNavOpen}
       >
         <button
+          ref={mobileNavCloseRef}
           className="mobile-sidebar-close"
-          onClick={() => setIsMobileNavOpen(false)}
+          onClick={closeMobileNavigation}
           aria-label="Close navigation"
         >
           <X size={20} />

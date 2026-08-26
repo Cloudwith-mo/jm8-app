@@ -7,6 +7,7 @@ function source(relativePath) {
 }
 
 const page = source("src/pages/ArchivePage.tsx");
+const appRoute = source("src/navigation/appRoute.ts");
 const home = source("src/components/home/HomeDashboard.tsx");
 const sidebar = source("src/components/layout/ArchiveSidebar.tsx");
 const auth = source("src/auth/cognito.ts");
@@ -14,7 +15,7 @@ const styles = source("src/styles/phase2b-home.css");
 const packageJson = JSON.parse(source("package.json"));
 
 test("authenticated navigation defaults to Home and exposes functional Home and Archive destinations", () => {
-  assert.match(page, /return ROUTABLE_SECTIONS\.find[\s\S]*\|\| "home"/);
+  assert.match(appRoute, /APP_VIEWS\.has[\s\S]*: "home"/);
   assert.match(page, /useState<ArchiveSection>\(\(\) => getSectionRoute\(\)\)/);
   assert.match(sidebar, /label: "Home"[\s\S]*section: "home"/);
   assert.match(sidebar, /label: "Archive"[\s\S]*section: "archive"/);
@@ -23,11 +24,11 @@ test("authenticated navigation defaults to Home and exposes functional Home and 
 });
 
 test("entry deep links override Home while preserving browser navigation", () => {
-  assert.match(page, /if \(url\.searchParams\.get\("entry"\)\) return "archive"/);
-  assert.match(page, /searchParams\.set\("entry", entryId\)/);
-  assert.match(page, /window\.history\[mode === "push" \? "pushState" : "replaceState"\]/);
+  assert.match(appRoute, /if \(entryId\) return \{ view: "archive"/);
+  assert.match(appRoute, /searchParams\.set\("entry", route\.entryId\)/);
+  assert.match(appRoute, /window\.history\.(?:pushState|replaceState)/);
   assert.match(page, /addEventListener\("popstate", handlePopState\)/);
-  assert.match(page, /const routedSection = getSectionRoute\(\);[\s\S]*setActiveSection\(routedSection\)/);
+  assert.match(page, /const routedSection = routedApp\.view;[\s\S]*setActiveSection\(routedSection\)/);
   assert.match(page, /if \(entryId\) void openEntry\(entryId, false\)/);
   assert.doesNotMatch(JSON.stringify(packageJson.dependencies), /react-router/);
 });

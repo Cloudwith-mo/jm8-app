@@ -916,35 +916,6 @@ select {
   background: var(--jm8-surface);
 }
 
-.jm8-archive-shell .selected-panel {
-  position: fixed !important;
-  top: 0 !important;
-  right: 0 !important;
-  z-index: 90;
-  width: min(420px, 94vw) !important;
-  height: 100vh !important;
-  min-height: 0 !important;
-  max-height: 100vh !important;
-  overflow-y: auto !important;
-  transform: translateX(108%) !important;
-  transition: transform 200ms ease !important;
-  border-left: 1px solid var(--jm8-border) !important;
-  box-shadow: -24px 0 64px rgba(30, 18, 56, 0.16) !important;
-}
-
-.jm8-archive-shell .selected-panel.open {
-  transform: translateX(0) !important;
-}
-
-.jm8-archive-shell .selected-panel-backdrop {
-  display: none !important;
-  z-index: 85;
-}
-
-.jm8-archive-shell .selected-panel-backdrop.visible {
-  display: block !important;
-}
-
 @media (max-width: 1080px) {
   .jm8-auth-landing {
     grid-template-columns: minmax(0, 0.94fr) minmax(390px, 1.06fr);
