@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import os
 from dataclasses import dataclass
@@ -17,7 +19,8 @@ import sys
 import tempfile
 from typing import Any, Callable
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+import zlib
 
 from jm8_environment_contract import (
     EnvironmentContractError,
@@ -44,22 +47,80 @@ CSS_SIZE_LIMIT = 3 * 1024
 LOGO_SIZE_LIMIT = 100 * 1024
 LOGO_WIDTH = 350
 LOGO_HEIGHT = 178
-ALLOWED_CSS_CLASSES = {
-    "background-customizable",
-    "banner-customizable",
-    "errorMessage-customizable",
-    "idpButton-customizable",
-    "idpDescription-customizable",
-    "inputField-customizable",
-    "label-customizable",
-    "legalText-customizable",
-    "logo-customizable",
-    "passwordCheck-notValid-customizable",
-    "passwordCheck-valid-customizable",
-    "redirect-customizable",
-    "socialButton-customizable",
-    "submitButton-customizable",
-    "textDescription-customizable",
+CANONICAL_LOGO_MEDIA_TYPE = "image/png"
+AWS_COGNITO_PNG_COMPATIBILITY_MEDIA_TYPE = "image/jpeg"
+ALLOWED_LOGO_MEDIA_TYPES = frozenset(
+    {
+        AWS_COGNITO_PNG_COMPATIBILITY_MEDIA_TYPE,
+        CANONICAL_LOGO_MEDIA_TYPE,
+    }
+)
+CLOUDFRONT_IMAGE_HOST = re.compile(r"d[a-z0-9]{13}\.cloudfront\.net")
+ALLOWED_CSS_PROPERTIES = {
+    ".background-customizable": {"background-color"},
+    ".banner-customizable": {"background-color", "padding"},
+    ".errorMessage-customizable": {
+        "background",
+        "border",
+        "box-sizing",
+        "color",
+        "font-size",
+        "margin",
+        "padding",
+        "width",
+    },
+    ".idpButton-customizable": {
+        "background-color",
+        "border-color",
+        "color",
+        "height",
+        "margin-bottom",
+        "text-align",
+        "width",
+    },
+    ".idpButton-customizable:hover": {"background-color", "color"},
+    ".idpDescription-customizable": {
+        "display",
+        "font-size",
+        "padding-bottom",
+        "padding-top",
+    },
+    ".inputField-customizable": {
+        "background-color",
+        "border",
+        "color",
+        "height",
+        "width",
+    },
+    ".inputField-customizable:focus": {"border-color", "outline"},
+    ".label-customizable": {"font-weight"},
+    ".legalText-customizable": {"color", "font-size"},
+    ".logo-customizable": {"max-height", "max-width"},
+    ".passwordCheck-notValid-customizable": {"color"},
+    ".passwordCheck-valid-customizable": {"color"},
+    ".redirect-customizable": {"text-align"},
+    ".socialButton-customizable": {
+        "height",
+        "margin-bottom",
+        "text-align",
+        "width",
+    },
+    ".submitButton-customizable": {
+        "background-color",
+        "color",
+        "font-size",
+        "font-weight",
+        "height",
+        "margin",
+        "width",
+    },
+    ".submitButton-customizable:hover": {"background-color", "color"},
+    ".textDescription-customizable": {
+        "display",
+        "font-size",
+        "padding-bottom",
+        "padding-top",
+    },
 }
 FORBIDDEN_BRANDING_PATTERNS = (
     re.compile(r"@(?:import|supports|page|media)\b", re.IGNORECASE),
@@ -71,18 +132,19 @@ FORBIDDEN_BRANDING_PATTERNS = (
     ),
     re.compile(r"(?:sk_(?:live|test)_|whsec_|AKIA[0-9A-Z]{16})", re.IGNORECASE),
 )
-SAFE_AWS_ERROR_CODES = {
-    "AccessDenied",
-    "AccessDeniedException",
-    "InvalidClientTokenId",
-    "NotAuthorizedException",
-    "ResourceNotFoundException",
-    "RequestExpired",
-    "Throttling",
-    "ThrottlingException",
-    "UnrecognizedClientException",
-    "ValidationError",
-    "ValidationException",
+SAFE_AWS_ERROR_REASONS = {
+    "AccessDenied": "access was denied",
+    "AccessDeniedException": "access was denied",
+    "InvalidClientTokenId": "AWS credentials were rejected",
+    "InvalidParameterException": "request parameters were rejected",
+    "NotAuthorizedException": "authorization was rejected",
+    "ResourceNotFoundException": "the target resource was not found",
+    "RequestExpired": "the request expired",
+    "Throttling": "the request was throttled",
+    "ThrottlingException": "the request was throttled",
+    "UnrecognizedClientException": "AWS credentials were rejected",
+    "ValidationError": "request validation failed",
+    "ValidationException": "request validation failed",
 }
 
 
@@ -200,6 +262,61 @@ def canonical_css() -> str:
     return css
 
 
+_CSS_COLOR = re.compile(r"#[0-9A-Fa-f]{3}(?:[0-9A-Fa-f]{3})?")
+_CSS_PIXELS = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?px")
+_CSS_PERCENT = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?%")
+
+
+def _valid_css_property_value(selector: str, property_name: str, value: str) -> bool:
+    if property_name in {
+        "background",
+        "background-color",
+        "border-color",
+        "color",
+    }:
+        return _CSS_COLOR.fullmatch(value) is not None
+    if property_name in {
+        "font-size",
+        "height",
+        "margin-bottom",
+        "outline",
+        "padding-bottom",
+        "padding-top",
+    }:
+        return _CSS_PIXELS.fullmatch(value) is not None
+    if property_name in {"margin", "padding"}:
+        if (
+            selector == ".errorMessage-customizable"
+            and property_name == "padding"
+        ):
+            return _CSS_PIXELS.fullmatch(value) is not None
+        return (
+            len(value.split()) == 4
+            and all(_CSS_PIXELS.fullmatch(part) for part in value.split())
+        )
+    if property_name in {"max-height", "max-width", "width"}:
+        return _CSS_PERCENT.fullmatch(value) is not None
+    if property_name == "font-weight":
+        if selector == ".label-customizable":
+            return value in {str(weight) for weight in range(100, 1000, 100)}
+        return value in {"bold", "italic", "normal"}
+    if property_name == "display":
+        return value in {"block", "inline"}
+    if property_name == "text-align":
+        return value in {"center", "left", "right"}
+    if property_name == "box-sizing":
+        return value in {"border-box", "content-box"}
+    if property_name == "border":
+        parts = value.split()
+        return (
+            len(parts) == 3
+            and _CSS_PIXELS.fullmatch(parts[0]) is not None
+            and parts[1] in {"none", "solid"}
+            and _CSS_COLOR.fullmatch(parts[2]) is not None
+        )
+    return False
+
+
 def validate_css(css: Any) -> None:
     if not isinstance(css, str) or not css:
         _fail("Cognito branding CSS is missing or malformed.")
@@ -207,10 +324,40 @@ def validate_css(css: Any) -> None:
         _fail("Cognito branding CSS exceeds the documented safe size.")
     if any(pattern.search(css) for pattern in FORBIDDEN_BRANDING_PATTERNS):
         _fail("Cognito branding CSS contains a forbidden external or unsafe marker.")
-    classes = set(re.findall(r"\.([A-Za-z][A-Za-z0-9-]*)", css))
-    if not classes or not classes.issubset(ALLOWED_CSS_CLASSES):
-        _fail("Cognito branding CSS contains an unsupported selector.")
-    if "submitButton-customizable" not in classes or "background-customizable" not in classes:
+    rule_pattern = re.compile(r"([^{}]+)\{([^{}]*)\}")
+    rules = list(rule_pattern.finditer(css))
+    if not rules or rule_pattern.sub("", css).strip():
+        _fail("Cognito branding CSS syntax is malformed or unsupported.")
+    selectors: set[str] = set()
+    for rule in rules:
+        selector = rule.group(1).strip()
+        if "," in selector:
+            _fail("Cognito branding CSS must use one customizable selector per rule.")
+        allowed_properties = ALLOWED_CSS_PROPERTIES.get(selector)
+        if allowed_properties is None or selector in selectors:
+            _fail("Cognito branding CSS contains an unsupported selector.")
+        selectors.add(selector)
+        declarations = [part.strip() for part in rule.group(2).split(";") if part.strip()]
+        if not declarations:
+            _fail("Cognito branding CSS contains an empty rule.")
+        properties: set[str] = set()
+        for declaration in declarations:
+            if declaration.count(":") != 1:
+                _fail("Cognito branding CSS contains unsupported declaration syntax.")
+            property_name, value = (part.strip() for part in declaration.split(":", 1))
+            if (
+                property_name not in allowed_properties
+                or property_name in properties
+                or not value
+            ):
+                _fail("Cognito branding CSS contains an unsupported property.")
+            if not _valid_css_property_value(selector, property_name, value):
+                _fail("Cognito branding CSS contains an unsupported property value.")
+            properties.add(property_name)
+    if not {
+        ".submitButton-customizable",
+        ".background-customizable",
+    }.issubset(selectors):
         _fail("Cognito branding CSS is incomplete.")
 
 
@@ -262,6 +409,33 @@ def validate_logo(image: Any) -> None:
         or interlace != 0
     ):
         _fail("Cognito branding logo dimensions or format are invalid.")
+    compressed = chunks[1][1]
+    expected_row_bytes = 1 + (LOGO_WIDTH * 4)
+    expected_scanline_bytes = LOGO_HEIGHT * expected_row_bytes
+    try:
+        decompressor = zlib.decompressobj()
+        scanlines = decompressor.decompress(
+            compressed,
+            expected_scanline_bytes + 1,
+        )
+        if len(scanlines) > expected_scanline_bytes:
+            _fail("Cognito branding logo is malformed.")
+        scanlines += decompressor.flush(
+            expected_scanline_bytes + 1 - len(scanlines)
+        )
+    except zlib.error as error:
+        raise CognitoBrandingError("Cognito branding logo is malformed.") from error
+    if (
+        not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+        or len(scanlines) != expected_scanline_bytes
+        or any(
+            scanlines[offset] not in range(5)
+            for offset in range(0, len(scanlines), expected_row_bytes)
+        )
+    ):
+        _fail("Cognito branding logo is malformed.")
 
 
 def canonical_logo() -> bytes:
@@ -340,11 +514,19 @@ class AwsCli:
                 f"AWS command could not run: {service} {operation}."
             ) from error
         if result.returncode != 0:
-            match = re.search(r"\(([A-Za-z0-9]+)\)", result.stderr or "")
+            match = re.search(
+                r"An error occurred \(([A-Za-z][A-Za-z0-9]{0,63})\) "
+                r"when calling the [A-Za-z0-9]+ operation",
+                result.stderr or "",
+            )
             candidate = match.group(1) if match else ""
-            code = candidate if candidate in SAFE_AWS_ERROR_CODES else "AwsCliError"
+            code = candidate if candidate in SAFE_AWS_ERROR_REASONS else "AwsCliError"
+            reason = SAFE_AWS_ERROR_REASONS.get(
+                code,
+                "AWS rejected the command",
+            )
             raise CognitoBrandingError(
-                f"AWS command failed: {service} {operation} ({code})."
+                f"AWS command failed: {service} {operation} ({code}: {reason})."
             )
         try:
             response = json.loads(result.stdout or "{}")
@@ -474,31 +656,61 @@ def _validate_image_url(
     parsed = urlsplit(value)
     expected_host = urlsplit(target.boundary.cognito_domain).hostname
     host = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        _fail("Cognito branding logo URL is malformed or outside the AWS boundary.")
+    cloudfront_host = CLOUDFRONT_IMAGE_HOST.fullmatch(host) is not None
+    path_segments = {segment for segment in parsed.path.split("/") if segment}
     if (
         parsed.scheme != "https"
         or parsed.username
         or parsed.password
+        or port not in (None, 443)
         or parsed.query
         or parsed.fragment
         or not host
-        or (host != expected_host and not host.endswith(".cloudfront.net"))
-        or (require_client_path and target.app_client_id not in parsed.path)
+        or (host != expected_host and not cloudfront_host)
+        or (require_client_path and target.app_client_id not in path_segments)
         or "/assets/images/" not in parsed.path
     ):
         _fail("Cognito branding logo URL is malformed or outside the AWS boundary.")
     return value
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_logo_response(request: Request, timeout: int = 15):
+    return build_opener(_RejectRedirects()).open(request, timeout=timeout)
+
+
+def _parse_logo_media_type(content_type: Any) -> str:
+    if not isinstance(content_type, str):
+        return ""
+    normalized = content_type.strip().lower()
+    media_type = normalized.partition(";")[0].strip()
+    if (
+        media_type == AWS_COGNITO_PNG_COMPATIBILITY_MEDIA_TYPE
+        and normalized != AWS_COGNITO_PNG_COMPATIBILITY_MEDIA_TYPE
+    ):
+        return ""
+    return media_type
+
+
 def download_logo(url: str) -> bytes:
     try:
         request = Request(url, headers={"User-Agent": "JM8-Cognito-Branding-Verifier/1"})
-        with urlopen(request, timeout=15) as response:
-            if getattr(response, "status", 200) != 200:
+        with _open_logo_response(request, timeout=15) as response:
+            if getattr(response, "status", None) != 200:
                 _fail("Cognito branding logo could not be verified.")
             if response.geturl() != url:
                 _fail("Cognito branding logo response redirected unexpectedly.")
-            content_type = str(response.headers.get("Content-Type", "")).lower()
-            if "image/png" not in content_type:
+            content_type = response.headers.get("Content-Type", "")
+            media_type = _parse_logo_media_type(content_type)
+            if media_type not in ALLOWED_LOGO_MEDIA_TYPES:
                 _fail("Cognito branding logo response has an invalid content type.")
             image = response.read(LOGO_SIZE_LIMIT + 1)
     except CognitoBrandingError:
@@ -506,6 +718,12 @@ def download_logo(url: str) -> bytes:
     except Exception as error:
         raise CognitoBrandingError("Cognito branding logo could not be verified.") from error
     validate_logo(image)
+    expected_logo = canonical_logo()
+    if not hmac.compare_digest(
+        hashlib.sha256(image).digest(),
+        hashlib.sha256(expected_logo).digest(),
+    ):
+        _fail("Cognito branding logo does not match the canonical asset.")
     return image
 
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -48,6 +48,8 @@ function StatusIcon({ status }: { status: OcrJob["jobStatus"] }) {
 }
 
 export default function OcrJobsPanel({ onNotify }: Props) {
+  const controllerRef = useRef<AbortController | null>(null);
+  const requestRef = useRef(0);
   const [jobs, setJobs] = useState<OcrJob[]>([]);
   const [filter, setFilter] = useState<OcrJobStatusFilter>("ALL");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -58,23 +60,33 @@ export default function OcrJobsPanel({ onNotify }: Props) {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const load = useCallback(async (status: OcrJobStatusFilter, cursor?: string) => {
-    cursor ? setIsLoadingMore(true) : setIsLoading(true);
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const request = ++requestRef.current;
+    if (cursor) setIsLoadingMore(true);
+    else setIsLoading(true);
     try {
-      const result = await listOcrJobs(status, 20, cursor);
+      const result = await listOcrJobs(status, 20, cursor, controller.signal);
+      if (controller.signal.aborted || request !== requestRef.current) return;
       setJobs((current) => cursor ? [...current, ...result.jobs] : result.jobs);
       setNextCursor(result.nextCursor);
       setError("");
       setLastUpdated(new Date());
     } catch (loadError) {
+      if (controller.signal.aborted || request !== requestRef.current) return;
       setError(errorMessage(loadError));
     } finally {
-      setIsLoading(false);
-      setIsLoadingMore(false);
+      if (!controller.signal.aborted && request === requestRef.current) {
+        setIsLoading(false);
+        setIsLoadingMore(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     void load(filter);
+    return () => controllerRef.current?.abort();
   }, [filter, load]);
 
   async function retry(job: OcrJob) {

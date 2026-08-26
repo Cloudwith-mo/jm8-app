@@ -1,1119 +1,258 @@
+import { useEffect, useRef, useState } from "react";
 import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-import {
-  Activity,
-  AlertCircle,
-  ArrowLeft,
-  ArrowRight,
-  BarChart3,
-  CalendarDays,
-  CheckCircle2,
-  CircleMinus,
-  Flag,
-  Lightbulb,
-  RefreshCw,
-  Sparkles,
-  Target,
-  TrendingUp,
-  Trophy,
+  AlertCircle, ArrowLeft, ArrowRight, BarChart3, Brain, CalendarDays,
+  CheckCircle2, CircleMinus, Flag, Lightbulb, Sparkles, Target,
+  TrendingUp, Trophy,
 } from "lucide-react";
-import type {
-  LucideIcon,
-} from "lucide-react";
-import {
-  getMonthlyReport,
-  getWeeklyReport,
-} from "../../api/client";
-import type {
-  InsightsRankedItem,
-} from "../../types/insights";
-import type {
-  InsightsReport,
-  InsightsReportType,
-} from "../../types/reports";
-import type {
-  ToastKind,
-} from "../ui/ToastStack";
+import type { LucideIcon } from "lucide-react";
+import { getMonthlyReport, getWeeklyReport } from "../../api/client";
+import type { InsightsRankedItem } from "../../types/insights";
+import type { InsightsReport, InsightsReportType } from "../../types/reports";
+import type { ToastKind } from "../ui/ToastStack";
 import "./ReportsPanel.css";
 
+type ReportRoute = { type: InsightsReportType; window: string | null };
 
-type ReportsPanelProps = {
-  onNotify: (
-    kind: ToastKind,
-    title: string,
-    message?: string
-  ) => void;
+type Props = {
+  reportType: InsightsReportType;
+  reportWindow: string | null;
+  onNavigate: (route: ReportRoute, mode?: "push" | "replace") => void;
+  onNotify: (kind: ToastKind, title: string, message?: string) => void;
 };
-
-type LoadOptions = {
-  keepContent?: boolean;
-  notify?: boolean;
-};
-
-type ReportHighlightKey =
-  keyof InsightsReport["highlights"];
 
 type HighlightDefinition = {
-  key: ReportHighlightKey;
+  key: keyof InsightsReport["highlights"];
   label: string;
-  description: string;
   icon: LucideIcon;
-  variant: string;
 };
 
-type RankedListProps = {
+const WEEKLY_HIGHLIGHTS: HighlightDefinition[] = [
+  { key: "dominantMood", label: "Dominant mood", icon: Brain },
+  { key: "dominantSentiment", label: "Dominant sentiment", icon: TrendingUp },
+  { key: "topRecurringTheme", label: "Recurring theme", icon: Sparkles },
+  { key: "notableProgress", label: "Notable progress", icon: Trophy },
+];
+
+const MONTHLY_HIGHLIGHTS: HighlightDefinition[] = [
+  { key: "dominantSentiment", label: "Overall sentiment", icon: TrendingUp },
+  { key: "topRecurringTheme", label: "Top recurring theme", icon: Sparkles },
+  { key: "biggestChallenge", label: "Biggest challenge", icon: Target },
+  { key: "notableProgress", label: "Notable progress", icon: Trophy },
+];
+
+function formatLabel(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatDay(value: string) {
+  return new Date(`${value}T00:00:00Z`).toLocaleDateString([], {
+    dateStyle: "medium", timeZone: "UTC",
+  });
+}
+
+function formatTimestamp(value: string) {
+  return new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+function periodTitle(report: InsightsReport) {
+  return `${formatDay(report.period.startDate)} – ${formatDay(report.period.endDate)}`;
+}
+
+function HighlightCard({ definition, item }: { definition: HighlightDefinition; item: InsightsRankedItem }) {
+  const Icon = definition.icon;
+  return <article className="phase2d-highlight">
+    <span className="phase2d-icon"><Icon size={19} /></span>
+    <div><small>{definition.label}</small><strong>{formatLabel(item.value)}</strong>
+      <p>{item.count} {item.count === 1 ? "entry" : "entries"} · {item.sharePercent}% of analyzed entries</p></div>
+  </article>;
+}
+
+function HighlightGrid({ report, definitions, title }: {
+  report: InsightsReport;
+  definitions: HighlightDefinition[];
+  title: string;
+}) {
+  const returned = definitions.flatMap((definition) => {
+    const item = report.highlights[definition.key];
+    return item ? [{ definition, item }] : [];
+  });
+  if (!returned.length) return null;
+  return <section className="phase2d-module" aria-labelledby="report-highlights-title">
+    <header><h2 id="report-highlights-title">{title}</h2><p>Highlights returned by this report endpoint.</p></header>
+    <div className="phase2d-highlight-grid">{returned.map(({ definition, item }) =>
+      <HighlightCard key={definition.key} definition={definition} item={item} />)}</div>
+  </section>;
+}
+
+function RankedCard({ title, description, items, icon: Icon }: {
   title: string;
   description: string;
   items: InsightsRankedItem[];
-  emptyMessage: string;
   icon: LucideIcon;
-  variant: string;
-};
-
-
-const highlightDefinitions:
-HighlightDefinition[] = [
-  {
-    key: "dominantMood",
-    label: "Dominant mood",
-    description:
-      "The mood appearing most often.",
-    icon: Activity,
-    variant: "mood",
-  },
-  {
-    key: "dominantSentiment",
-    label: "Dominant sentiment",
-    description:
-      "The overall emotional direction.",
-    icon: TrendingUp,
-    variant: "sentiment",
-  },
-  {
-    key: "topRecurringTheme",
-    label: "Recurring theme",
-    description:
-      "The strongest repeated subject.",
-    icon: Sparkles,
-    variant: "theme",
-  },
-  {
-    key: "biggestChallenge",
-    label: "Biggest challenge",
-    description:
-      "The leading obstacle mentioned.",
-    icon: Target,
-    variant: "challenge",
-  },
-  {
-    key: "notableProgress",
-    label: "Notable progress",
-    description:
-      "The clearest growth signal.",
-    icon: Trophy,
-    variant: "progress",
-  },
-  {
-    key: "repeatedConcern",
-    label: "Repeated concern",
-    description:
-      "A challenge appearing repeatedly.",
-    icon: AlertCircle,
-    variant: "concern",
-  },
-];
-
-
-function formatLabel(
-  value: string | null
-) {
-  if (!value) {
-    return "No signal yet";
-  }
-
-  return value
-    .replaceAll("_", " ")
-    .split(" ")
-    .filter(Boolean)
-    .map(
-      (word) =>
-        word.charAt(0).toUpperCase()
-        + word.slice(1)
-    )
-    .join(" ");
-}
-
-
-function formatDate(
-  value: string | null
-) {
-  if (!value) {
-    return "Not available";
-  }
-
-  const parsed = new Date(
-    `${value.slice(0, 10)}T00:00:00Z`
-  );
-
-  if (
-    Number.isNaN(
-      parsed.getTime()
-    )
-  ) {
-    return "Not available";
-  }
-
-  return parsed.toLocaleDateString(
-    [],
-    {
-      dateStyle: "medium",
-      timeZone: "UTC",
-    }
-  );
-}
-
-
-function formatEntryDate(
-  value: string | null
-) {
-  if (!value) {
-    return "Not available";
-  }
-
-  const parsed = new Date(value);
-
-  if (
-    Number.isNaN(
-      parsed.getTime()
-    )
-  ) {
-    return "Not available";
-  }
-
-  return parsed.toLocaleDateString(
-    [],
-    {
-      dateStyle: "medium",
-    }
-  );
-}
-
-
-function formatGeneratedAt(
-  value: string
-) {
-  const parsed = new Date(value);
-
-  if (
-    Number.isNaN(
-      parsed.getTime()
-    )
-  ) {
-    return "Not available";
-  }
-
-  return parsed.toLocaleString(
-    [],
-    {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }
-  );
-}
-
-
-function formatPeriodTitle(
-  report: InsightsReport
-) {
-  if (
-    report.reportType
-    === "MONTHLY"
-  ) {
-    const parsed = new Date(
-      `${report.period.startDate}T00:00:00Z`
-    );
-
-    if (
-      !Number.isNaN(
-        parsed.getTime()
-      )
-    ) {
-      return parsed.toLocaleDateString(
-        [],
-        {
-          month: "long",
-          year: "numeric",
-          timeZone: "UTC",
-        }
-      );
-    }
-  }
-
-  return (
-    `${formatDate(
-      report.period.startDate
-    )} – ${formatDate(
-      report.period.endDate
-    )}`
-  );
-}
-
-
-function clampPercent(
-  value: number
-) {
-  return Math.min(
-    Math.max(
-      Number(value || 0),
-      0
-    ),
-    100
-  );
-}
-
-
-function getErrorMessage(
-  error: unknown
-) {
-  return error instanceof Error
-    ? error.message
-    : (
-        "JM8 could not load "
-        + "this report."
-      );
-}
-
-
-function HighlightCard({
-  definition,
-  item,
-}: {
-  definition: HighlightDefinition;
-  item: InsightsRankedItem | null;
 }) {
-  const Icon = definition.icon;
-
-  return (
-    <article
-      className={
-        "reports-highlight-card "
-        + definition.variant
-      }
-    >
-      <div className="reports-highlight-icon">
-        <Icon size={20} />
-      </div>
-
-      <div>
-        <span>
-          {definition.label}
-        </span>
-
-        <strong>
-          {formatLabel(
-            item?.value || null
-          )}
-        </strong>
-
-        <p>
-          {item
-            ? (
-                `${item.count} ${
-                  item.count === 1
-                    ? "entry"
-                    : "entries"
-                } · ${
-                  clampPercent(
-                    item.sharePercent
-                  )
-                }%`
-              )
-            : definition.description}
-        </p>
-      </div>
-    </article>
-  );
+  if (!items.length) return null;
+  return <section className="phase2d-ranked">
+    <header><span className="phase2d-icon"><Icon size={18} /></span><div><h2>{title}</h2><p>{description}</p></div></header>
+    <ol>{items.map((item, index) => <li key={item.value}>
+      <span className="phase2d-rank">{index + 1}</span>
+      <span className="phase2d-rank-copy"><strong>{formatLabel(item.value)}</strong>
+        <progress max="100" value={item.sharePercent} aria-label={`${formatLabel(item.value)} share ${item.sharePercent}%`}>{item.sharePercent}%</progress></span>
+      <small>{item.count} · {item.sharePercent}%</small>
+    </li>)}</ol>
+  </section>;
 }
 
-
-function RankedList({
-  title,
-  description,
-  items,
-  emptyMessage,
-  icon: Icon,
-  variant,
-}: RankedListProps) {
-  return (
-    <article
-      className={
-        "reports-ranked-card "
-        + variant
-      }
-    >
-      <header>
-        <div className="reports-ranked-icon">
-          <Icon size={20} />
-        </div>
-
-        <div>
-          <h2>{title}</h2>
-          <p>{description}</p>
-        </div>
-      </header>
-
-      {items.length === 0 ? (
-        <div className="reports-list-empty">
-          {emptyMessage}
-        </div>
-      ) : (
-        <ol className="reports-ranked-list">
-          {items.map(
-            (
-              item,
-              index
-            ) => {
-              const percent =
-                clampPercent(
-                  item.sharePercent
-                );
-
-              return (
-                <li key={item.value}>
-                  <div className="reports-ranked-copy">
-                    <span>
-                      <strong>
-                        {index + 1}
-                      </strong>
-
-                      {formatLabel(
-                        item.value
-                      )}
-                    </span>
-
-                    <small>
-                      {item.count}{" "}
-                      {item.count === 1
-                        ? "entry"
-                        : "entries"}
-                      {" · "}
-                      {percent}%
-                    </small>
-                  </div>
-
-                  <div
-                    className="reports-ranked-track"
-                    aria-hidden="true"
-                  >
-                    <span
-                      style={{
-                        width: `${percent}%`,
-                      }}
-                    />
-                  </div>
-                </li>
-              );
-            }
-          )}
-        </ol>
-      )}
-    </article>
-  );
+function StatusSummary({ report }: { report: InsightsReport }) {
+  const details = report.status === "EMPTY"
+    ? ["No analyzed entries", "Analyze entries from this period to produce report signals."]
+    : report.status === "PARTIAL"
+      ? ["Partial report coverage", "Some period entries are unanalyzed, so returned patterns may change."]
+      : ["Report coverage complete", "All entries returned for this period are represented in the analysis."];
+  const Icon = report.status === "EMPTY" ? CircleMinus : report.status === "PARTIAL" ? AlertCircle : CheckCircle2;
+  return <section className={`phase2d-status ${report.status.toLowerCase()}`} aria-label="Report status">
+    <Icon size={21} /><div><strong>{details[0]}</strong><p>{details[1]}</p></div>
+  </section>;
 }
 
+function Metrics({ report }: { report: InsightsReport }) {
+  return <dl className="phase2d-metrics" aria-label={`${report.reportType.toLowerCase()} report coverage metrics`}>
+    <div><CalendarDays size={20} /><dt>Period entries</dt><dd>{report.coverage.totalEntries}</dd><small>Returned for this exact period</small></div>
+    <div><BarChart3 size={20} /><dt>Analyzed entries</dt><dd>{report.coverage.analyzedEntries}</dd><small>Included in report signals</small></div>
+    <div><CheckCircle2 size={20} /><dt>Analysis coverage</dt><dd>{report.coverage.analysisCompletionPercent}%</dd><small>{report.coverage.unanalyzedEntries} unanalyzed</small></div>
+    <div><CalendarDays size={20} /><dt>Entry range</dt><dd className="compact">{report.coverage.firstEntryAt ? formatTimestamp(report.coverage.firstEntryAt) : "No dated entries"}</dd>
+      <small>{report.coverage.latestEntryAt ? `Latest ${formatTimestamp(report.coverage.latestEntryAt)}` : "No entry timestamps returned"}</small></div>
+  </dl>;
+}
 
-export default function ReportsPanel({
-  onNotify,
-}: ReportsPanelProps) {
-  const notifyRef = useRef(
-    onNotify
-  );
+function Reflection({ prompt }: { prompt: string }) {
+  if (!prompt.trim()) return null;
+  return <section className="phase2d-reflection"><Lightbulb size={21} /><div><small>Suggested reflection</small><p>{prompt}</p></div></section>;
+}
 
-  const [
-    reportType,
-    setReportType,
-  ] = useState<InsightsReportType>(
-    "WEEKLY"
-  );
+function CoverageRail({ report }: { report: InsightsReport }) {
+  return <section className="phase2d-rail-card">
+    <h2>Report summary</h2><p>Coverage from the selected report window.</p>
+    <dl><div><dt>Period</dt><dd>{report.period.key}</dd></div><div><dt>Status</dt><dd>{formatLabel(report.status)}</dd></div>
+      <div><dt>Entries</dt><dd>{report.coverage.totalEntries}</dd></div><div><dt>Analyzed</dt><dd>{report.coverage.analyzedEntries}</dd></div></dl>
+  </section>;
+}
 
-  const [
-    report,
-    setReport,
-  ] = useState<
-    InsightsReport | null
-  >(null);
+function WeeklyDashboard({ report }: { report: InsightsReport }) {
+  return <div className="phase2d-dashboard weekly">
+    <Metrics report={report} />
+    <div className="phase2d-report-layout">
+      <div className="phase2d-primary-column">
+        <HighlightGrid report={report} definitions={WEEKLY_HIGHLIGHTS} title="This week at a glance" />
+        <div className="phase2d-ranked-grid">
+          <RankedCard title="Top themes" description="Themes returned most often for this week." items={report.topThemes} icon={Sparkles} />
+          <RankedCard title="Progress signals" description="Growth signals returned for this week." items={report.progressSignals} icon={Trophy} />
+          <RankedCard title="Goals mentioned" description="Goals returned from analyzed weekly entries." items={report.goalsMentioned} icon={Flag} />
+          <RankedCard title="Behavior patterns" description="Behavior patterns returned for this week." items={report.behaviorPatterns} icon={Brain} />
+        </div>
+      </div>
+      <aside className="phase2d-summary-rail">
+        <CoverageRail report={report} />
+        {report.highlights.biggestChallenge && <section className="phase2d-rail-card accent"><h2>Biggest challenge</h2>
+          <HighlightCard definition={{ key: "biggestChallenge", label: "Returned challenge", icon: Target }} item={report.highlights.biggestChallenge} /></section>}
+        <RankedCard title="Top challenges" description="Challenges returned for this week." items={report.topChallenges} icon={Target} />
+        <Reflection prompt={report.reflectionPrompt} />
+      </aside>
+    </div>
+  </div>;
+}
 
-  const [
-    isLoading,
-    setIsLoading,
-  ] = useState(true);
+function MonthlyDashboard({ report }: { report: InsightsReport }) {
+  return <div className="phase2d-dashboard monthly">
+    <Metrics report={report} />
+    <div className="phase2d-report-layout">
+      <div className="phase2d-primary-column">
+        <HighlightGrid report={report} definitions={MONTHLY_HIGHLIGHTS} title="Your month in review" />
+        <div className="phase2d-ranked-grid">
+          <RankedCard title="Recurring themes" description="Themes returned most often for this month." items={report.topThemes} icon={Sparkles} />
+          <RankedCard title="Growth and progress" description="Progress signals returned for this month." items={report.progressSignals} icon={TrendingUp} />
+          <RankedCard title="Challenges" description="Challenges returned from analyzed monthly entries." items={report.topChallenges} icon={Target} />
+          <RankedCard title="Behavior patterns" description="Behavior patterns returned for this month." items={report.behaviorPatterns} icon={Brain} />
+          <RankedCard title="Goals mentioned" description="Goals returned from analyzed monthly entries." items={report.goalsMentioned} icon={Flag} />
+        </div>
+      </div>
+      <aside className="phase2d-summary-rail">
+        <CoverageRail report={report} />
+        {report.highlights.dominantMood && <section className="phase2d-rail-card accent"><h2>Dominant mood</h2>
+          <HighlightCard definition={{ key: "dominantMood", label: "Returned mood", icon: Brain }} item={report.highlights.dominantMood} /></section>}
+        {report.highlights.repeatedConcern && <section className="phase2d-rail-card accent"><h2>Repeated concern</h2>
+          <HighlightCard definition={{ key: "repeatedConcern", label: "Returned concern", icon: AlertCircle }} item={report.highlights.repeatedConcern} /></section>}
+        <Reflection prompt={report.reflectionPrompt} />
+      </aside>
+    </div>
+  </div>;
+}
 
-  const [
-    errorMessage,
-    setErrorMessage,
-  ] = useState("");
+export default function ReportsPanel({ reportType, reportWindow, onNavigate, onNotify }: Props) {
+  const notifyRef = useRef(onNotify);
+  const requestRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
+  const [report, setReport] = useState<InsightsReport | null>(null);
+  const [loadingKey, setLoadingKey] = useState("");
+  const [errorState, setErrorState] = useState<{ key: string; message: string } | null>(null);
+  const [retry, setRetry] = useState(0);
+  const selectionKey = `${reportType}:${reportWindow ?? "current"}`;
+  const visibleReport = report && report.reportType === reportType
+    && (!reportWindow || report.period.key === reportWindow) ? report : null;
 
+  useEffect(() => { notifyRef.current = onNotify; }, [onNotify]);
   useEffect(() => {
-    notifyRef.current =
-      onNotify;
-  }, [onNotify]);
-
-  const loadReport = useCallback(
-    async (
-      type: InsightsReportType,
-      period?: string,
-      options: LoadOptions = {}
-    ) => {
-      setIsLoading(true);
-
-      if (!options.keepContent) {
-        setReport(null);
-      }
-
-      try {
-        const result =
-          type === "WEEKLY"
-            ? await getWeeklyReport(
-                period
-              )
-            : await getMonthlyReport(
-                period
-              );
-
-        setReport(result.report);
-        setErrorMessage("");
-
-        if (options.notify) {
-          notifyRef.current(
-            "success",
-            "Report refreshed",
-            (
-              "Your journal report "
-              + "is up to date."
-            )
-          );
-        }
-      } catch (error) {
-        const message =
-          getErrorMessage(error);
-
-        setErrorMessage(
-          message
-        );
-
-        notifyRef.current(
-          "error",
-          "Report unavailable",
-          message
-        );
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    []
-  );
-
-  useEffect(() => {
-    void loadReport(
-      reportType
-    );
-  }, [
-    loadReport,
-    reportType,
-  ]);
-
-  function selectReportType(
-    nextType: InsightsReportType
-  ) {
-    if (
-      nextType === reportType
-    ) {
-      return;
-    }
-
-    setErrorMessage("");
-    setReportType(nextType);
-  }
-
-  function loadPeriod(
-    period: string | null
-  ) {
-    if (!period) {
-      return;
-    }
-
-    void loadReport(
-      reportType,
-      period,
-      {
-        keepContent: true,
-      }
-    );
-  }
-
-  function loadCurrentPeriod() {
-    void loadReport(
-      reportType,
-      undefined,
-      {
-        keepContent: true,
-      }
-    );
-  }
-
-  function refreshReport() {
-    void loadReport(
-      reportType,
-      report?.period.key,
-      {
-        keepContent: true,
-        notify: true,
-      }
-    );
-  }
-
-  if (
-    isLoading
-    && !report
-  ) {
-    return (
-      <section
-        className={
-          "reports-panel "
-          + "reports-state"
-        }
-      >
-        <RefreshCw
-          className="reports-spin"
-          size={36}
-        />
-
-        <h1>
-          Building your report
-        </h1>
-
-        <p>
-          JM8 is organizing your
-          journal patterns for the
-          selected period.
-        </p>
-      </section>
-    );
-  }
-
-  if (
-    errorMessage
-    && !report
-  ) {
-    return (
-      <section
-        className={
-          "reports-panel "
-          + "reports-state "
-          + "error"
-        }
-      >
-        <AlertCircle size={40} />
-
-        <h1>
-          Report could not be loaded
-        </h1>
-
-        <p>{errorMessage}</p>
-
-        <button
-          onClick={() => {
-            void loadReport(
-              reportType,
-              undefined,
-              {
-                notify: true,
-              }
-            );
-          }}
-        >
-          <RefreshCw size={17} />
-          Try again
-        </button>
-      </section>
-    );
-  }
-
-  if (!report) {
-    return null;
-  }
-
-  const isEmpty =
-    report.status === "EMPTY";
-
-  const isPartial =
-    report.status === "PARTIAL";
-
-  return (
-    <section className="reports-panel">
-      <header className="reports-header">
-        <div>
-          <p className="reports-kicker">
-            <BarChart3 size={17} />
-            Periodic intelligence
-          </p>
-
-          <h1>
-            Journal Reports
-          </h1>
-
-          <p>
-            Review the emotional,
-            behavioral, and strategic
-            patterns that shaped a week
-            or month of your journal.
-          </p>
-        </div>
-
-        <button
-          className="reports-refresh"
-          disabled={isLoading}
-          onClick={refreshReport}
-        >
-          <RefreshCw
-            className={
-              isLoading
-                ? "reports-spin"
-                : undefined
-            }
-            size={18}
-          />
-
-          {isLoading
-            ? "Refreshing"
-            : "Refresh report"}
-        </button>
-      </header>
-
-      {errorMessage && (
-        <div className="reports-alert">
-          <AlertCircle size={18} />
-          {errorMessage}
-        </div>
-      )}
-
-      <nav
-        className="reports-type-tabs"
-        aria-label="Report type"
-      >
-        <button
-          className={
-            reportType === "WEEKLY"
-              ? "active"
-              : ""
-          }
-          aria-pressed={
-            reportType === "WEEKLY"
-          }
-          onClick={() => {
-            selectReportType(
-              "WEEKLY"
-            );
-          }}
-        >
-          <CalendarDays size={18} />
-          Weekly
-        </button>
-
-        <button
-          className={
-            reportType === "MONTHLY"
-              ? "active"
-              : ""
-          }
-          aria-pressed={
-            reportType === "MONTHLY"
-          }
-          onClick={() => {
-            selectReportType(
-              "MONTHLY"
-            );
-          }}
-        >
-          <BarChart3 size={18} />
-          Monthly
-        </button>
-      </nav>
-
-      <section className="reports-period-nav">
-        <button
-          onClick={() => {
-            loadPeriod(
-              report.period
-                .previousPeriod
-            );
-          }}
-          aria-label="Previous report period"
-        >
-          <ArrowLeft size={18} />
-          Previous
-        </button>
-
-        <div>
-          <span>
-            {report.reportType ===
-            "WEEKLY"
-              ? "Weekly report"
-              : "Monthly report"}
-          </span>
-
-          <h2>
-            {formatPeriodTitle(
-              report
-            )}
-          </h2>
-
-          <small>
-            {report.period.key}
-            {report.period
-              .isCurrentPeriod
-              ? " · Current period"
-              : ""}
-          </small>
-        </div>
-
-        <div className="reports-period-actions">
-          {!report.period
-            .isCurrentPeriod && (
-            <button
-              className="current"
-              onClick={
-                loadCurrentPeriod
-              }
-            >
-              Current
-            </button>
-          )}
-
-          <button
-            disabled={
-              !report.period
-                .nextPeriod
-            }
-            onClick={() => {
-              loadPeriod(
-                report.period
-                  .nextPeriod
-              );
-            }}
-            aria-label="Next report period"
-          >
-            Next
-            <ArrowRight size={18} />
-          </button>
-        </div>
-      </section>
-
-      <section
-        className={
-          "reports-status-banner "
-          + report.status
-            .toLowerCase()
-        }
-      >
-        <div className="reports-status-icon">
-          {isEmpty ? (
-            <CircleMinus size={22} />
-          ) : isPartial ? (
-            <AlertCircle size={22} />
-          ) : (
-            <CheckCircle2 size={22} />
-          )}
-        </div>
-
-        <div>
-          <strong>
-            {isEmpty
-              ? "No analyzed entries in this period"
-              : isPartial
-                ? "This report has partial coverage"
-                : "This report is ready"}
-          </strong>
-
-          <p>
-            {isEmpty
-              ? (
-                  "Add or analyze journal "
-                  + "entries from this period "
-                  + "to generate insights."
-                )
-              : isPartial
-                ? (
-                    "Some entries are not "
-                    + "analyzed yet, so these "
-                    + "patterns may change."
-                  )
-                : (
-                    "Every journal entry in "
-                    + "this period is represented "
-                    + "in the report."
-                  )}
-          </p>
-        </div>
-      </section>
-
-      <section
-        className="reports-coverage-grid"
-        aria-label="Report coverage"
-      >
-        <article>
-          <span>
-            <CalendarDays size={18} />
-            Entries
-          </span>
-
-          <strong>
-            {report.coverage
-              .totalEntries}
-          </strong>
-
-          <small>
-            Written in this period
-          </small>
-        </article>
-
-        <article>
-          <span>
-            <CheckCircle2 size={18} />
-            Analyzed
-          </span>
-
-          <strong>
-            {report.coverage
-              .analyzedEntries}
-          </strong>
-
-          <small>
-            Included in intelligence
-          </small>
-        </article>
-
-        <article>
-          <span>
-            <TrendingUp size={18} />
-            Coverage
-          </span>
-
-          <strong>
-            {report.coverage
-              .analysisCompletionPercent}%
-          </strong>
-
-          <small>
-            Period analysis completed
-          </small>
-        </article>
-
-        <article>
-          <span>
-            <Activity size={18} />
-            Entry range
-          </span>
-
-          <strong className="compact">
-            {formatEntryDate(
-              report.coverage
-                .firstEntryAt
-            )}
-          </strong>
-
-          <small>
-            Latest:{" "}
-            {formatEntryDate(
-              report.coverage
-                .latestEntryAt
-            )}
-          </small>
-        </article>
-      </section>
-
-      <section className="reports-highlights-section">
-        <header>
-          <div>
-            <p>
-              Executive summary
-            </p>
-
-            <h2>
-              Period highlights
-            </h2>
-          </div>
-
-          <Sparkles size={22} />
-        </header>
-
-        <div className="reports-highlights-grid">
-          {highlightDefinitions.map(
-            (definition) => (
-              <HighlightCard
-                key={definition.key}
-                definition={
-                  definition
-                }
-                item={
-                  report.highlights[
-                    definition.key
-                  ]
-                }
-              />
-            )
-          )}
-        </div>
-      </section>
-
-      <section className="reports-reflection-card">
-        <div className="reports-reflection-icon">
-          <Lightbulb size={23} />
-        </div>
-
-        <div>
-          <p>
-            Suggested reflection
-          </p>
-
-          <h2>
-            {report.reflectionPrompt}
-          </h2>
-
-          <span>
-            Use this prompt for your
-            next journal entry.
-          </span>
-        </div>
-      </section>
-
-      <section className="reports-details-section">
-        <header>
-          <div>
-            <p>
-              Detailed review
-            </p>
-
-            <h2>
-              What shaped this period
-            </h2>
-          </div>
-
-          <Activity size={22} />
-        </header>
-
-        <div className="reports-details-grid">
-          <RankedList
-            title="Top themes"
-            description={
-              "Subjects that appeared "
-              + "most often."
-            }
-            items={
-              report.topThemes
-            }
-            emptyMessage={
-              "No themes were identified "
-              + "for this period."
-            }
-            icon={Sparkles}
-            variant="themes"
-          />
-
-          <RankedList
-            title="Top challenges"
-            description={
-              "Obstacles and concerns "
-              + "mentioned in your entries."
-            }
-            items={
-              report.topChallenges
-            }
-            emptyMessage={
-              "No challenges were identified "
-              + "for this period."
-            }
-            icon={Target}
-            variant="challenges"
-          />
-
-          <RankedList
-            title="Progress signals"
-            description={
-              "Evidence of movement, growth, "
-              + "or improved behavior."
-            }
-            items={
-              report.progressSignals
-            }
-            emptyMessage={
-              "No progress signals were "
-              + "identified yet."
-            }
-            icon={Trophy}
-            variant="progress"
-          />
-
-          <RankedList
-            title="Goals mentioned"
-            description={
-              "Goals and desired outcomes "
-              + "recorded in your journal."
-            }
-            items={
-              report.goalsMentioned
-            }
-            emptyMessage={
-              "No goals were identified "
-              + "for this period."
-            }
-            icon={Flag}
-            variant="goals"
-          />
-
-          <RankedList
-            title="Behavior patterns"
-            description={
-              "Repeated actions, routines, "
-              + "and decision patterns."
-            }
-            items={
-              report.behaviorPatterns
-            }
-            emptyMessage={
-              "No behavior patterns were "
-              + "identified yet."
-            }
-            icon={Activity}
-            variant="behaviors"
-          />
-        </div>
-      </section>
-
-      <footer className="reports-footer">
-        <span>
-          Report version{" "}
-          {report.reportVersion}
-        </span>
-
-        <span>
-          Status{" "}
-          {formatLabel(
-            report.status
-          )}
-        </span>
-
-        <span>
-          Generated{" "}
-          {formatGeneratedAt(
-            report.generatedAt
-          )}
-        </span>
-      </footer>
-    </section>
-  );
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const request = ++requestRef.current;
+    setReport(null);
+    setErrorState(null);
+    setLoadingKey(selectionKey);
+    const requestReport = reportType === "WEEKLY"
+      ? getWeeklyReport(reportWindow ?? undefined, controller.signal)
+      : getMonthlyReport(reportWindow ?? undefined, controller.signal);
+    void requestReport.then((result) => {
+      if (controller.signal.aborted || request !== requestRef.current) return;
+      setReport(result.report);
+    }).catch(() => {
+      if (controller.signal.aborted || request !== requestRef.current) return;
+      const message = "JM8 could not load the selected report. Try again.";
+      setErrorState({ key: selectionKey, message });
+      notifyRef.current("error", "Report unavailable", message);
+    }).finally(() => {
+      if (!controller.signal.aborted && request === requestRef.current) setLoadingKey("");
+    });
+    return () => controller.abort();
+  }, [reportType, reportWindow, retry, selectionKey]);
+
+  const isLoading = loadingKey === selectionKey || (!visibleReport && errorState?.key !== selectionKey);
+  const errorMessage = errorState?.key === selectionKey ? errorState.message : "";
+  const heading = reportType === "WEEKLY" ? "Weekly Report" : "Monthly Report";
+
+  return <section className="phase2d-reports" aria-labelledby="phase2d-report-title">
+    <header className="phase2d-header">
+      <div><h1 id="phase2d-report-title">{heading}</h1>
+        <p>{visibleReport ? periodTitle(visibleReport) : reportType === "WEEKLY" ? "Your selected week in review." : "Your selected month in review."}</p></div>
+      <nav aria-label="Report type"><button type="button" className={reportType === "WEEKLY" ? "active" : ""}
+        aria-current={reportType === "WEEKLY" ? "page" : undefined} onClick={() => onNavigate({ type: "WEEKLY", window: null })}>Weekly</button>
+        <button type="button" className={reportType === "MONTHLY" ? "active" : ""}
+          aria-current={reportType === "MONTHLY" ? "page" : undefined} onClick={() => onNavigate({ type: "MONTHLY", window: null })}>Monthly</button></nav>
+    </header>
+
+    {visibleReport && <nav className="phase2d-period-nav" aria-label={`${heading} period navigation`}>
+      <button type="button" disabled={isLoading} onClick={() => onNavigate({ type: reportType, window: visibleReport.period.previousPeriod })}><ArrowLeft size={17} /> Previous</button>
+      <div><strong>{periodTitle(visibleReport)}</strong><small>{visibleReport.period.key}{visibleReport.period.isCurrentPeriod ? " · Current period" : ""}</small></div>
+      <span>{!visibleReport.period.isCurrentPeriod && <button type="button" disabled={isLoading} onClick={() => onNavigate({ type: reportType, window: null })}>Current</button>}
+        <button type="button" disabled={isLoading || !visibleReport.period.nextPeriod} onClick={() => visibleReport.period.nextPeriod
+          && onNavigate({ type: reportType, window: visibleReport.period.nextPeriod })}>Next <ArrowRight size={17} /></button></span>
+    </nav>}
+
+    {isLoading && <div className="phase2d-report-state" role="status"><BarChart3 size={28} /><h2>Loading {heading.toLowerCase()}</h2><p>JM8 is retrieving the exact selected report window.</p></div>}
+    {!isLoading && errorMessage && <div className="phase2d-report-state error" role="alert"><AlertCircle size={28} /><h2>Report could not be loaded</h2><p>{errorMessage}</p>
+      <button type="button" onClick={() => setRetry((value) => value + 1)}>Try again</button></div>}
+    {!isLoading && visibleReport && <><StatusSummary report={visibleReport} />
+      {visibleReport.reportType === "WEEKLY" ? <WeeklyDashboard report={visibleReport} /> : <MonthlyDashboard report={visibleReport} />}
+      <footer className="phase2d-footer"><span>Reports API · version {visibleReport.reportVersion}</span>
+        <span>Generated {formatTimestamp(visibleReport.generatedAt)}</span></footer></>}
+  </section>;
 }

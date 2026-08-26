@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import binascii
 import copy
 from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
+import re
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import zlib
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -20,15 +24,19 @@ sys.path.insert(0, str(BIN_DIR))
 
 from jm8_cognito_branding import (  # noqa: E402
     ACCOUNT_ID,
+    ALLOWED_CSS_PROPERTIES,
+    ALLOWED_LOGO_MEDIA_TYPES,
     APP_NAME,
     REGION,
     AwsCli,
     BrandingBoundary,
     BrandingTarget,
     CognitoBrandingError,
+    _parse_logo_media_type,
     apply_branding,
     canonical_css,
     canonical_logo,
+    download_logo,
     generate_assets,
     inspect_customization,
     main as branding_main,
@@ -203,6 +211,73 @@ def canonical_customization(expected: BrandingTarget) -> dict:
     }
 
 
+class LogoHttpResponse:
+    status = 200
+
+    def __init__(
+        self,
+        url: str,
+        payload: bytes,
+        content_type: str | None,
+        *,
+        final_url: str | None = None,
+        status: int = 200,
+    ) -> None:
+        self.url = url
+        self.payload = payload
+        self.headers = {} if content_type is None else {"Content-Type": content_type}
+        self.final_url = final_url or url
+        self.status = status
+        self.read_count = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def geturl(self):
+        return self.final_url
+
+    def read(self, limit: int):
+        self.read_count += 1
+        return self.payload[:limit]
+
+
+def logo_url(expected: BrandingTarget) -> str:
+    return (
+        f"{expected.boundary.cognito_domain}/{expected.app_client_id}/"
+        "version/assets/images/image.png"
+    )
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", binascii.crc32(kind + data) & 0xFFFFFFFF)
+    )
+
+
+def changed_logo_with_valid_png_structure() -> bytes:
+    source = canonical_logo()
+    ihdr_length = struct.unpack(">I", source[8:12])[0]
+    ihdr_end = 20 + ihdr_length
+    ihdr = source[16:16 + ihdr_length]
+    idat_length = struct.unpack(">I", source[ihdr_end:ihdr_end + 4])[0]
+    idat_data_start = ihdr_end + 8
+    compressed = source[idat_data_start:idat_data_start + idat_length]
+    scanlines = bytearray(zlib.decompress(compressed))
+    scanlines[1] ^= 1
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(scanlines)))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 class CognitoHostedUiBrandingTests(unittest.TestCase):
     def test_assets_are_deterministic_and_stage_aware(self):
         for stage in ("dev", "staging", "prod"):
@@ -250,6 +325,85 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
             self.assertNotIn(prohibited, css.lower())
         self.assertNotIn("href=", source_logo.lower())
         self.assertNotIn("xlink:", source_logo.lower())
+
+    def test_complete_canonical_css_uses_only_documented_ungrouped_rules(self):
+        css = (ASSET_DIR / "jm8-hosted-ui.css").read_text(encoding="utf-8")
+        validate_css(css)
+        rules = re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+        selectors = {selector.strip() for selector, _ in rules}
+        self.assertEqual(selectors, set(ALLOWED_CSS_PROPERTIES))
+        for selector_text, body in rules:
+            selector = selector_text.strip()
+            self.assertNotIn(",", selector)
+            self.assertRegex(
+                selector,
+                r"^\.[A-Za-z][A-Za-z0-9-]*(?::(?:focus|hover))?$",
+            )
+            properties = {
+                declaration.split(":", 1)[0].strip()
+                for declaration in body.split(";")
+                if declaration.strip()
+            }
+            self.assertTrue(properties)
+            self.assertLessEqual(properties, ALLOWED_CSS_PROPERTIES[selector])
+
+    def test_grouped_customizable_selectors_reproduce_cloudtrail_failure(self):
+        cloudtrail_selector = (
+            ".textDescription-customizable,\n"
+            ".idpDescription-customizable"
+        )
+        incompatible = canonical_css().replace(
+            ".textDescription-customizable",
+            cloudtrail_selector,
+            1,
+        )
+        with self.assertRaisesRegex(
+            CognitoBrandingError,
+            "one customizable selector per rule",
+        ):
+            validate_css(incompatible)
+
+        other_grouped = canonical_css().replace(
+            ".idpButton-customizable {",
+            ".idpButton-customizable,\n.socialButton-customizable {",
+            1,
+        )
+        with self.assertRaisesRegex(
+            CognitoBrandingError,
+            "one customizable selector per rule",
+        ):
+            validate_css(other_grouped)
+
+    def test_selector_property_and_value_contract_rejects_classic_incompatibilities(self):
+        source = canonical_css()
+        incompatible_mutations = (
+            (
+                ".label-customizable {",
+                ".background-customizable .label-customizable {",
+            ),
+            (
+                ".inputField-customizable {",
+                ".inputField-customizable[required] {",
+            ),
+            (
+                ".submitButton-customizable:hover {",
+                ".submitButton-customizable:active {",
+            ),
+            (
+                "background-color: #f6f3ff;",
+                "background-color: #f6f3ff;\n  font-family: Arial;",
+            ),
+            (
+                "border: 1px solid #d8d5e0;",
+                "border: 1px solid #d8d5e0;\n  border-radius: 10px;",
+            ),
+            ("max-width: 65%;", "max-width: 190px;"),
+            ("padding: 28px 0px 18px 0px;", "padding: 28px 0 18px;"),
+            ("font-weight: bold;", "font-weight: 700;"),
+        )
+        for old, new in incompatible_mutations:
+            with self.subTest(mutation=new), self.assertRaises(CognitoBrandingError):
+                validate_css(source.replace(old, new, 1))
 
     def test_boundaries_require_exact_stage_profile_account_and_production_acknowledgments(self):
         for stage in ("dev", "staging", "prod"):
@@ -346,7 +500,7 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
             patch("sys.argv", arguments),
             patch("jm8_cognito_branding.AwsCli", return_value=aws) as aws_cli,
             patch(
-                "jm8_cognito_branding.urlopen",
+                "jm8_cognito_branding._open_logo_response",
                 side_effect=lambda request, timeout: LogoResponse(request),
             ),
             redirect_stdout(io.StringIO()) as output,
@@ -500,6 +654,181 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(CognitoBrandingError):
                 inspect_customization(malformed, expected, lambda _url: canonical_logo())
 
+    def test_logo_download_accepts_only_verified_png_media_types(self):
+        expected = target("staging")
+        url = logo_url(expected)
+        for content_type in (
+            "image/png",
+            "image/png; charset=binary",
+            "image/jpeg",
+        ):
+            response = LogoHttpResponse(url, canonical_logo(), content_type)
+            with self.subTest(content_type=content_type), patch(
+                "jm8_cognito_branding._open_logo_response",
+                return_value=response,
+            ):
+                self.assertEqual(download_logo(url), canonical_logo())
+                self.assertEqual(response.read_count, 1)
+
+    def test_observed_aws_logo_content_type_is_parsed_exactly(self):
+        raw_content_type = "image/jpeg"
+        self.assertEqual(_parse_logo_media_type(raw_content_type), "image/jpeg")
+        self.assertEqual(
+            ALLOWED_LOGO_MEDIA_TYPES,
+            frozenset({"image/jpeg", "image/png"}),
+        )
+        for speculative in (
+            "application/octet-stream",
+            "binary/octet-stream",
+            "image/jpeg; charset=binary",
+        ):
+            with self.subTest(content_type=speculative):
+                self.assertNotIn(
+                    _parse_logo_media_type(speculative),
+                    ALLOWED_LOGO_MEDIA_TYPES,
+                )
+
+    def test_logo_download_rejects_missing_or_mismatched_media_types(self):
+        expected = target("staging")
+        url = logo_url(expected)
+        cases = (
+            (None, canonical_logo()),
+            ("", canonical_logo()),
+            ("text/html", canonical_logo()),
+            ("application/octet-stream", canonical_logo()),
+            ("image/svg+xml", canonical_logo()),
+            ("image/png", b"<html>not an image</html>"),
+            ("image/jpeg", b"<?xml version='1.0'?><Error/>"),
+            ("image/png", b""),
+            ("image/png", b"\xff\xd8\xff\xe0jpeg"),
+            ("image/jpeg", b"\xff\xd8\xff\xe0genuine-jpeg"),
+            ("image/png", b"GIF89a"),
+            ("image/png", b"<svg></svg>"),
+        )
+        for content_type, payload in cases:
+            response = LogoHttpResponse(url, payload, content_type)
+            with self.subTest(content_type=content_type, payload=payload[:8]), patch(
+                "jm8_cognito_branding._open_logo_response",
+                return_value=response,
+            ):
+                with self.assertRaises(CognitoBrandingError) as raised:
+                    download_logo(url)
+                self.assertNotIn(url, str(raised.exception))
+
+    def test_logo_download_rejects_malformed_or_noncanonical_png(self):
+        expected = target("staging")
+        url = logo_url(expected)
+        canonical = canonical_logo()
+        bad_crc = bytearray(canonical)
+        bad_crc[-5] ^= 1
+        metadata = (
+            canonical[:33]
+            + _png_chunk(b"tEXt", b"unexpected")
+            + canonical[33:]
+        )
+        wrong_dimensions = bytearray(canonical)
+        wrong_dimensions[16:20] = struct.pack(">I", 349)
+        wrong_dimensions[29:33] = struct.pack(
+            ">I",
+            binascii.crc32(b"IHDR" + bytes(wrong_dimensions[16:29]))
+            & 0xFFFFFFFF,
+        )
+        wrong_color_mode = bytearray(canonical)
+        wrong_color_mode[25] = 2
+        wrong_color_mode[29:33] = struct.pack(
+            ">I",
+            binascii.crc32(b"IHDR" + bytes(wrong_color_mode[16:29]))
+            & 0xFFFFFFFF,
+        )
+        malformed_scanlines = (
+            b"\x89PNG\r\n\x1a\n"
+            + canonical[8:33]
+            + _png_chunk(b"IDAT", zlib.compress(b"too short"))
+            + _png_chunk(b"IEND", b"")
+        )
+        cases = (
+            canonical[:-1],
+            bytes(bad_crc),
+            metadata,
+            bytes(wrong_dimensions),
+            bytes(wrong_color_mode),
+            malformed_scanlines,
+            canonical + b"polyglot",
+            changed_logo_with_valid_png_structure(),
+        )
+        for payload in cases:
+            for content_type in ("image/jpeg", "image/png"):
+                response = LogoHttpResponse(url, payload, content_type)
+                with self.subTest(
+                    payload_bytes=len(payload),
+                    content_type=content_type,
+                ), patch(
+                    "jm8_cognito_branding._open_logo_response",
+                    return_value=response,
+                ):
+                    with self.assertRaises(CognitoBrandingError):
+                        download_logo(url)
+
+    def test_logo_url_boundary_and_redirects_fail_before_payload_acceptance(self):
+        expected = target("staging")
+        document = {"UICustomization": canonical_customization(expected)}
+        invalid_urls = (
+            "http://staging.example.com/assets/images/image.png",
+            "https://example.com/assets/images/image.png",
+            "https://evil.cloudfront.net/assets/images/image.png",
+            "https://d111111abcdef8.cloudfront.net.evil.example/assets/images/image.png",
+            f"{expected.boundary.cognito_domain}:444/{expected.app_client_id}/assets/images/image.png",
+            f"{logo_url(expected)}?token=secret",
+        )
+        for invalid_url in invalid_urls:
+            malformed = copy.deepcopy(document)
+            malformed["UICustomization"]["ImageUrl"] = invalid_url
+            with self.subTest(url=invalid_url), patch(
+                "jm8_cognito_branding._open_logo_response"
+            ) as open_logo_mock:
+                with self.assertRaises(CognitoBrandingError) as raised:
+                    inspect_customization(malformed, expected, download_logo)
+                open_logo_mock.assert_not_called()
+                self.assertNotIn(invalid_url, str(raised.exception))
+
+        url = logo_url(expected)
+        response = LogoHttpResponse(
+            url,
+            canonical_logo(),
+            "image/jpeg",
+            final_url="https://example.com/untrusted.png?token=secret",
+        )
+        with patch(
+            "jm8_cognito_branding._open_logo_response",
+            return_value=response,
+        ):
+            with self.assertRaises(CognitoBrandingError) as raised:
+                inspect_customization(document, expected, download_logo)
+        self.assertEqual(response.read_count, 0)
+        self.assertNotIn("example.com", str(raised.exception))
+        self.assertNotIn("token", str(raised.exception))
+
+    def test_mislabeled_jpeg_logo_preserves_exact_apply_and_verify_behavior(self):
+        expected = target("staging")
+        aws = FakeAws(expected)
+
+        def open_logo(request, timeout):
+            self.assertEqual(timeout, 15)
+            return LogoHttpResponse(
+                request.full_url,
+                canonical_logo(),
+                "image/jpeg",
+            )
+
+        with patch(
+            "jm8_cognito_branding._open_logo_response",
+            side_effect=open_logo,
+        ):
+            self.assertTrue(apply_branding(aws, expected))
+            self.assertFalse(apply_branding(aws, expected))
+            verify_branding(aws, expected)
+        self.assertEqual(aws.set_count, 1)
+
     def test_unsafe_css_and_branding_markers_fail_closed(self):
         for marker in (
             '@import "https://example.com/style.css";',
@@ -570,6 +899,34 @@ class CognitoHostedUiBrandingTests(unittest.TestCase):
                 with self.assertRaises(CognitoBrandingError) as raised:
                     cli.call("cognito-idp", "get-ui-customization")
                 self.assertNotIn("network unavailable", str(raised.exception))
+
+    def test_invalid_parameter_error_reports_only_code_and_sanitized_reason(self):
+        stderr = (
+            "An error occurred (InvalidParameterException) when calling the "
+            "SetUICustomization operation: The CSS class "
+            ".textDescription-customizable, .idpDescription-customizable is "
+            "not in the list of allowed classes. sk_live_do_not_echo"
+        )
+        result = subprocess.CompletedProcess([], 255, "", stderr)
+        with patch("subprocess.run", return_value=result):
+            with self.assertRaises(CognitoBrandingError) as raised:
+                AwsCli("jm8-dev", REGION).call(
+                    "cognito-idp",
+                    "set-ui-customization",
+                    "--css",
+                    "sensitive-css",
+                )
+        message = str(raised.exception)
+        self.assertIn("InvalidParameterException", message)
+        self.assertIn("request parameters were rejected", message)
+        for prohibited in (
+            "textDescription-customizable",
+            "idpDescription-customizable",
+            "sk_live_do_not_echo",
+            "sensitive-css",
+            "jm8-dev",
+        ):
+            self.assertNotIn(prohibited, message)
 
     def test_create_auth_uses_one_shared_reconciler_before_environment_output(self):
         source = CREATE_AUTH.read_text(encoding="utf-8")

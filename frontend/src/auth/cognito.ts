@@ -11,6 +11,9 @@ const ID_TOKEN_KEY = "jm8_id_token";
 const REFRESH_TOKEN_KEY = "jm8_refresh_token";
 const TOKEN_EXPIRES_AT_KEY = "jm8_token_expires_at";
 const PKCE_VERIFIER_KEY = "jm8_pkce_verifier";
+const OAUTH_STATE_KEY = "jm8_oauth_state";
+
+export const AUTH_SESSION_EXPIRED_EVENT = "jm8:auth-session-expired";
 
 export type AuthUser = {
   sub?: string;
@@ -89,6 +92,48 @@ function decodeJwt(token: string): Record<string, unknown> {
   }
 }
 
+function parseTokenResponse(value: unknown): CognitoTokenResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Cognito returned an invalid token response.");
+  }
+
+  const response = value as Record<string, unknown>;
+  const accessToken = response.access_token;
+  const idToken = response.id_token;
+  const expiresIn = response.expires_in;
+  const tokenType = response.token_type;
+  const refreshToken = response.refresh_token;
+
+  if (
+    typeof accessToken !== "string" || !accessToken.trim()
+    || typeof idToken !== "string" || !idToken.trim()
+    || typeof expiresIn !== "number" || !Number.isSafeInteger(expiresIn) || expiresIn <= 0
+    || tokenType !== "Bearer"
+    || (refreshToken !== undefined && (typeof refreshToken !== "string" || !refreshToken.trim()))
+  ) {
+    throw new Error("Cognito returned an invalid token response.");
+  }
+
+  const claims = decodeJwt(idToken);
+  if (typeof claims.sub !== "string" || !claims.sub.trim()) {
+    throw new Error("Cognito returned an invalid identity token.");
+  }
+
+  return {
+    access_token: accessToken,
+    id_token: idToken,
+    expires_in: expiresIn,
+    token_type: tokenType,
+    ...(typeof refreshToken === "string" ? { refresh_token: refreshToken } : {}),
+  };
+}
+
+function removeCallbackParameters(url: URL) {
+  url.search = "";
+  url.hash = "";
+  window.history.replaceState({}, document.title, url.toString());
+}
+
 export function getAccessToken() {
   const token = localStorage.getItem(ACCESS_TOKEN_KEY);
   const expiresAt = Number(localStorage.getItem(TOKEN_EXPIRES_AT_KEY) || "0");
@@ -98,6 +143,11 @@ export function getAccessToken() {
   }
 
   return token;
+}
+
+export function getAuthSessionExpiresAt(): number | null {
+  const value = Number(localStorage.getItem(TOKEN_EXPIRES_AT_KEY));
+  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function getIdToken() {
@@ -111,8 +161,10 @@ export function getCurrentUser(): AuthUser | null {
 
   const claims = decodeJwt(idToken);
 
+  if (typeof claims.sub !== "string" || !claims.sub.trim()) return null;
+
   return {
-    sub: typeof claims.sub === "string" ? claims.sub : undefined,
+    sub: claims.sub,
     email: typeof claims.email === "string" ? claims.email : undefined,
     name: typeof claims.name === "string" ? claims.name : undefined,
   };
@@ -127,8 +179,10 @@ async function beginCognitoAuthorization(path: "/oauth2/authorize" | "/signup") 
 
   const codeVerifier = randomString();
   const codeChallenge = base64UrlEncode(await sha256(codeVerifier));
+  const state = randomString(32);
 
   localStorage.setItem(PKCE_VERIFIER_KEY, codeVerifier);
+  localStorage.setItem(OAUTH_STATE_KEY, state);
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -137,6 +191,7 @@ async function beginCognitoAuthorization(path: "/oauth2/authorize" | "/signup") 
     redirect_uri: redirectUri,
     code_challenge_method: "S256",
     code_challenge: codeChallenge,
+    state,
   });
 
   window.location.assign(`${domain}${path}?${params.toString()}`);
@@ -154,34 +209,41 @@ async function exchangeCognitoCallback() {
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   const error = url.searchParams.get("error");
+  const callbackState = url.searchParams.get("state");
+  const hasCallbackParameters = ["code", "error", "error_description", "state"]
+    .some((name) => url.searchParams.has(name));
+  const hasAmbiguousCallbackParameters = ["code", "error", "error_description", "state"]
+    .some((name) => url.searchParams.getAll(name).length > 1);
 
-  if (error) {
-    const errorDescription =
-      url.searchParams.get(
-        "error_description"
-      );
-
+  if (hasAmbiguousCallbackParameters) {
     clearAuthTokens();
-    url.search = "";
-
-    window.history.replaceState(
-      {},
-      document.title,
-      url.toString()
-    );
-
-    throw new Error(
-      errorDescription || error
-    );
+    removeCallbackParameters(url);
+    throw new Error("Cognito returned an ambiguous authorization response.");
   }
 
-  if (!code) return null;
+  if (error) {
+    clearAuthTokens();
+    removeCallbackParameters(url);
+    throw new Error("Cognito authorization was not completed.");
+  }
+
+  if (!code) {
+    if (hasCallbackParameters) {
+      clearAuthTokens();
+      removeCallbackParameters(url);
+      throw new Error("Cognito returned an incomplete authorization response.");
+    }
+    return null;
+  }
 
   const { domain, clientId, redirectUri } = getRequiredConfig();
   const codeVerifier = localStorage.getItem(PKCE_VERIFIER_KEY);
+  const expectedState = localStorage.getItem(OAUTH_STATE_KEY);
 
-  if (!codeVerifier) {
-    throw new Error("Missing PKCE verifier. Please sign in again.");
+  if (!codeVerifier || !expectedState || callbackState !== expectedState) {
+    clearAuthTokens();
+    removeCallbackParameters(url);
+    throw new Error("Cognito authorization validation failed. Please sign in again.");
   }
 
   const body = new URLSearchParams({
@@ -192,49 +254,39 @@ async function exchangeCognitoCallback() {
     code_verifier: codeVerifier,
   });
 
-  const response = await fetch(`${domain}/oauth2/token`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body,
-  });
+  try {
+    const response = await fetch(`${domain}/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
 
-  if (!response.ok) {
-    localStorage.removeItem(
-      PKCE_VERIFIER_KEY
-    );
+    if (!response.ok) {
+      throw new Error(`Token exchange failed: ${response.status}`);
+    }
 
-    url.search = "";
+    const tokens = parseTokenResponse(await response.json());
+    const expiresAt = Date.now() + tokens.expires_in * 1000 - 30_000;
 
-    window.history.replaceState(
-      {},
-      document.title,
-      url.toString()
-    );
+    localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
+    localStorage.setItem(ID_TOKEN_KEY, tokens.id_token);
+    localStorage.setItem(TOKEN_EXPIRES_AT_KEY, String(expiresAt));
 
-    throw new Error(
-      `Token exchange failed: ${response.status}`
-    );
+    if (tokens.refresh_token) {
+      localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
+    }
+
+    return getCurrentUser();
+  } catch (exchangeError) {
+    clearAuthTokens();
+    throw exchangeError;
+  } finally {
+    localStorage.removeItem(PKCE_VERIFIER_KEY);
+    localStorage.removeItem(OAUTH_STATE_KEY);
+    removeCallbackParameters(url);
   }
-
-  const tokens = (await response.json()) as CognitoTokenResponse;
-  const expiresAt = Date.now() + tokens.expires_in * 1000 - 30_000;
-
-  localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
-  localStorage.setItem(ID_TOKEN_KEY, tokens.id_token);
-  localStorage.setItem(TOKEN_EXPIRES_AT_KEY, String(expiresAt));
-
-  if (tokens.refresh_token) {
-    localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
-  }
-
-  localStorage.removeItem(PKCE_VERIFIER_KEY);
-
-  url.search = "";
-  window.history.replaceState({}, document.title, url.toString());
-
-  return getCurrentUser();
 }
 
 export function handleCognitoCallback():
@@ -258,12 +310,18 @@ export function clearAuthTokens() {
   localStorage.removeItem(REFRESH_TOKEN_KEY);
   localStorage.removeItem(TOKEN_EXPIRES_AT_KEY);
   localStorage.removeItem(PKCE_VERIFIER_KEY);
+  localStorage.removeItem(OAUTH_STATE_KEY);
+}
+
+export function expireAuthSession() {
+  clearAuthTokens();
+  window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT));
 }
 
 export function logoutFromCognito() {
-  const { domain, clientId, logoutUri } = getRequiredConfig();
-
   clearAuthTokens();
+
+  const { domain, clientId, logoutUri } = getRequiredConfig();
 
   const params = new URLSearchParams({
     client_id: clientId,

@@ -3,6 +3,7 @@ import type {
   HTMLAttributes,
   ReactNode,
 } from "react";
+import { forwardRef } from "react";
 import {
   AlertTriangle,
   BookOpenText,
@@ -66,10 +67,14 @@ type IconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   icon: ReactNode;
 };
 
-export function IconButton({ label, icon, className = "", ...props }: IconButtonProps) {
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
+  { label, icon, className = "", ...props },
+  ref,
+) {
   return (
     <span className="jm8-tooltip-wrap">
       <button
+        ref={ref}
         className={`jm8-icon-button ${className}`.trim()}
         aria-label={label}
         {...props}
@@ -79,7 +84,7 @@ export function IconButton({ label, icon, className = "", ...props }: IconButton
       <span className="jm8-tooltip" role="tooltip">{label}</span>
     </span>
   );
-}
+});
 
 type SurfaceProps = HTMLAttributes<HTMLElement> & {
   as?: "section" | "article" | "div";

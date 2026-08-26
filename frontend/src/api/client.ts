@@ -1,4 +1,4 @@
-import { getAccessToken } from "../auth/cognito";
+import { expireAuthSession, getAccessToken } from "../auth/cognito";
 import { frontendEnv } from "../config/env";
 import type {
   AnalysisHistoryResponse,
@@ -10,9 +10,17 @@ import type {
   InsightsOverviewResponse,
   InsightsThemesResponse,
 } from "../types/insights";
+import {
+  parseInsightsMoodsResponse,
+  parseInsightsOverviewResponse,
+  parseInsightsThemesResponse,
+} from "./insightsValidation";
 import type {
   InsightsReportResponse,
 } from "../types/reports";
+import {
+  parseInsightsReportResponse,
+} from "./reportsValidation";
 import type {
   AskJm8HistoryDeleteResponse,
   AskJm8HistoryDetailResponse,
@@ -118,6 +126,16 @@ async function apiRequest<T>(
   const data = await parseApiResponse(response);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      expireAuthSession();
+      throw new ApiRequestError(
+        401,
+        "Your secure session expired. Sign in again.",
+        "Unauthorized",
+        {}
+      );
+    }
+
     const message =
       typeof data.message === "string"
         ? data.message
@@ -209,12 +227,12 @@ export async function listEntries(): Promise<{ count: number; entries: JournalEn
   return apiRequest("/entries");
 }
 
-export async function getEntry(entryId: string): Promise<{ entry: JournalEntry }> {
-  return apiRequest(`/entries/${entryId}`);
+export async function getEntry(entryId: string, signal?: AbortSignal): Promise<{ entry: JournalEntry }> {
+  return apiRequest(`/entries/${encodeURIComponent(entryId)}`, { signal });
 }
 
 export async function analyzeEntry(entryId: string): Promise<{ message: string; entry: JournalEntry }> {
-  return apiRequest(`/entries/${entryId}/analyze`, {
+  return apiRequest(`/entries/${encodeURIComponent(entryId)}/analyze`, {
     method: "POST",
   });
 }
@@ -228,7 +246,7 @@ export async function getAnalysisHistory(
   });
 
   return apiRequest(
-    `/entries/${entryId}/analysis-history?${query.toString()}`
+    `/entries/${encodeURIComponent(entryId)}/analysis-history?${query.toString()}`
   );
 }
 
@@ -274,7 +292,7 @@ export type OcrJobAcceptedResponse = {
 export async function runOcr(
   entryId: string
 ): Promise<OcrJobAcceptedResponse> {
-  return apiRequest(`/entries/${entryId}/ocr`, {
+  return apiRequest(`/entries/${encodeURIComponent(entryId)}/ocr`, {
     method: "POST",
   });
 }
@@ -323,7 +341,7 @@ export async function reviewEntry(
   entryId: string,
   cleanText: string
 ): Promise<{ message: string; entry: JournalEntry }> {
-  return apiRequest(`/entries/${entryId}/review`, {
+  return apiRequest(`/entries/${encodeURIComponent(entryId)}/review`, {
     method: "PUT",
     body: JSON.stringify({ cleanText }),
   });
@@ -337,33 +355,36 @@ export async function deleteEntry(entryId: string) {
       deleted: boolean;
       deletedImage?: boolean;
     };
-  }>(`/entries/${entryId}`, {
+  }>(`/entries/${encodeURIComponent(entryId)}`, {
     method: "DELETE",
   });
 }
 
 
-export async function getInsightsOverview():
+export async function getInsightsOverview(signal?: AbortSignal):
 Promise<InsightsOverviewResponse> {
-  return apiRequest(
-    "/insights/overview"
-  );
+  return parseInsightsOverviewResponse(await apiRequest<unknown>(
+    "/insights/overview",
+    { signal }
+  ));
 }
 
 
-export async function getInsightsThemes():
+export async function getInsightsThemes(signal?: AbortSignal):
 Promise<InsightsThemesResponse> {
-  return apiRequest(
-    "/insights/themes"
-  );
+  return parseInsightsThemesResponse(await apiRequest<unknown>(
+    "/insights/themes",
+    { signal }
+  ));
 }
 
 
-export async function getInsightsMoods():
+export async function getInsightsMoods(signal?: AbortSignal):
 Promise<InsightsMoodsResponse> {
-  return apiRequest(
-    "/insights/moods"
-  );
+  return parseInsightsMoodsResponse(await apiRequest<unknown>(
+    "/insights/moods",
+    { signal }
+  ));
 }
 
 
@@ -387,26 +408,30 @@ function getReportPath(
 
 
 export async function getWeeklyReport(
-  period?: string
+  period?: string,
+  signal?: AbortSignal,
 ): Promise<InsightsReportResponse> {
-  return apiRequest(
+  return parseInsightsReportResponse(await apiRequest<unknown>(
     getReportPath(
       "/reports/weekly",
       period
-    )
-  );
+    ),
+    { signal }
+  ), "WEEKLY", period);
 }
 
 
 export async function getMonthlyReport(
-  period?: string
+  period?: string,
+  signal?: AbortSignal,
 ): Promise<InsightsReportResponse> {
-  return apiRequest(
+  return parseInsightsReportResponse(await apiRequest<unknown>(
     getReportPath(
       "/reports/monthly",
       period
-    )
-  );
+    ),
+    { signal }
+  ), "MONTHLY", period);
 }
 
 
@@ -451,9 +476,11 @@ export async function askJm8(
 export async function listAskJm8History({
   limit = 20,
   cursor,
+  signal,
 }: {
   limit?: number;
   cursor?: string | null;
+  signal?: AbortSignal;
 } = {}): Promise<AskJm8HistoryListResponse> {
   const query = new URLSearchParams({
     limit: String(limit),
@@ -473,19 +500,22 @@ export async function listAskJm8History({
     (
       "/insights/ask/history?"
       + query.toString()
-    )
+    ),
+    { signal }
   );
 }
 
 
 export async function getAskJm8History(
-  historyId: string
+  historyId: string,
+  signal?: AbortSignal,
 ): Promise<AskJm8HistoryDetailResponse> {
   return apiRequest(
     (
       "/insights/ask/history/"
       + encodeURIComponent(historyId)
-    )
+    ),
+    { signal }
   );
 }
 
@@ -507,7 +537,8 @@ export async function deleteAskJm8History(
 
 export async function listHistoricalReanalysisJobs(
   status: HistoricalReanalysisJobStatusFilter = "ALL",
-  limit = 50
+  limit = 50,
+  signal?: AbortSignal,
 ): Promise<HistoricalReanalysisJobListResponse> {
   const query = new URLSearchParams({
     status,
@@ -515,14 +546,16 @@ export async function listHistoricalReanalysisJobs(
   });
 
   return apiRequest(
-    `/analysis/reanalysis/jobs?${query.toString()}`
+    `/analysis/reanalysis/jobs?${query.toString()}`,
+    { signal }
   );
 }
 
-export async function getHistoricalReanalysisInventory():
+export async function getHistoricalReanalysisInventory(signal?: AbortSignal):
 Promise<HistoricalReanalysisDryRunResponse> {
   return apiRequest(
-    "/analysis/reanalysis/dry-run"
+    "/analysis/reanalysis/dry-run",
+    { signal }
   );
 }
 
@@ -558,7 +591,8 @@ export async function retryHistoricalReanalysisJob(
 export async function listOcrJobs(
   status: OcrJobStatusFilter = "ALL",
   limit = 20,
-  cursor?: string
+  cursor?: string,
+  signal?: AbortSignal,
 ): Promise<OcrJobListResponse> {
   const query = new URLSearchParams({
     status,
@@ -567,7 +601,7 @@ export async function listOcrJobs(
 
   if (cursor) query.set("cursor", cursor);
 
-  return apiRequest(`/ocr-jobs?${query.toString()}`);
+  return apiRequest(`/ocr-jobs?${query.toString()}`, { signal });
 }
 
 export async function retryOcrJob(

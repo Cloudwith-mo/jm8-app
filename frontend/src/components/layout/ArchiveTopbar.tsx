@@ -40,7 +40,8 @@ export default function ArchiveTopbar({
         <input
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="Search entries, moods, themes, OCR text, or keywords..."
+          placeholder="Search your archive…"
+          aria-label="Search your archive"
         />
         {searchQuery ? (
           <button
@@ -77,7 +78,8 @@ export default function ArchiveTopbar({
             <option value="all">All Statuses</option>
             <option value="ANALYZED">Analyzed</option>
             <option value="REVIEWED">Reviewed</option>
-            <option value="OCR_COMPLETED">OCR Completed</option>
+            <option value="OCR_COMPLETED">OCR completed</option>
+            <option value="OCR_FAILED">OCR failed</option>
             <option value="UPLOAD_URL_CREATED">Uploaded</option>
             <option value="NOT_ANALYZED">Not Analyzed</option>
           </select>

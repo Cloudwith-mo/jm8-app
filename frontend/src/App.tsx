@@ -2,6 +2,9 @@ import ArchivePage from "./pages/ArchivePage";
 import "./styles/tokens.css";
 import "./App.css";
 import "./styles/v2.css";
+import "./styles/phase2a.css";
+import "./styles/phase2b-home.css";
+import "./styles/phase2c-insights-themes.css";
 
 function App() {
   return <ArchivePage />;
