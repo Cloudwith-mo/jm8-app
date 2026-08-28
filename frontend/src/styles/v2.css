@@ -650,6 +650,37 @@ button:disabled {
   font-size: 0.72rem;
 }
 
+.jm8-auth-eligibility {
+  max-width: 390px;
+  margin: var(--jm8-space-5) auto 0;
+  color: var(--jm8-text-muted);
+  font-size: 0.72rem;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.jm8-auth-eligibility a,
+.jm8-auth-footer a {
+  color: var(--jm8-brand-700);
+  font-weight: 700;
+  text-underline-offset: 3px;
+}
+
+.jm8-auth-footer {
+  position: absolute;
+  right: clamp(24px, 5vw, 72px);
+  bottom: 24px;
+  left: clamp(24px, 5vw, 72px);
+  display: flex;
+  justify-content: center;
+}
+
+.jm8-auth-footer nav {
+  display: flex;
+  gap: var(--jm8-space-5);
+  font-size: 0.78rem;
+}
+
 /* Authenticated application shell */
 
 .jm8-archive-shell,

@@ -1047,6 +1047,10 @@ export default function ArchivePage() {
             onManageSubscription={() => void handleManageSubscription()}
           />
           <UsageMeter usage={usage} isLoading={isUsageLoading} errorMessage={usageError} onRetry={() => void refreshUsage()} />
+          <nav className="phase2-account-policy-links" aria-label="Account policies">
+            <a href="/privacy">Privacy Policy</a>
+            <a href="/terms">Terms</a>
+          </nav>
         </div>
       </details>
     );

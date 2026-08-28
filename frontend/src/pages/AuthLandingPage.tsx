@@ -10,6 +10,10 @@ import {
   LoadingState,
   Surface,
 } from "../components/ui/V2Primitives";
+import {
+  EXCLUDED_REGION_SHORT_NAMES,
+  POLICY_METADATA,
+} from "../content/policyMetadata";
 
 type AuthLandingPageProps = {
   isReady: boolean;
@@ -118,7 +122,24 @@ export default function AuthLandingPage({
             <ShieldCheck size={15} aria-hidden="true" />
             Secure sign-in with authorization code and PKCE
           </p>
+
+          <p className="jm8-auth-eligibility">
+            By continuing, you confirm that you are at least{" "}
+            {POLICY_METADATA.minimumAge}, do not reside in the{" "}
+            {EXCLUDED_REGION_SHORT_NAMES}, and agree to the{" "}
+            <a href="/terms">Terms</a> and{" "}
+            <a href="/privacy">Privacy Policy</a>. If you are under the age of
+            majority where you live, you confirm that your parent or legal
+            guardian has authorized your use of JM8.
+          </p>
         </Surface>
+
+        <footer className="jm8-auth-footer">
+          <nav aria-label="Legal policies">
+            <a href="/privacy">Privacy</a>
+            <a href="/terms">Terms</a>
+          </nav>
+        </footer>
       </section>
     </main>
   );

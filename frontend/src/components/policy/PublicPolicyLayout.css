@@ -1,0 +1,188 @@
+.jm8-policy-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  color: var(--jm8-text);
+  background:
+    radial-gradient(circle at top left, rgba(202, 184, 255, 0.24), transparent 34rem),
+    var(--jm8-bg);
+}
+
+.jm8-policy-header,
+.jm8-policy-footer {
+  width: min(100% - 40px, 1080px);
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+}
+
+.jm8-policy-header {
+  min-height: 84px;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid var(--jm8-border);
+}
+
+.jm8-policy-header > a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.jm8-policy-header nav,
+.jm8-policy-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+}
+
+.jm8-policy-header nav a,
+.jm8-policy-footer a {
+  color: var(--jm8-brand-700);
+  font-weight: 700;
+  text-underline-offset: 4px;
+}
+
+.jm8-policy-main {
+  width: min(100% - 40px, 780px);
+  margin: 0 auto;
+  padding: clamp(48px, 8vw, 88px) 0;
+}
+
+.jm8-policy-document {
+  padding: clamp(28px, 5vw, 56px);
+  border: 1px solid var(--jm8-border);
+  border-radius: var(--jm8-radius-xl);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--jm8-shadow-md);
+}
+
+.jm8-policy-title {
+  padding-bottom: 32px;
+  border-bottom: 1px solid var(--jm8-border);
+}
+
+.jm8-policy-title > p:first-child {
+  margin: 0 0 12px;
+  color: var(--jm8-brand-700);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.jm8-policy-title h1 {
+  margin: 0;
+  font-size: clamp(2.25rem, 7vw, 4rem);
+  letter-spacing: -0.045em;
+  line-height: 1.04;
+}
+
+.jm8-policy-title > p:nth-of-type(2) {
+  max-width: 62ch;
+  margin: 18px 0 0;
+  color: var(--jm8-text-soft);
+  font-size: 1.05rem;
+  line-height: 1.75;
+}
+
+.jm8-policy-title dl {
+  margin: 28px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px 36px;
+}
+
+.jm8-policy-title dl div {
+  display: grid;
+  gap: 4px;
+}
+
+.jm8-policy-title dt {
+  color: var(--jm8-text-muted);
+  font-size: 0.74rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.jm8-policy-title dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+.jm8-policy-content {
+  padding-top: 10px;
+}
+
+.jm8-policy-content section {
+  padding-top: 34px;
+}
+
+.jm8-policy-content h2 {
+  margin: 0 0 12px;
+  font-size: 1.35rem;
+  letter-spacing: -0.018em;
+}
+
+.jm8-policy-content h3 {
+  margin: 24px 0 8px;
+  font-size: 1rem;
+}
+
+.jm8-policy-content p,
+.jm8-policy-content li {
+  color: var(--jm8-text-soft);
+  font-size: 0.98rem;
+  line-height: 1.75;
+}
+
+.jm8-policy-content p {
+  margin: 0 0 14px;
+}
+
+.jm8-policy-content ul {
+  margin: 14px 0 0;
+  padding-left: 22px;
+}
+
+.jm8-policy-content li + li {
+  margin-top: 10px;
+}
+
+.jm8-policy-content a {
+  color: var(--jm8-brand-700);
+  font-weight: 700;
+  text-underline-offset: 4px;
+}
+
+.jm8-policy-footer {
+  min-height: 92px;
+  margin-top: auto;
+  padding: 24px 0;
+  color: var(--jm8-text-muted);
+  border-top: 1px solid var(--jm8-border);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 600px) {
+  .jm8-policy-header,
+  .jm8-policy-footer,
+  .jm8-policy-main {
+    width: min(100% - 28px, 780px);
+  }
+
+  .jm8-policy-header {
+    min-height: 76px;
+  }
+
+  .jm8-policy-document {
+    padding: 24px 20px 34px;
+    border-radius: var(--jm8-radius-lg);
+  }
+
+  .jm8-policy-title dl,
+  .jm8-policy-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

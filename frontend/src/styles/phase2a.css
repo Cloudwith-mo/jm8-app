@@ -116,6 +116,22 @@
   box-shadow: 0 18px 50px rgba(30, 22, 55, .16);
 }
 
+.phase2-account-policy-links {
+  min-height: 44px;
+  padding: 12px 4px 2px;
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  border-top: 1px solid var(--jm8-border, #dedee8);
+}
+
+.phase2-account-policy-links a {
+  color: var(--jm8-purple, #5b25e6);
+  font-size: .78rem;
+  font-weight: 700;
+  text-underline-offset: 3px;
+}
+
 .phase2-secondary-account-row { display: flex; justify-content: flex-end; min-height: 52px; }
 
 .jm8-archive-shell .archive-topbar {
