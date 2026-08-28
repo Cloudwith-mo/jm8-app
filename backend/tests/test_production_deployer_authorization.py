@@ -527,6 +527,53 @@ class PolicyGenerationTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, all_logs_actions)
 
+    def test_production_operations_resources_remain_exactly_scoped(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-observability"
+        ]["Statement"]
+
+        budget = next(
+            item for item in statements
+            if item["Sid"] == "ManageProductionBudgets"
+        )
+        self.assertEqual(
+            set(budget["Resource"]),
+            {
+                (
+                    f"arn:aws:budgets::{ACCOUNT_ID}:budget/"
+                    "journalm8-prod-bedrock-monthly"
+                ),
+                (
+                    f"arn:aws:budgets::{ACCOUNT_ID}:budget/"
+                    "journalm8-prod-production-monthly"
+                ),
+            },
+        )
+        self.assertNotIn("*", "".join(budget["Resource"]))
+
+        alarms = next(
+            item for item in statements
+            if item["Sid"] == "ManageProductionAlarms"
+        )
+        for alarm_name in (
+            "journalm8-prod-ocr-worker-errors",
+            "journalm8-prod-api-gateway-5xx",
+            "journalm8-prod-api-gateway-high-latency",
+        ):
+            alarm_arn = (
+                f"arn:aws:cloudwatch:us-east-1:{ACCOUNT_ID}:alarm:{alarm_name}"
+            )
+            self.assertTrue(fnmatchcase(alarm_arn, alarms["Resource"]))
+
+        dashboard = next(
+            item for item in statements
+            if item["Sid"] == "ManageProductionDashboards"
+        )
+        self.assertEqual(
+            dashboard["Resource"],
+            f"arn:aws:cloudwatch::{ACCOUNT_ID}:dashboard/journalm8-prod-*",
+        )
+
     def test_opaque_api_ids_are_gated_by_exact_production_tags(self):
         statements = generate_policies()[
             "journalm8-prod-deployer-compute"
@@ -855,6 +902,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "deploy-observability",
             "deploy-analysis-observability",
             "deploy-bedrock-budget",
+            "deploy-production-budget",
             "provision-stripe-secret",
             "setup-stripe-catalog",
             "jm8_bedrock_analysis_policy.sh",

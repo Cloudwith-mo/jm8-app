@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+jm8_validate_contract_or_exit
+
+MONTHLY_LIMIT="${PRODUCTION_MONTHLY_BUDGET_USD:-50}"
+BUDGET_NAME="${APP_NAME}-${STAGE}-production-monthly"
+TOPIC_NAME="${APP_NAME}-${STAGE}-alerts"
+BUILD_DIR=".build/production-budget"
+mkdir -p "$BUILD_DIR"
+
+python3 - "$MONTHLY_LIMIT" <<'PY'
+import sys
+from decimal import Decimal, InvalidOperation
+
+try:
+    amount = Decimal(sys.argv[1])
+except InvalidOperation as exc:
+    raise SystemExit(
+        "PRODUCTION_MONTHLY_BUDGET_USD must be numeric."
+    ) from exc
+
+if not amount.is_finite() or amount <= 0:
+    raise SystemExit(
+        "PRODUCTION_MONTHLY_BUDGET_USD must be greater than zero."
+    )
+
+print("Production monthly budget amount validated.")
+PY
+
+ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Account \
+    --output text
+)"
+
+TOPIC_ARN="$(
+  aws sns create-topic \
+    --name "$TOPIC_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query TopicArn \
+    --output text
+)"
+
+echo "Updating the alert topic permission for AWS Budgets..."
+
+aws sns get-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query Attributes.Policy \
+  --output text \
+  > "$BUILD_DIR/current-topic-policy.json"
+
+python3 - \
+  "$BUILD_DIR/current-topic-policy.json" \
+  "$BUILD_DIR/updated-topic-policy.json" \
+  "$TOPIC_ARN" \
+  "$ACCOUNT_ID" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+topic_arn = sys.argv[3]
+account_id = sys.argv[4]
+
+raw_policy = source_path.read_text().strip()
+if raw_policy and raw_policy != "None":
+    policy = json.loads(raw_policy)
+else:
+    policy = {"Version": "2012-10-17", "Statement": []}
+
+statements = policy.get("Statement") or []
+if isinstance(statements, dict):
+    statements = [statements]
+
+statements = [
+    statement
+    for statement in statements
+    if statement.get("Sid") != "AllowJM8BudgetsToPublish"
+]
+statements.append({
+    "Sid": "AllowJM8BudgetsToPublish",
+    "Effect": "Allow",
+    "Principal": {"Service": "budgets.amazonaws.com"},
+    "Action": "SNS:Publish",
+    "Resource": topic_arn,
+    "Condition": {
+        "StringEquals": {"aws:SourceAccount": account_id},
+        "ArnLike": {
+            "aws:SourceArn": f"arn:aws:budgets::{account_id}:*",
+        },
+    },
+})
+
+policy["Version"] = "2012-10-17"
+policy["Statement"] = statements
+output_path.write_text(json.dumps(policy, indent=2) + "\n")
+print("AWS Budgets SNS permission prepared.")
+PY
+
+aws sns set-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --attribute-name Policy \
+  --attribute-value "$(cat "$BUILD_DIR/updated-topic-policy.json")" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+python3 - \
+  "$BUILD_DIR/budget.json" \
+  "$BUDGET_NAME" \
+  "$MONTHLY_LIMIT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+output_path = Path(sys.argv[1])
+budget_name = sys.argv[2]
+monthly_limit = sys.argv[3]
+
+budget = {
+    "BudgetName": budget_name,
+    "BudgetLimit": {"Amount": monthly_limit, "Unit": "USD"},
+    "BudgetType": "COST",
+    "TimeUnit": "MONTHLY",
+    "CostTypes": {
+        "IncludeCredit": True,
+        "IncludeDiscount": True,
+        "IncludeOtherSubscription": True,
+        "IncludeRecurring": True,
+        "IncludeRefund": True,
+        "IncludeSubscription": True,
+        "IncludeSupport": True,
+        "IncludeTax": True,
+        "IncludeUpfront": True,
+        "UseAmortized": False,
+        "UseBlended": False,
+    },
+}
+
+output_path.write_text(json.dumps(budget, indent=2) + "\n")
+print("Production budget definition prepared.")
+PY
+
+if aws budgets describe-budget \
+  --account-id "$ACCOUNT_ID" \
+  --budget-name "$BUDGET_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  >/dev/null 2>&1
+then
+  aws budgets update-budget \
+    --account-id "$ACCOUNT_ID" \
+    --new-budget file://"$BUILD_DIR/budget.json" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+  echo "Production budget updated."
+else
+  aws budgets create-budget \
+    --account-id "$ACCOUNT_ID" \
+    --budget file://"$BUILD_DIR/budget.json" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+  echo "Production budget created."
+fi
+
+aws budgets describe-notifications-for-budget \
+  --account-id "$ACCOUNT_ID" \
+  --budget-name "$BUDGET_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/current-notifications.json"
+
+for NOTIFICATION_SPEC in \
+  "ACTUAL:50" \
+  "ACTUAL:80" \
+  "ACTUAL:100" \
+  "FORECASTED:100"
+do
+  NOTIFICATION_TYPE="${NOTIFICATION_SPEC%%:*}"
+  THRESHOLD="${NOTIFICATION_SPEC##*:}"
+  EXISTS="$(
+    python3 - \
+      "$BUILD_DIR/current-notifications.json" \
+      "$NOTIFICATION_TYPE" \
+      "$THRESHOLD" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+notifications = json.loads(Path(sys.argv[1]).read_text()).get(
+    "Notifications", []
+)
+notification_type = sys.argv[2]
+threshold = float(sys.argv[3])
+
+exists = any(
+    item.get("NotificationType") == notification_type
+    and item.get("ComparisonOperator") == "GREATER_THAN"
+    and item.get("ThresholdType") in (None, "PERCENTAGE")
+    and float(item.get("Threshold", -1)) == threshold
+    for item in notifications
+)
+print("yes" if exists else "no")
+PY
+  )"
+
+  if [ "$EXISTS" = "yes" ]; then
+    echo "Budget notification already exists: ${NOTIFICATION_TYPE} ${THRESHOLD}%"
+    continue
+  fi
+
+  aws budgets create-notification \
+    --account-id "$ACCOUNT_ID" \
+    --budget-name "$BUDGET_NAME" \
+    --notification \
+      "NotificationType=${NOTIFICATION_TYPE},ComparisonOperator=GREATER_THAN,Threshold=${THRESHOLD},ThresholdType=PERCENTAGE" \
+    --subscribers \
+      "SubscriptionType=SNS,Address=${TOPIC_ARN}" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+
+  echo "Budget notification created: ${NOTIFICATION_TYPE} ${THRESHOLD}%"
+done
+
+echo "Budget: ${BUDGET_NAME}; monthly limit: \$${MONTHLY_LIMIT}; thresholds: actual 50/80/100%, forecasted 100%."

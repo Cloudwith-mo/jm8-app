@@ -60,6 +60,7 @@ SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
+    BACKEND_ROOT / "bin" / "deploy-production-budget",
     BACKEND_ROOT / "bin" / "provision-stripe-secret",
     BACKEND_ROOT / "bin" / "setup-stripe-catalog",
     BACKEND_ROOT / "bin" / "jm8_deployment_guard.sh",
@@ -77,6 +78,7 @@ NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
+    BACKEND_ROOT / "bin" / "deploy-production-budget",
 ]
 
 

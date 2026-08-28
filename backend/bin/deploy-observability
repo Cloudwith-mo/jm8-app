@@ -42,7 +42,10 @@ BILLING_METRIC_NAMESPACE="JM8/${STAGE}/Billing"
 
 API_ERRORS_ALARM="${APP_NAME}-${STAGE}-api-errors"
 API_THROTTLES_ALARM="${APP_NAME}-${STAGE}-api-throttles"
+WORKER_ERRORS_ALARM="${APP_NAME}-${STAGE}-ocr-worker-errors"
 WORKER_THROTTLES_ALARM="${APP_NAME}-${STAGE}-ocr-worker-throttles"
+API_GATEWAY_5XX_ALARM="${APP_NAME}-${STAGE}-api-gateway-5xx"
+API_GATEWAY_HIGH_LATENCY_ALARM="${APP_NAME}-${STAGE}-api-gateway-high-latency"
 FAILURE_HANDLER_ERRORS_ALARM="${APP_NAME}-${STAGE}-failure-handler-errors"
 WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-workflow-failed"
 WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-workflow-timed-out"
@@ -524,6 +527,35 @@ put_count_alarm() {
     --region "$AWS_REGION"
 }
 
+put_api_gateway_alarm() {
+  local alarm_name="$1"
+  local description="$2"
+  local metric_name="$3"
+  local statistic="$4"
+  local unit="$5"
+  local threshold="$6"
+
+  aws cloudwatch put-metric-alarm \
+    --alarm-name "$alarm_name" \
+    --alarm-description "$description" \
+    --namespace "AWS/ApiGateway" \
+    --metric-name "$metric_name" \
+    --dimensions \
+      "Name=ApiId,Value=${API_ID}" \
+      "Name=Stage,Value=\$default" \
+    --statistic "$statistic" \
+    --unit "$unit" \
+    --period 300 \
+    --evaluation-periods 1 \
+    --datapoints-to-alarm 1 \
+    --threshold "$threshold" \
+    --comparison-operator GreaterThanOrEqualToThreshold \
+    --treat-missing-data notBreaching \
+    --alarm-actions "$TOPIC_ARN" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION"
+}
+
 put_undimensioned_count_alarm() {
   local alarm_name="$1"
   local description="$2"
@@ -566,12 +598,36 @@ put_count_alarm \
   "$API_FUNCTION_NAME"
 
 put_count_alarm \
+  "$WORKER_ERRORS_ALARM" \
+  "JM8 OCR worker Lambda reported one or more errors in five minutes." \
+  "AWS/Lambda" \
+  "Errors" \
+  "FunctionName" \
+  "$WORKER_FUNCTION_NAME"
+
+put_count_alarm \
   "$WORKER_THROTTLES_ALARM" \
   "JM8 OCR worker Lambda was throttled." \
   "AWS/Lambda" \
   "Throttles" \
   "FunctionName" \
   "$WORKER_FUNCTION_NAME"
+
+put_api_gateway_alarm \
+  "$API_GATEWAY_5XX_ALARM" \
+  "JM8 API Gateway returned one or more 5xx responses in five minutes." \
+  "5xx" \
+  "Sum" \
+  "Count" \
+  "1"
+
+put_api_gateway_alarm \
+  "$API_GATEWAY_HIGH_LATENCY_ALARM" \
+  "JM8 API Gateway latency reached 25 seconds in five minutes." \
+  "Latency" \
+  "Maximum" \
+  "Milliseconds" \
+  "25000"
 
 put_count_alarm \
   "$FAILURE_HANDLER_ERRORS_ALARM" \
@@ -693,6 +749,7 @@ python3 - \
   "$HISTORICAL_COORDINATOR_LOG_GROUP" \
   "$REANALYSIS_METRIC_NAMESPACE" \
   "$BILLING_METRIC_NAMESPACE" \
+  "$API_ID" \
   > .build/operations-dashboard.json <<'PY'
 import json
 import sys
@@ -716,11 +773,15 @@ historical_worker_log_group = sys.argv[16]
 historical_coordinator_log_group = sys.argv[17]
 reanalysis_metric_namespace = sys.argv[18]
 billing_metric_namespace = sys.argv[19]
+api_id = sys.argv[20]
 
 alarm_names = [
     f"{app_name}-{stage}-api-errors",
     f"{app_name}-{stage}-api-throttles",
+    f"{app_name}-{stage}-ocr-worker-errors",
     f"{app_name}-{stage}-ocr-worker-throttles",
+    f"{app_name}-{stage}-api-gateway-5xx",
+    f"{app_name}-{stage}-api-gateway-high-latency",
     f"{app_name}-{stage}-failure-handler-errors",
     f"{app_name}-{stage}-workflow-failed",
     f"{app_name}-{stage}-workflow-timed-out",
@@ -1449,6 +1510,78 @@ dashboard["widgets"].extend([
                     {
                         "stat": "Sum",
                         "label": "Webhook failures",
+                    },
+                ],
+            ],
+        },
+    },
+    {
+        "type": "metric",
+        "x": 12,
+        "y": 52,
+        "width": 12,
+        "height": 6,
+        "properties": {
+            "title": "API Gateway health",
+            "region": region,
+            "view": "timeSeries",
+            "period": 300,
+            "metrics": [
+                [
+                    "AWS/ApiGateway",
+                    "Count",
+                    "ApiId",
+                    api_id,
+                    "Stage",
+                    "$default",
+                    {"stat": "Sum", "label": "Requests"},
+                ],
+                [
+                    "AWS/ApiGateway",
+                    "5xx",
+                    "ApiId",
+                    api_id,
+                    "Stage",
+                    "$default",
+                    {"stat": "Sum", "label": "5xx responses"},
+                ],
+                [
+                    "AWS/ApiGateway",
+                    "Latency",
+                    "ApiId",
+                    api_id,
+                    "Stage",
+                    "$default",
+                    {"stat": "p95", "label": "Latency p95"},
+                ],
+                [
+                    "AWS/ApiGateway",
+                    "Latency",
+                    "ApiId",
+                    api_id,
+                    "Stage",
+                    "$default",
+                    {"stat": "Maximum", "label": "Latency maximum"},
+                ],
+                [
+                    "AWS/ApiGateway",
+                    "IntegrationLatency",
+                    "ApiId",
+                    api_id,
+                    "Stage",
+                    "$default",
+                    {"stat": "p95", "label": "Integration latency p95"},
+                ],
+                [
+                    "AWS/ApiGateway",
+                    "IntegrationLatency",
+                    "ApiId",
+                    api_id,
+                    "Stage",
+                    "$default",
+                    {
+                        "stat": "Maximum",
+                        "label": "Integration latency maximum",
                     },
                 ],
             ],

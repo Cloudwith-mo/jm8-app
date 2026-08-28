@@ -547,9 +547,15 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
     dashboard_arn = (
         f"arn:aws:cloudwatch::{ACCOUNT_ID}:dashboard/journalm8-prod-*"
     )
-    budget_arn = (
-        f"arn:aws:budgets::{ACCOUNT_ID}:budget/"
-        "journalm8-prod-bedrock-monthly"
+    budget_arns = (
+        (
+            f"arn:aws:budgets::{ACCOUNT_ID}:budget/"
+            "journalm8-prod-bedrock-monthly"
+        ),
+        (
+            f"arn:aws:budgets::{ACCOUNT_ID}:budget/"
+            "journalm8-prod-production-monthly"
+        ),
     )
     observability = _policy(
         _statement(
@@ -589,12 +595,12 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             topic_arn,
         ),
         _statement(
-            "ManageProductionBedrockBudget",
+            "ManageProductionBudgets",
             (
                 "budgets:ModifyBudget",
                 "budgets:ViewBudget",
             ),
-            budget_arn,
+            budget_arns,
         ),
     )
 
