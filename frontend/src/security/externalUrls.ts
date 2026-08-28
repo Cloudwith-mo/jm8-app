@@ -12,8 +12,7 @@ export function isTrustedStripeRedirect(value: string, kind: StripeRedirectKind)
       && url.hostname === STRIPE_HOSTS[kind]
       && url.port === ""
       && url.username === ""
-      && url.password === ""
-      && url.hash === "";
+      && url.password === "";
   } catch {
     return false;
   }

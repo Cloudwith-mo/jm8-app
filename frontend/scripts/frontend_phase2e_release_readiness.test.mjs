@@ -96,9 +96,16 @@ test("all entry request paths encode opaque identifiers", () => {
 
 test("only exact Stripe Checkout and Portal origins can receive browser navigation", () => {
   assert.equal(isTrustedStripeRedirect("https://checkout.stripe.com/c/pay/test", "checkout"), true);
+  assert.equal(
+    isTrustedStripeRedirect(
+      "https://checkout.stripe.com/c/pay/test#fidkdWxOYHwnPyd1blpxYHZxWjA0",
+      "checkout"
+    ),
+    true
+  );
   assert.equal(isTrustedStripeRedirect("https://billing.stripe.com/p/session/test", "portal"), true);
   for (const value of ["http://checkout.stripe.com/x", "https://evil.test/x", "https://checkout.stripe.com.evil.test/x",
-    "https://user@checkout.stripe.com/x", "https://checkout.stripe.com:444/x", "https://checkout.stripe.com/x#token"]) {
+    "https://user@checkout.stripe.com/x", "https://checkout.stripe.com:444/x"]) {
     assert.equal(isTrustedStripeRedirect(value, "checkout"), false);
   }
   assert.match(page, /isTrustedStripeRedirect\(checkoutUrl, "checkout"\)/);
