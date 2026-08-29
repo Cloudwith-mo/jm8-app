@@ -412,6 +412,67 @@ aws() {
         )
 
     @staticmethod
+    def _run_lambda_tag_helper(function_name, tag_document):
+        stage = "staging"
+        environment = os.environ.copy()
+        environment.update({
+            "APP_NAME": APP_NAME,
+            "AWS_PROFILE": f"jm8-{stage}",
+            "AWS_REGION": REGION,
+            "EXPECTED_AWS_ACCOUNT_ID": ACCOUNT_ID,
+            "JM8_TEST_FUNCTION_DOCUMENT": json.dumps({
+                "Configuration": {
+                    "FunctionName": function_name,
+                    "FunctionArn": (
+                        f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:"
+                        f"function:{function_name}"
+                    ),
+                }
+            }),
+            "JM8_TEST_TAG_DOCUMENT": json.dumps(tag_document),
+            "STAGE": stage,
+        })
+        script = r'''
+set -euo pipefail
+source "$1"
+function_name="$2"
+
+aws() {
+  printf 'AWS_CALL:%s %s\n' "$1" "$2" >&2
+  case "$1:$2" in
+    lambda:get-function)
+      printf '%s' "$JM8_TEST_FUNCTION_DOCUMENT"
+      ;;
+    lambda:list-tags)
+      printf '%s' "$JM8_TEST_TAG_DOCUMENT"
+      ;;
+    lambda:tag-resource)
+      return 0
+      ;;
+    *)
+      return 97
+      ;;
+  esac
+}
+
+jm8_reconcile_lambda_tags "$function_name"
+'''
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "lambda-tag-helper-test",
+                str(BIN_DIR / "jm8_resource_tags.sh"),
+                function_name,
+            ],
+            capture_output=True,
+            env=environment,
+            text=True,
+            check=False,
+        )
+
+    @staticmethod
     def _lambda_create_blocks(source):
         return re.findall(
             r"aws lambda create-function \\\n(.*?\n\s*>/dev/null)",
@@ -595,6 +656,57 @@ aws() {
             reconcile_block,
             "lambda",
         )
+
+    def test_lambda_allowlist_accepts_account_export_worker_and_rejects_others(self):
+        function_name = f"{APP_NAME}-staging-account-export-worker"
+        canonical_tags = {
+            "Tags": {
+                "App": APP_NAME,
+                "Stage": "staging",
+                "ManagedBy": "aws-cli",
+            }
+        }
+        accepted = self._run_lambda_tag_helper(function_name, canonical_tags)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(
+            re.findall(r"AWS_CALL:lambda ([a-z-]+)", accepted.stderr),
+            ["get-function", "list-tags", "tag-resource", "list-tags"],
+        )
+
+        rejected = self._run_lambda_tag_helper(
+            f"{APP_NAME}-staging-arbitrary-worker",
+            canonical_tags,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(
+            "Lambda name does not match the stage contract.",
+            rejected.stderr,
+        )
+        self.assertNotIn("AWS_CALL:", rejected.stderr)
+
+        for mismatched_tags in (
+            {
+                "Tags": {
+                    "App": "other-app",
+                    "Stage": "staging",
+                    "ManagedBy": "aws-cli",
+                }
+            },
+            {
+                "Tags": {
+                    "App": APP_NAME,
+                    "Stage": "prod",
+                    "ManagedBy": "aws-cli",
+                }
+            },
+        ):
+            with self.subTest(tags=mismatched_tags):
+                mismatch = self._run_lambda_tag_helper(
+                    function_name,
+                    mismatched_tags,
+                )
+                self.assertNotEqual(mismatch.returncode, 0)
+                self.assertNotIn("AWS_CALL:lambda tag-resource", mismatch.stderr)
 
     def test_all_shared_tag_resource_maps_use_json(self):
         helper = self.sources["jm8_resource_tags.sh"]

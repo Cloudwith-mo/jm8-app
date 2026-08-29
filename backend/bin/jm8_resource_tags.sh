@@ -228,7 +228,8 @@ jm8_reconcile_lambda_tags() {
     "${APP_NAME}-${STAGE}-ocr-worker" | \
     "${APP_NAME}-${STAGE}-ocr-failure-handler" | \
     "${APP_NAME}-${STAGE}-historical-reanalysis-worker" | \
-    "${APP_NAME}-${STAGE}-historical-reanalysis-coordinator") ;;
+    "${APP_NAME}-${STAGE}-historical-reanalysis-coordinator" | \
+    "${APP_NAME}-${STAGE}-account-export-worker") ;;
     *)
       echo "Lambda name does not match the stage contract." >&2
       return 1
