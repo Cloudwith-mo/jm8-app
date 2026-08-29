@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -37,6 +38,59 @@ class AccountExportDeploymentTests(unittest.TestCase):
             self.assertIn(required, self.deploy)
         for forbidden in ("bedrock:", "textract:", "secretsmanager:", "cognito-idp:DeleteUser"):
             self.assertNotIn(forbidden, self.deploy.lower())
+
+    def test_packaging_precedes_aws_mutations_and_artifacts_follow_recreation(self):
+        package = self.deploy.index("./bin/package")
+        clean = self.deploy.index('rm -rf "$BUILD_DIR"')
+        recreate = self.deploy.index('mkdir -p "$BUILD_DIR"')
+        zip_copy = self.deploy.index('cp dist/function.zip "$ZIP_FILE"')
+        mutation = re.search(
+            r"(?m)^\s*aws (?:"
+            r"s3api (?:create|put|delete)-|"
+            r"dynamodb update-|"
+            r"iam (?:create|update|tag|put|attach)-|"
+            r"lambda (?:create|update|put)-|"
+            r"logs (?:create|put)-|"
+            r"stepfunctions (?:create|update|tag)-"
+            r")",
+            self.deploy,
+        )
+
+        self.assertIsNotNone(mutation)
+        self.assertLess(package, clean)
+        self.assertLess(clean, recreate)
+        self.assertLess(recreate, zip_copy)
+        self.assertLess(zip_copy, mutation.start())
+        self.assertEqual(1, self.deploy.count("./bin/package"))
+        self.assertEqual(1, self.deploy.count('cp dist/function.zip "$ZIP_FILE"'))
+
+        for artifact in (
+            "export-bucket-policy.json",
+            "worker-policy.json",
+            "lambda-trust.json",
+            "states-trust.json",
+            "worker-environment.json",
+            "step-policy.json",
+            "account-export.asl.json",
+            "workflow-logging.json",
+        ):
+            self.assertGreater(self.deploy.index(artifact), zip_copy)
+
+        for pre_mutation_artifact in (
+            "lambda-trust.json",
+            "states-trust.json",
+            "worker-policy.json",
+        ):
+            self.assertLess(self.deploy.index(pre_mutation_artifact), mutation.start())
+
+        for lambda_action in ("update-function-code", "create-function"):
+            command = next(
+                line for line in self.deploy.splitlines() if f"aws lambda {lambda_action}" in line
+            )
+            self.assertIn('--zip-file "fileb://${ZIP_FILE}"', command)
+
+        self.assertIn("EPHEMERAL_STORAGE_MB=6144", self.deploy)
+        self.assertIn('--ephemeral-storage Size="$EPHEMERAL_STORAGE_MB"', self.deploy)
 
     def test_capacity_invariants_are_implemented_and_documented(self):
         self.assertIn("MAX_SOURCE_BYTES = 2 * 1024**3", self.worker)

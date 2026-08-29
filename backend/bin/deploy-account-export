@@ -42,7 +42,39 @@ if [ "$CALLER_ACCOUNT" != "$ACCOUNT_ID" ]; then
   exit 1
 fi
 
+cd "$BACKEND_DIR"
+./bin/package
+
+rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
+
+cp dist/function.zip "$ZIP_FILE"
+
+python3 > "$BUILD_DIR/lambda-trust.json" <<'PY_LAMBDA_TRUST'
+import json
+print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
+PY_LAMBDA_TRUST
+python3 > "$BUILD_DIR/states-trust.json" <<'PY_STATES_TRUST'
+import json
+print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
+PY_STATES_TRUST
+
+python3 - "$AWS_REGION" "$ACCOUNT_ID" "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" > "$BUILD_DIR/worker-policy.json" <<'PY_WORKER_POLICY'
+import json
+import sys
+
+region, account, table, raw, exports = sys.argv[1:]
+table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{table}"
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {"Effect": "Allow", "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "Resource": table_arn},
+        {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": f"arn:aws:s3:::{raw}/users/*/uploads/*"},
+        {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], "Resource": f"arn:aws:s3:::{exports}/exports/*"},
+        {"Effect": "Allow", "Action": ["s3:ListBucketMultipartUploads"], "Resource": f"arn:aws:s3:::{exports}", "Condition": {"StringLike": {"s3:prefix": "exports/*"}}},
+    ],
+}))
+PY_WORKER_POLICY
 
 if ! aws s3api head-bucket --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
   if [ "$AWS_REGION" = "us-east-1" ]; then
@@ -112,32 +144,6 @@ else
   aws dynamodb update-time-to-live --table-name "$TABLE_NAME" --time-to-live-specification "Enabled=true,AttributeName=${TTL_ATTRIBUTE}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
 fi
 
-python3 - "$AWS_REGION" "$ACCOUNT_ID" "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" > "$BUILD_DIR/worker-policy.json" <<'PY_WORKER_POLICY'
-import json
-import sys
-
-region, account, table, raw, exports = sys.argv[1:]
-table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{table}"
-print(json.dumps({
-    "Version": "2012-10-17",
-    "Statement": [
-        {"Effect": "Allow", "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "Resource": table_arn},
-        {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": f"arn:aws:s3:::{raw}/users/*/uploads/*"},
-        {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], "Resource": f"arn:aws:s3:::{exports}/exports/*"},
-        {"Effect": "Allow", "Action": ["s3:ListBucketMultipartUploads"], "Resource": f"arn:aws:s3:::{exports}", "Condition": {"StringLike": {"s3:prefix": "exports/*"}}},
-    ],
-}))
-PY_WORKER_POLICY
-
-python3 > "$BUILD_DIR/lambda-trust.json" <<'PY_LAMBDA_TRUST'
-import json
-print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
-PY_LAMBDA_TRUST
-python3 > "$BUILD_DIR/states-trust.json" <<'PY_STATES_TRUST'
-import json
-print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
-PY_STATES_TRUST
-
 ensure_role() {
   local role_name="$1"
   local trust_file="$2"
@@ -153,10 +159,6 @@ ensure_role "$WORKER_ROLE_NAME" "$BUILD_DIR/lambda-trust.json"
 aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-account-export-worker" --policy-document "file://${BUILD_DIR}/worker-policy.json" --profile "$AWS_PROFILE"
 aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole --profile "$AWS_PROFILE"
 WORKER_ROLE_ARN="$(aws iam get-role --role-name "$WORKER_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
-
-cd "$BACKEND_DIR"
-./bin/package
-cp dist/function.zip "$ZIP_FILE"
 
 python3 - "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$STAGE" "$EPHEMERAL_STORAGE_MB" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
 import json
