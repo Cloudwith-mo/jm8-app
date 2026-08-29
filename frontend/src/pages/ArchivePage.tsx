@@ -26,6 +26,7 @@ import {
 } from "../components/ui/V2Primitives";
 import UsageMeter from "../components/usage/UsageMeter";
 import AccountPlanCard from "../components/account/AccountPlanCard";
+import AccountDataExport from "../components/account/AccountDataExport";
 import type { JournalEntry } from "../types/journal";
 import type {
   UsageSnapshot,
@@ -187,6 +188,7 @@ export default function ArchivePage() {
   const [archiveError, setArchiveError] = useState("");
   const [isEntryLoading, setIsEntryLoading] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [isAccountPanelOpen, setIsAccountPanelOpen] = useState(false);
   const [activeSection, setActiveSection] =
     useState<ArchiveSection>(() => getSectionRoute());
   const [selectedThemeRouteId, setSelectedThemeRouteId] =
@@ -196,6 +198,10 @@ export default function ArchivePage() {
   const entryControllerRef = useRef<AbortController | null>(null);
   const mobileNavTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mobileNavCloseRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    setIsAccountPanelOpen(false);
+  }, [activeSection]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -255,6 +261,7 @@ export default function ArchivePage() {
     setAccountEntitlement(null);
     setEntitlementError("");
     setIsMobileNavOpen(false);
+    setIsAccountPanelOpen(false);
     setToasts([]);
     setArchiveError("");
     setStatusMessage("Sign in to load your private archive.");
@@ -1033,7 +1040,10 @@ export default function ArchivePage() {
 
   function renderAccountSurface() {
     return (
-      <details className="phase2-account-surface">
+      <details
+        className="phase2-account-surface"
+        onToggle={(event) => setIsAccountPanelOpen(event.currentTarget.open)}
+      >
         <summary aria-label="Open account, plan, and usage">
           <span className="phase2-account-avatar"><UserRound size={17} /></span>
           <span><strong>{accountEntitlement?.plan.label || "Account"}</strong><small>Plan & usage</small></span>
@@ -1047,6 +1057,7 @@ export default function ArchivePage() {
             onManageSubscription={() => void handleManageSubscription()}
           />
           <UsageMeter usage={usage} isLoading={isUsageLoading} errorMessage={usageError} onRetry={() => void refreshUsage()} />
+          <AccountDataExport isPanelOpen={isAccountPanelOpen} />
           <nav className="phase2-account-policy-links" aria-label="Account policies">
             <a href="/privacy">Privacy Policy</a>
             <a href="/terms">Terms</a>

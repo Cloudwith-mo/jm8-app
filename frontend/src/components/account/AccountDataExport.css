@@ -1,0 +1,38 @@
+.account-data-export {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--jm8-border, #dedee8);
+  border-radius: 14px;
+  background: #faf9ff;
+}
+
+.account-data-export header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-data-export header p,
+.account-data-export header h2,
+.account-data-export-copy { margin: 0; }
+.account-data-export header p { color: var(--jm8-muted, #6d6d80); font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.account-data-export header h2 { font-size: .98rem; }
+.account-data-export-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: var(--jm8-purple, #5b25e6); background: #eee8ff; }
+.account-data-export-copy { color: var(--jm8-muted, #6d6d80); font-size: .82rem; line-height: 1.5; }
+.account-data-export-status { display: grid; gap: 3px; padding: 10px; border-radius: 10px; background: #fff; }
+.account-data-export-status strong { color: var(--jm8-purple, #5b25e6); font-size: .72rem; letter-spacing: .04em; }
+.account-data-export-status span { font-size: .82rem; line-height: 1.45; }
+.account-data-export-status small { color: var(--jm8-muted, #6d6d80); }
+.account-data-export-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.account-data-export-actions button,
+.account-data-export-actions a { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--jm8-purple, #5b25e6); font: inherit; font-size: .8rem; font-weight: 700; text-decoration: none; cursor: pointer; }
+.account-data-export-actions button { color: #fff; background: var(--jm8-purple, #5b25e6); }
+.account-data-export-actions a { color: var(--jm8-purple, #5b25e6); background: #fff; }
+.account-data-export-actions button:disabled { cursor: not-allowed; opacity: .65; }
+.account-data-export-actions button:focus-visible,
+.account-data-export-actions a:focus-visible { outline: 3px solid #bba7ff; outline-offset: 2px; }
+.account-data-export-spin { animation: account-export-spin 1s linear infinite; }
+@keyframes account-export-spin { to { transform: rotate(360deg); } }
+@media (max-width: 520px) { .account-data-export-actions > * { flex: 1 1 100%; } }
+@media (prefers-reduced-motion: reduce) { .account-data-export-spin { animation: none; } }

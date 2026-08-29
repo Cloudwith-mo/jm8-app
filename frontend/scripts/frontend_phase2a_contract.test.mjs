@@ -17,7 +17,7 @@ const api = source("src/api/client.ts");
 test("Archive is the primary authenticated viewport and account data is compact", () => {
   assert.match(archive, /<h1>Archive<\/h1>/);
   assert.match(archive, /All your journals\. Every page\. Always yours\./);
-  assert.match(archive, /<details className="phase2-account-surface">/);
+  assert.match(archive, /<details[\s\S]{0,180}className="phase2-account-surface"/);
   assert.match(archive, /<AccountPlanCard[\s\S]*<UsageMeter/);
   assert.equal((archive.match(/<AccountPlanCard/g) || []).length, 1);
   assert.equal((archive.match(/<UsageMeter/g) || []).length, 1);

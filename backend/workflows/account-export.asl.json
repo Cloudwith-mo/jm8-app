@@ -1,0 +1,61 @@
+{
+  "Comment": "JM8 asynchronous account data export",
+  "StartAt": "RunExport",
+  "States": {
+    "RunExport": {
+      "Type": "Task",
+      "Resource": "${ACCOUNT_EXPORT_WORKER_ARN}",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.failure",
+          "Next": "RecordFailure"
+        }
+      ],
+      "End": true
+    },
+    "RecordFailure": {
+      "Type": "Task",
+      "Resource": "${ACCOUNT_EXPORT_WORKER_ARN}",
+      "Parameters": {
+        "action": "RECORD_FAILURE",
+        "userId.$": "$.userId",
+        "exportId.$": "$.exportId",
+        "errorCode.$": "$.failure.Error"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Next": "ExportFailed"
+    },
+    "ExportFailed": {
+      "Type": "Fail",
+      "Error": "AccountExportFailed",
+      "Cause": "Account export failed; public status is stored with the job."
+    }
+  }
+}

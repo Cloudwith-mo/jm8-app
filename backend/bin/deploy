@@ -9,6 +9,7 @@ set -euo pipefail
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
+: "${EXPORT_BUCKET:?EXPORT_BUCKET is required. Run: source .env}"
 : "${BEDROCK_ANALYSIS_MODEL_ID:?BEDROCK_ANALYSIS_MODEL_ID is required.}"
 : "${ANALYSIS_SCHEMA_VERSION:?ANALYSIS_SCHEMA_VERSION is required.}"
 : "${ANALYSIS_PROMPT_VERSION:?ANALYSIS_PROMPT_VERSION is required.}"
@@ -31,8 +32,10 @@ FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
 ZIP_FILE="dist/function.zip"
 OCR_WORKFLOW_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 HISTORICAL_REANALYSIS_WORKFLOW_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
+ACCOUNT_EXPORT_WORKFLOW_NAME="${APP_NAME}-${STAGE}-account-export-workflow"
 API_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-ocr-workflow"
 API_HISTORICAL_REANALYSIS_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-historical-reanalysis-workflow"
+API_ACCOUNT_EXPORT_POLICY_NAME="${APP_NAME}-${STAGE}-account-export"
 API_BATCH_WRITE_POLICY_NAME="${APP_NAME}-${STAGE}-batch-write-main-table"
 API_STRIPE_SECRET_POLICY_NAME="${APP_NAME}-${STAGE}-read-stripe-secret"
 
@@ -92,6 +95,20 @@ if [ -z "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" ] \
   || [ "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" = "None" ]; then
   echo "Historical re-analysis workflow was not found."
   echo "Run: ./bin/deploy-historical-reanalysis-workflow"
+  exit 1
+fi
+
+echo "Resolving account export workflow: $ACCOUNT_EXPORT_WORKFLOW_NAME"
+ACCOUNT_EXPORT_WORKFLOW_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "stateMachines[?name=='${ACCOUNT_EXPORT_WORKFLOW_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+if [ -z "$ACCOUNT_EXPORT_WORKFLOW_ARN" ] || [ "$ACCOUNT_EXPORT_WORKFLOW_ARN" = "None" ]; then
+  echo "Account export workflow was not found."
+  echo "Run: ./bin/deploy-account-export"
   exit 1
 fi
 
@@ -192,6 +209,37 @@ aws iam put-role-policy   --role-name "$ROLE_NAME"   --policy-name     "$API_HIS
 
 echo "API role can start the historical re-analysis workflow."
 
+python3 - "$ACCOUNT_EXPORT_WORKFLOW_ARN" "$EXPORT_BUCKET" \
+  > .build/api-account-export-policy.json <<'PY_ACCOUNT_EXPORT'
+import json
+import sys
+
+workflow_arn, bucket = sys.argv[1:]
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": ["states:StartExecution"],
+            "Resource": workflow_arn,
+        },
+        {
+            "Effect": "Allow",
+            "Action": ["s3:GetObject"],
+            "Resource": f"arn:aws:s3:::{bucket}/exports/*",
+        },
+    ],
+}))
+PY_ACCOUNT_EXPORT
+
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$API_ACCOUNT_EXPORT_POLICY_NAME" \
+  --policy-document file://.build/api-account-export-policy.json \
+  --profile "$AWS_PROFILE"
+
+echo "API role can coordinate and download completed account exports."
+
 echo "Verifying Stripe secret reference."
 
 aws secretsmanager describe-secret \
@@ -271,6 +319,8 @@ export TABLE_NAME
 export RAW_BUCKET
 export OCR_WORKFLOW_ARN
 export HISTORICAL_REANALYSIS_WORKFLOW_ARN
+export ACCOUNT_EXPORT_WORKFLOW_ARN
+export EXPORT_BUCKET
 export BEDROCK_ANALYSIS_MODEL_ID
 export ANALYSIS_SCHEMA_VERSION
 export ANALYSIS_PROMPT_VERSION
@@ -299,6 +349,8 @@ environment_keys = [
     "RAW_BUCKET",
     "OCR_WORKFLOW_ARN",
     "HISTORICAL_REANALYSIS_WORKFLOW_ARN",
+    "ACCOUNT_EXPORT_WORKFLOW_ARN",
+    "EXPORT_BUCKET",
     "BEDROCK_ANALYSIS_MODEL_ID",
     "ANALYSIS_SCHEMA_VERSION",
     "ANALYSIS_PROMPT_VERSION",

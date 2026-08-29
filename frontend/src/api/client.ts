@@ -1,4 +1,4 @@
-import { expireAuthSession, getAccessToken } from "../auth/cognito";
+import { expireAuthSession, getAccessToken, getIdToken } from "../auth/cognito";
 import { frontendEnv } from "../config/env";
 import type {
   AnalysisHistoryResponse,
@@ -45,6 +45,10 @@ import type {
   OcrJobRetryResponse,
   OcrJobStatusFilter,
 } from "../types/ocrJobs";
+import type {
+  AccountExportListResponse,
+  AccountExportResponse,
+} from "../types/accountExport";
 
 const API_ENDPOINT = frontendEnv.apiEndpoint;
 const DEVELOPMENT_IDENTITY_HEADERS: Record<string, string> =
@@ -103,14 +107,19 @@ async function parseApiResponse(
   }
 }
 
+type ApiRequestOptions = RequestInit & {
+  useIdentityToken?: boolean;
+};
+
 async function apiRequest<T>(
   path: string,
-  options: RequestInit = {}
+  options: ApiRequestOptions = {}
 ): Promise<T> {
-  const accessToken = getAccessToken();
+  const { useIdentityToken, ...requestOptions } = options;
+  const accessToken = useIdentityToken ? getIdToken() : getAccessToken();
 
   const response = await fetch(`${API_ENDPOINT}${path}`, {
-    ...options,
+    ...requestOptions,
     headers: {
       "content-type": "application/json",
       ...DEVELOPMENT_IDENTITY_HEADERS,
@@ -119,7 +128,7 @@ async function apiRequest<T>(
             Authorization: `Bearer ${accessToken}`,
           }
         : {}),
-      ...(options.headers || {}),
+      ...(requestOptions.headers || {}),
     },
   });
 
@@ -171,6 +180,34 @@ export async function getAccountEntitlement():
 Promise<AccountEntitlementResponse> {
   return apiRequest(
     "/account/entitlement"
+  );
+}
+
+export async function requestAccountExport(
+  requestToken: string,
+  signal?: AbortSignal
+): Promise<AccountExportResponse> {
+  return apiRequest("/account/exports", {
+    method: "POST",
+    body: JSON.stringify({ requestToken }),
+    signal,
+    useIdentityToken: true,
+  });
+}
+
+export async function listAccountExports(
+  signal?: AbortSignal
+): Promise<AccountExportListResponse> {
+  return apiRequest("/account/exports", { signal, useIdentityToken: true });
+}
+
+export async function getAccountExport(
+  exportId: string,
+  signal?: AbortSignal
+): Promise<AccountExportResponse> {
+  return apiRequest(
+    `/account/exports/${encodeURIComponent(exportId)}`,
+    { signal, useIdentityToken: true }
   );
 }
 

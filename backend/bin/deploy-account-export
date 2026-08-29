@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required}"
+: "${AWS_REGION:?AWS_REGION is required}"
+: "${APP_NAME:?APP_NAME is required}"
+: "${STAGE:?STAGE is required}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required}"
+: "${TABLE_NAME:?TABLE_NAME is required}"
+: "${RAW_BUCKET:?RAW_BUCKET is required}"
+: "${EXPORT_BUCKET:?EXPORT_BUCKET is required}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
+export JM8_OPERATION="deploy-account-export"
+jm8_validate_contract_or_exit
+
+ACCOUNT_ID="$EXPECTED_AWS_ACCOUNT_ID"
+FRONTEND_BUCKET="${FRONTEND_BUCKET:-}"
+WORKER_NAME="${APP_NAME}-${STAGE}-account-export-worker"
+WORKER_ROLE_NAME="${WORKER_NAME}-role"
+STEP_ROLE_NAME="${APP_NAME}-${STAGE}-account-export-step-role"
+WORKFLOW_NAME="${APP_NAME}-${STAGE}-account-export-workflow"
+WORKER_LOG_GROUP="/aws/lambda/${WORKER_NAME}"
+WORKFLOW_LOG_GROUP="/aws/vendedlogs/states/${WORKFLOW_NAME}"
+BUILD_DIR="$BACKEND_DIR/.build/account-export"
+ZIP_FILE="$BUILD_DIR/account-export.zip"
+TTL_ATTRIBUTE="accountExportTtlEpoch"
+EPHEMERAL_STORAGE_MB=6144
+RESERVED_CONCURRENCY="${ACCOUNT_EXPORT_RESERVED_CONCURRENCY:-$([ "$STAGE" = "prod" ] && printf '2' || printf '1')}"
+
+if [ "$EXPORT_BUCKET" = "$RAW_BUCKET" ] || { [ -n "$FRONTEND_BUCKET" ] && [ "$EXPORT_BUCKET" = "$FRONTEND_BUCKET" ]; }; then
+  echo "EXPORT_BUCKET must be distinct from RAW_BUCKET and FRONTEND_BUCKET." >&2
+  exit 1
+fi
+
+CALLER_ACCOUNT="$(aws sts get-caller-identity --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Account --output text)"
+if [ "$CALLER_ACCOUNT" != "$ACCOUNT_ID" ]; then
+  echo "Caller account does not match EXPECTED_AWS_ACCOUNT_ID." >&2
+  exit 1
+fi
+
+mkdir -p "$BUILD_DIR"
+
+if ! aws s3api head-bucket --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  if [ "$AWS_REGION" = "us-east-1" ]; then
+    aws s3api create-bucket --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  else
+    aws s3api create-bucket --bucket "$EXPORT_BUCKET" --create-bucket-configuration "LocationConstraint=${AWS_REGION}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  fi
+fi
+
+aws s3api put-public-access-block \
+  --bucket "$EXPORT_BUCKET" \
+  --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws s3api put-bucket-ownership-controls \
+  --bucket "$EXPORT_BUCKET" \
+  --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]' \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws s3api put-bucket-encryption \
+  --bucket "$EXPORT_BUCKET" \
+  --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":false}]}' \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws s3api put-bucket-tagging \
+  --bucket "$EXPORT_BUCKET" \
+  --tagging "TagSet=[{Key=App,Value=${APP_NAME}},{Key=Stage,Value=${STAGE}},{Key=ManagedBy,Value=aws-cli}]" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket "$EXPORT_BUCKET" \
+  --lifecycle-configuration \
+    '{"Rules":[{"ID":"ExpireAccountExports","Status":"Enabled","Filter":{"Prefix":"exports/"},"Expiration":{"Days":1},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}' \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+VERSION_STATUS="$(aws s3api get-bucket-versioning --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Status --output text)"
+if [ "$VERSION_STATUS" = "Enabled" ]; then
+  aws s3api put-bucket-versioning --bucket "$EXPORT_BUCKET" --versioning-configuration Status=Suspended --profile "$AWS_PROFILE" --region "$AWS_REGION"
+fi
+aws s3api delete-bucket-website --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1 || true
+
+python3 - "$EXPORT_BUCKET" > "$BUILD_DIR/export-bucket-policy.json" <<'PY_BUCKET_POLICY'
+import json
+import sys
+
+bucket = sys.argv[1]
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Sid": "DenyInsecureTransport",
+        "Effect": "Deny",
+        "Principal": "*",
+        "Action": "s3:*",
+        "Resource": [f"arn:aws:s3:::{bucket}", f"arn:aws:s3:::{bucket}/*"],
+        "Condition": {"Bool": {"aws:SecureTransport": "false"}},
+    }],
+}))
+PY_BUCKET_POLICY
+aws s3api put-bucket-policy --bucket "$EXPORT_BUCKET" --policy "file://${BUILD_DIR}/export-bucket-policy.json" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+TTL_STATUS="$(aws dynamodb describe-time-to-live --table-name "$TABLE_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query TimeToLiveDescription.TimeToLiveStatus --output text)"
+TTL_NAME="$(aws dynamodb describe-time-to-live --table-name "$TABLE_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query TimeToLiveDescription.AttributeName --output text)"
+if [ "$TTL_STATUS" = "ENABLED" ] || [ "$TTL_STATUS" = "ENABLING" ]; then
+  if [ "$TTL_NAME" != "$TTL_ATTRIBUTE" ]; then
+    echo "DynamoDB TTL is already enabled on a different attribute." >&2
+    exit 1
+  fi
+else
+  aws dynamodb update-time-to-live --table-name "$TABLE_NAME" --time-to-live-specification "Enabled=true,AttributeName=${TTL_ATTRIBUTE}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+fi
+
+python3 - "$AWS_REGION" "$ACCOUNT_ID" "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" > "$BUILD_DIR/worker-policy.json" <<'PY_WORKER_POLICY'
+import json
+import sys
+
+region, account, table, raw, exports = sys.argv[1:]
+table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{table}"
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {"Effect": "Allow", "Action": ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "Resource": table_arn},
+        {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": f"arn:aws:s3:::{raw}/users/*/uploads/*"},
+        {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], "Resource": f"arn:aws:s3:::{exports}/exports/*"},
+        {"Effect": "Allow", "Action": ["s3:ListBucketMultipartUploads"], "Resource": f"arn:aws:s3:::{exports}", "Condition": {"StringLike": {"s3:prefix": "exports/*"}}},
+    ],
+}))
+PY_WORKER_POLICY
+
+python3 > "$BUILD_DIR/lambda-trust.json" <<'PY_LAMBDA_TRUST'
+import json
+print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
+PY_LAMBDA_TRUST
+python3 > "$BUILD_DIR/states-trust.json" <<'PY_STATES_TRUST'
+import json
+print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
+PY_STATES_TRUST
+
+ensure_role() {
+  local role_name="$1"
+  local trust_file="$2"
+  if ! aws iam get-role --role-name "$role_name" --profile "$AWS_PROFILE" >/dev/null 2>&1; then
+    aws iam create-role --role-name "$role_name" --assume-role-policy-document "file://${trust_file}" --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli --profile "$AWS_PROFILE" >/dev/null
+  else
+    aws iam update-assume-role-policy --role-name "$role_name" --policy-document "file://${trust_file}" --profile "$AWS_PROFILE"
+    aws iam tag-role --role-name "$role_name" --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli --profile "$AWS_PROFILE"
+  fi
+}
+
+ensure_role "$WORKER_ROLE_NAME" "$BUILD_DIR/lambda-trust.json"
+aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-account-export-worker" --policy-document "file://${BUILD_DIR}/worker-policy.json" --profile "$AWS_PROFILE"
+aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole --profile "$AWS_PROFILE"
+WORKER_ROLE_ARN="$(aws iam get-role --role-name "$WORKER_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
+
+cd "$BACKEND_DIR"
+./bin/package
+cp dist/function.zip "$ZIP_FILE"
+
+python3 - "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$STAGE" "$EPHEMERAL_STORAGE_MB" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
+import json
+import sys
+
+table, raw, exports, stage, ephemeral_storage_mb = sys.argv[1:]
+print(json.dumps({"Variables": {"TABLE_NAME": table, "RAW_BUCKET": raw, "EXPORT_BUCKET": exports, "STAGE": stage, "ACCOUNT_EXPORT_EPHEMERAL_STORAGE_MB": ephemeral_storage_mb}}))
+PY_ENV
+
+if aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws lambda update-function-code --function-name "$WORKER_NAME" --zip-file "fileb://${ZIP_FILE}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+  aws lambda update-function-configuration --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_export_worker.lambda_handler --timeout 900 --memory-size 1024 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+else
+  aws lambda create-function --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_export_worker.lambda_handler --zip-file "fileb://${ZIP_FILE}" --timeout 900 --memory-size 1024 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+fi
+aws lambda wait function-active-v2 --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+jm8_reconcile_lambda_tags "$WORKER_NAME"
+aws lambda put-function-concurrency --function-name "$WORKER_NAME" --reserved-concurrent-executions "$RESERVED_CONCURRENCY" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+WORKER_ARN="$(aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Configuration.FunctionArn --output text)"
+
+ensure_role "$STEP_ROLE_NAME" "$BUILD_DIR/states-trust.json"
+python3 - "$WORKER_ARN" > "$BUILD_DIR/step-policy.json" <<'PY_STEP_POLICY'
+import json
+import sys
+print(json.dumps({"Version":"2012-10-17","Statement":[
+    {"Effect":"Allow","Action":["lambda:InvokeFunction"],"Resource":sys.argv[1]},
+    {"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:GetLogDelivery","logs:UpdateLogDelivery","logs:DeleteLogDelivery","logs:ListLogDeliveries","logs:PutResourcePolicy","logs:DescribeResourcePolicies","logs:DescribeLogGroups"],"Resource":"*"},
+]}))
+PY_STEP_POLICY
+aws iam put-role-policy --role-name "$STEP_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-invoke-account-export-worker" --policy-document "file://${BUILD_DIR}/step-policy.json" --profile "$AWS_PROFILE"
+STEP_ROLE_ARN="$(aws iam get-role --role-name "$STEP_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
+
+python3 - "$BACKEND_DIR/workflows/account-export.asl.json" "$WORKER_ARN" > "$BUILD_DIR/account-export.asl.json" <<'PY_ASL'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).read_text().replace("${ACCOUNT_EXPORT_WORKER_ARN}", sys.argv[2]))
+PY_ASL
+
+aws logs create-log-group --log-group-name "$WORKER_LOG_GROUP" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1 || true
+aws logs create-log-group --log-group-name "$WORKFLOW_LOG_GROUP" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1 || true
+aws logs put-retention-policy --log-group-name "$WORKER_LOG_GROUP" --retention-in-days 30 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-retention-policy --log-group-name "$WORKFLOW_LOG_GROUP" --retention-in-days 30 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+WORKFLOW_LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${WORKFLOW_LOG_GROUP}:*"
+python3 - "$WORKFLOW_LOG_GROUP_ARN" > "$BUILD_DIR/workflow-logging.json" <<'PY_LOGGING'
+import json
+import sys
+print(json.dumps({"level":"ERROR","includeExecutionData":False,"destinations":[{"cloudWatchLogsLogGroup":{"logGroupArn":sys.argv[1]}}]}))
+PY_LOGGING
+
+WORKFLOW_ARN="$(aws stepfunctions list-state-machines --profile "$AWS_PROFILE" --region "$AWS_REGION" --query "stateMachines[?name=='${WORKFLOW_NAME}'].stateMachineArn | [0]" --output text)"
+if [ -z "$WORKFLOW_ARN" ] || [ "$WORKFLOW_ARN" = "None" ]; then
+  WORKFLOW_ARN="$(aws stepfunctions create-state-machine --name "$WORKFLOW_NAME" --definition "file://${BUILD_DIR}/account-export.asl.json" --role-arn "$STEP_ROLE_ARN" --type STANDARD --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --query stateMachineArn --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+else
+  aws stepfunctions update-state-machine --state-machine-arn "$WORKFLOW_ARN" --definition "file://${BUILD_DIR}/account-export.asl.json" --role-arn "$STEP_ROLE_ARN" --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+fi
+aws stepfunctions tag-resource --resource-arn "$WORKFLOW_ARN" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+aws s3api get-public-access-block --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'PublicAccessBlockConfiguration.[BlockPublicAcls,IgnorePublicAcls,BlockPublicPolicy,RestrictPublicBuckets]' --output text | grep -qx $'True\tTrue\tTrue\tTrue'
+aws s3api get-bucket-ownership-controls --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'OwnershipControls.Rules[0].ObjectOwnership' --output text | grep -qx BucketOwnerEnforced
+aws s3api get-bucket-encryption --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' --output text | grep -qx AES256
+aws s3api get-bucket-lifecycle-configuration --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'Rules[?ID==`ExpireAccountExports`].[Status,Expiration.Days,AbortIncompleteMultipartUpload.DaysAfterInitiation] | [0]' --output text | grep -qx $'Enabled\t1\t1'
+EXPORT_TAGS_JSON="$(aws s3api get-bucket-tagging --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --output json)"
+python3 - "$APP_NAME" "$STAGE" "$EXPORT_TAGS_JSON" <<'PY_VERIFY_TAGS'
+import json
+import sys
+expected = {"App": sys.argv[1], "Stage": sys.argv[2], "ManagedBy": "aws-cli"}
+actual = {item["Key"]: item["Value"] for item in json.loads(sys.argv[3])["TagSet"]}
+if any(actual.get(key) != value for key, value in expected.items()):
+    raise SystemExit("Export bucket tags were not reconciled.")
+PY_VERIFY_TAGS
+if [ "$(aws s3api get-bucket-versioning --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Status --output text)" = "Enabled" ]; then
+  echo "Export bucket versioning must not be enabled." >&2
+  exit 1
+fi
+if aws s3api get-bucket-website --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "Export bucket must not have website hosting." >&2
+  exit 1
+fi
+aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query '[Runtime,Architectures[0],Timeout,MemorySize,EphemeralStorage.Size]' --output text | grep -q 'python3.12'
+aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'EphemeralStorage.Size' --output text | grep -qx "$EPHEMERAL_STORAGE_MB"
+aws lambda get-function-concurrency --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query ReservedConcurrentExecutions --output text | grep -qx "$RESERVED_CONCURRENCY"
+aws iam get-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-account-export-worker" --profile "$AWS_PROFILE" >/dev/null
+aws iam get-role-policy --role-name "$STEP_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-invoke-account-export-worker" --profile "$AWS_PROFILE" >/dev/null
+aws stepfunctions describe-state-machine --state-machine-arn "$WORKFLOW_ARN" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query loggingConfiguration.includeExecutionData --output text | grep -qx False
+aws dynamodb describe-time-to-live --table-name "$TABLE_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query TimeToLiveDescription.AttributeName --output text | grep -qx "$TTL_ATTRIBUTE"
+
+echo "Account export infrastructure reconciled and verified."

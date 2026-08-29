@@ -66,6 +66,7 @@ PRODUCTION_FORBIDDEN_DEMO_VARIABLES = {
 PRODUCTION_SCOPED_REFERENCE_KEYS = {
     "TABLE_NAME",
     "RAW_BUCKET",
+    "EXPORT_BUCKET",
     "FRONTEND_BUCKET",
     "API_NAME",
     "API_ENDPOINT",
@@ -342,6 +343,28 @@ def validate_frontend_bucket_name(
     if frontend_bucket == raw_bucket:
         raise EnvironmentContractError(
             "FRONTEND_BUCKET must not equal RAW_BUCKET; use a dedicated frontend bucket"
+        )
+
+
+def validate_export_bucket_name(
+    app_name: str,
+    stage: str,
+    export_bucket: str,
+    account_id: str,
+    raw_bucket: str,
+    frontend_bucket: str = "",
+) -> None:
+    """Validate the dedicated, stage-scoped account-export bucket."""
+    if not export_bucket:
+        raise EnvironmentContractError("EXPORT_BUCKET is required")
+    expected_bucket = f"{app_name}-{stage}-exports-{account_id}"
+    if export_bucket != expected_bucket:
+        raise EnvironmentContractError(
+            f"EXPORT_BUCKET must be '{expected_bucket}', got '{export_bucket}'"
+        )
+    if export_bucket in {raw_bucket, frontend_bucket}:
+        raise EnvironmentContractError(
+            "EXPORT_BUCKET must be distinct from RAW_BUCKET and FRONTEND_BUCKET"
         )
 
 
@@ -795,6 +818,25 @@ def validate_operation_specific(
             os.environ.get("STRIPE_CHECKOUT_SUCCESS_URL", "").strip(),
             os.environ.get("STRIPE_CHECKOUT_CANCEL_URL", "").strip(),
             os.environ.get("STRIPE_PORTAL_RETURN_URL", "").strip(),
+        )
+
+        validate_export_bucket_name(
+            os.environ.get("APP_NAME", "").strip(),
+            stage,
+            os.environ.get("EXPORT_BUCKET", "").strip(),
+            actual_account_id or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
+            os.environ.get("RAW_BUCKET", "").strip(),
+            os.environ.get("FRONTEND_BUCKET", "").strip(),
+        )
+
+    if op == "deploy-account-export":
+        validate_export_bucket_name(
+            os.environ.get("APP_NAME", "").strip(),
+            stage,
+            os.environ.get("EXPORT_BUCKET", "").strip(),
+            actual_account_id or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
+            os.environ.get("RAW_BUCKET", "").strip(),
+            os.environ.get("FRONTEND_BUCKET", "").strip(),
         )
 
     if op in {"provision-stripe-secret", "setup-stripe-catalog"}:

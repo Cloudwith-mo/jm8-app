@@ -122,6 +122,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
     table_arn = f"arn:aws:dynamodb:{region}:{ACCOUNT_ID}:table/journalm8-prod-main"
     raw_bucket_arn = f"arn:aws:s3:::journalm8-prod-raw-{ACCOUNT_ID}"
     frontend_bucket_arn = f"arn:aws:s3:::journalm8-prod-frontend-{ACCOUNT_ID}"
+    export_bucket_arn = f"arn:aws:s3:::journalm8-prod-exports-{ACCOUNT_ID}"
     lambda_arn = f"arn:aws:lambda:{region}:{ACCOUNT_ID}:function:journalm8-prod-*"
     state_machine_arn = (
         f"arn:aws:states:{region}:{ACCOUNT_ID}:stateMachine:journalm8-prod-*"
@@ -138,20 +139,20 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         "journalm8-prod-historical-reanalysis-worker-role",
         "journalm8-prod-historical-reanalysis-coordinator-role",
         "journalm8-prod-historical-reanalysis-step-role",
+        "journalm8-prod-account-export-worker-role",
+        "journalm8-prod-account-export-step-role",
     )
     runtime_role_arns = tuple(
         f"arn:aws:iam::{ACCOUNT_ID}:role/{name}"
         for name in runtime_role_names
     )
-    lambda_role_arns = tuple(
-        arn
-        for arn in runtime_role_arns
-        if not arn.endswith("step-functions-role")
-        and not arn.endswith("historical-reanalysis-step-role")
-    )
     step_role_arns = tuple(
-        arn for arn in runtime_role_arns if arn not in lambda_role_arns
+        arn for arn in runtime_role_arns
+        if arn.endswith("step-functions-role")
+        or arn.endswith("historical-reanalysis-step-role")
+        or arn.endswith("account-export-step-role")
     )
+    lambda_role_arns = tuple(arn for arn in runtime_role_arns if arn not in step_role_arns)
     production_tag_condition = {
         "StringEquals": {
             "aws:ResourceTag/App": APP_NAME,
@@ -175,9 +176,11 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "dynamodb:CreateTable",
                 "dynamodb:DescribeContinuousBackups",
                 "dynamodb:DescribeTable",
+                "dynamodb:DescribeTimeToLive",
                 "dynamodb:TagResource",
                 "dynamodb:UpdateContinuousBackups",
                 "dynamodb:UpdateTable",
+                "dynamodb:UpdateTimeToLive",
             ),
             (table_arn, f"{table_arn}/index/*"),
         ),
@@ -203,6 +206,31 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "s3:PutBucketVersioning",
             ),
             raw_bucket_arn,
+        ),
+        _statement(
+            "ManageProductionExportBucket",
+            (
+                "s3:CreateBucket",
+                "s3:DeleteBucketWebsite",
+                "s3:GetEncryptionConfiguration",
+                "s3:GetLifecycleConfiguration",
+                "s3:GetBucketLocation",
+                "s3:GetBucketOwnershipControls",
+                "s3:GetBucketPolicy",
+                "s3:GetBucketPublicAccessBlock",
+                "s3:GetBucketTagging",
+                "s3:GetBucketVersioning",
+                "s3:GetBucketWebsite",
+                "s3:ListBucket",
+                "s3:PutEncryptionConfiguration",
+                "s3:PutLifecycleConfiguration",
+                "s3:PutBucketOwnershipControls",
+                "s3:PutBucketPolicy",
+                "s3:PutBucketPublicAccessBlock",
+                "s3:PutBucketTagging",
+                "s3:PutBucketVersioning",
+            ),
+            export_bucket_arn,
         ),
         _statement(
             "DiscoverProductionUserPool",
@@ -294,6 +322,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "lambda:CreateFunction",
                 "lambda:GetFunction",
                 "lambda:GetFunctionConfiguration",
+                "lambda:GetFunctionConcurrency",
                 "lambda:ListTags",
                 "lambda:PutFunctionConcurrency",
                 "lambda:TagResource",
@@ -374,6 +403,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "iam:GetRolePolicy",
                 "iam:ListAttachedRolePolicies",
                 "iam:PutRolePolicy",
+                "iam:TagRole",
                 "iam:UpdateAssumeRolePolicy",
             ),
             runtime_role_arns,

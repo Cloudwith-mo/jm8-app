@@ -1,13 +1,13 @@
 # JM8 User Data Contract
 
-Status: proposed privacy operations contract for the JM8 private beta
+Status: privacy operations contract for the JM8 private beta
 
 Effective date: August 28, 2026
 
 This document maps user-related data across JM8 and defines the intended scope
-and order for future account export and deletion workflows. It documents the
-current storage model; it does not claim that automated export or account
-deletion exists today.
+and order for account export and deletion workflows. It documents the current
+storage model and the Phase 3C2 in-app export boundary. Automated account
+deletion remains planned for Phase 3C3 and is not available today.
 
 ## Identity boundary
 
@@ -40,6 +40,7 @@ The partition currently includes these record families:
 | `ENTITLEMENT` | Free or Pro entitlement, subscription state, access dates, and cancellation state. |
 | `BILLING#STRIPE#CUSTOMER` | The user's Stripe customer mapping and private billing reference. |
 | `REANALYSIS_JOB#...`, `REANALYSIS_PAGE#...`, `REANALYSIS_ACTIVE` | Historical re-analysis jobs, page progress, results metadata, and the active-job lock. |
+| `ACCOUNT_EXPORT#exp_...`, `ACCOUNT_EXPORT_ACTIVE`, `ACCOUNT_EXPORT_REQUEST#...` | Short-lived export status, the one-active-job lock, and request idempotency coordination. Internal coordination fields are excluded from packages. |
 
 Global secondary index keys attached to these records are indexes, not separate
 user content. Export should expose meaningful record fields without exposing
@@ -102,13 +103,22 @@ be restored except for a legitimate disaster-recovery need, and any restore
 procedure must reapply completed deletion requests before returning the data to
 active use.
 
-## Proposed export contents
+## Account export contents
 
-A future portable export should be assembled only after identity verification
-and should contain:
+The worker limits downloaded source images to 2 GiB and the completed ZIP to
+3 GiB. Its configured ephemeral storage is 6 GiB, so the source and archive
+ceilings satisfy `MAX_SOURCE_BYTES + MAX_ARCHIVE_BYTES < ephemeral storage`
+while both coexist during ZIP construction. The archive ceiling also satisfies
+`MAX_ARCHIVE_BYTES < the 5 GB single-request PutObject limit`, ensuring
+capacity failures are reported as `ExportTooLarge` before disk or upload
+limits are exhausted.
+
+The portable export is assembled asynchronously only after identity
+verification and contains:
 
 1. account profile fields suitable for disclosure, including Cognito subject,
-   email, optional display name, account status, and creation date;
+   verified email when available, optional display name, account status, and
+   creation date;
 2. all journal entries, timestamps, source type, OCR transcript and corrections,
    review state, and user-visible metadata;
 3. uploaded journal images in their original stored format, organized by entry;

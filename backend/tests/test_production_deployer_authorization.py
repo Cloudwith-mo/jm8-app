@@ -900,6 +900,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "create-frontend-hosting",
             "deploy-frontend",
             "deploy-observability",
+            "deploy-account-export",
             "deploy-analysis-observability",
             "deploy-bedrock-budget",
             "deploy-production-budget",
@@ -1025,6 +1026,10 @@ class PolicyGenerationTests(unittest.TestCase):
                 (
                     f"arn:aws:iam::{ACCOUNT_ID}:role/"
                     "journalm8-prod-historical-reanalysis-coordinator-role"
+                ),
+                (
+                    f"arn:aws:iam::{ACCOUNT_ID}:role/"
+                    "journalm8-prod-account-export-worker-role"
                 ),
             },
         )

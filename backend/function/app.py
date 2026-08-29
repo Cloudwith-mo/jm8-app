@@ -74,6 +74,12 @@ from billing_webhook import (
     BillingWebhookError,
     process_billing_webhook,
 )
+from account_export_api import (
+    AccountExportApiError,
+    create_account_export,
+    get_account_export,
+    list_account_exports,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -118,6 +124,46 @@ def lambda_handler(event, context):
             except BillingWebhookError as exc:
                 return response(exc.status_code, exc.payload)
             return response(200, result)
+
+        if path == "/account/exports" or path.startswith("/account/exports/"):
+            claims = get_verified_cognito_claims(event)
+            if claims is None:
+                return response(401, {
+                    "error": "Unauthorized",
+                    "message": "Authentication is required.",
+                })
+            export_user_id = str(claims["sub"])
+            try:
+                if method == "POST" and path == "/account/exports":
+                    try:
+                        export_body = parse_body(event)
+                    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                        return response(400, {
+                            "error": "InvalidRequest",
+                            "message": "The request body must be valid JSON.",
+                            "retryable": False,
+                        })
+                    if not isinstance(export_body, dict):
+                        return response(400, {
+                            "error": "InvalidRequest",
+                            "message": "The request body must be a JSON object.",
+                            "retryable": False,
+                        })
+                    status_code, payload = create_account_export(
+                        export_user_id,
+                        claims,
+                        export_body,
+                    )
+                    return response(status_code, payload)
+                if method == "GET" and path == "/account/exports":
+                    status_code, payload = list_account_exports(export_user_id)
+                    return response(status_code, payload)
+                if method == "GET" and path.startswith("/account/exports/"):
+                    export_id = path[len("/account/exports/"):]
+                    status_code, payload = get_account_export(export_user_id, export_id)
+                    return response(status_code, payload)
+            except AccountExportApiError as exc:
+                return response(exc.status_code, exc.payload)
 
         user_id = get_user_id(event)
         if user_id is None:
@@ -2055,6 +2101,26 @@ def get_user_id(event):
     }
 
     return normalized_headers.get("x-user-id", "demo-user")
+
+
+def get_verified_cognito_claims(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Return only API Gateway verified JWT claims; never use dev identity fallbacks."""
+    request_context = event.get("requestContext")
+    if not isinstance(request_context, dict):
+        return None
+    authorizer = request_context.get("authorizer")
+    if not isinstance(authorizer, dict):
+        return None
+    jwt = authorizer.get("jwt")
+    if not isinstance(jwt, dict):
+        return None
+    claims = jwt.get("claims")
+    if not isinstance(claims, dict):
+        return None
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject.strip() or len(subject.strip()) > 512:
+        return None
+    return {**claims, "sub": subject.strip()}
 
 
 def get_user_email(

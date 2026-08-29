@@ -10,6 +10,7 @@
     "build:staging": "VITE_APP_STAGE=staging tsc -b && VITE_APP_STAGE=staging vite build --mode staging",
     "build:production": "tsc -b && vite build --mode production",
     "build:prod": "npm run build:production",
+    "typecheck": "tsc -b",
     "test": "node --test scripts/*.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview"

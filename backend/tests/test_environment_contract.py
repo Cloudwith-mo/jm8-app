@@ -32,6 +32,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_aws_configuration,
     validate_stage_account_mapping,
     validate_resource_names,
+    validate_export_bucket_name,
     validate_non_dev_urls,
     validate_stripe_credentials,
     validate_confirmation_gate,
@@ -58,6 +59,7 @@ SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "deploy-bedrock-budget",
     BACKEND_ROOT / "bin" / "deploy-frontend",
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
+    BACKEND_ROOT / "bin" / "deploy-account-export",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
@@ -76,6 +78,7 @@ NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "deploy-bedrock-budget",
     BACKEND_ROOT / "bin" / "deploy-frontend",
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
+    BACKEND_ROOT / "bin" / "deploy-account-export",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
@@ -94,6 +97,7 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "PRODUCTION_ISOLATION_MODE",
         "TABLE_NAME",
         "RAW_BUCKET",
+        "EXPORT_BUCKET",
         "DEPLOY_CONFIRMATION",
         "STRIPE_SECRET_KEY",
         "STRIPE_WEBHOOK_SECRET",
@@ -150,6 +154,29 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
 
 class TestEnvironmentContractValidation(EnvironmentIsolationTestCase):
     """Test environment variable validation."""
+
+    def test_export_bucket_is_exact_and_dedicated(self):
+        validate_export_bucket_name(
+            "journalm8", "staging",
+            "journalm8-staging-exports-114743615542",
+            "114743615542",
+            "journalm8-staging-raw-114743615542",
+            "journalm8-staging-frontend-114743615542",
+        )
+        with self.assertRaises(EnvironmentContractError):
+            validate_export_bucket_name(
+                "journalm8", "staging",
+                "journalm8-prod-exports-114743615542",
+                "114743615542",
+                "journalm8-staging-raw-114743615542",
+            )
+        with self.assertRaises(EnvironmentContractError):
+            validate_export_bucket_name(
+                "journalm8", "staging",
+                "journalm8-staging-raw-114743615542",
+                "114743615542",
+                "journalm8-staging-raw-114743615542",
+            )
 
     def test_app_name_must_equal_journalm8(self):
         """APP_NAME must equal journalm8."""
@@ -508,6 +535,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "PRODUCTION_ISOLATION_MODE": "stage-scoped-same-account",
             "TABLE_NAME": "journalm8-prod-main",
             "RAW_BUCKET": "journalm8-prod-raw-114743615542",
+            "EXPORT_BUCKET": "journalm8-prod-exports-114743615542",
             "FRONTEND_BUCKET": "journalm8-prod-frontend-114743615542",
             "API_NAME": "journalm8-prod-api",
             "DEPLOY_CONFIRMATION": "prod",
