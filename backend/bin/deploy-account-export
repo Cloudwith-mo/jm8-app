@@ -169,9 +169,21 @@ print(json.dumps({"Variables": {"TABLE_NAME": table, "RAW_BUCKET": raw, "EXPORT_
 PY_ENV
 
 if aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  WORKER_ARCHITECTURE="$(
+    aws lambda get-function-configuration \
+      --function-name "$WORKER_NAME" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query 'Architectures[0]' \
+      --output text
+  )"
+  if [ "$WORKER_ARCHITECTURE" != "arm64" ]; then
+    echo "Account export worker architecture must be arm64." >&2
+    exit 1
+  fi
   aws lambda update-function-code --function-name "$WORKER_NAME" --zip-file "fileb://${ZIP_FILE}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
-  aws lambda update-function-configuration --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_export_worker.lambda_handler --timeout 900 --memory-size 1024 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda update-function-configuration --function-name "$WORKER_NAME" --runtime python3.12 --role "$WORKER_ROLE_ARN" --handler account_export_worker.lambda_handler --timeout 900 --memory-size 1024 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
 else
   aws lambda create-function --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_export_worker.lambda_handler --zip-file "fileb://${ZIP_FILE}" --timeout 900 --memory-size 1024 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
@@ -241,6 +253,7 @@ if aws s3api get-bucket-website --bucket "$EXPORT_BUCKET" --profile "$AWS_PROFIL
   exit 1
 fi
 aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query '[Runtime,Architectures[0],Timeout,MemorySize,EphemeralStorage.Size]' --output text | grep -q 'python3.12'
+aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'Architectures[0]' --output text | grep -qx arm64
 aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'EphemeralStorage.Size' --output text | grep -qx "$EPHEMERAL_STORAGE_MB"
 aws lambda get-function-concurrency --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query ReservedConcurrentExecutions --output text | grep -qx "$RESERVED_CONCURRENCY"
 aws iam get-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-account-export-worker" --profile "$AWS_PROFILE" >/dev/null

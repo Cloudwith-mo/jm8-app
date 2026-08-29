@@ -39,6 +39,53 @@ class AccountExportDeploymentTests(unittest.TestCase):
         for forbidden in ("bedrock:", "textract:", "secretsmanager:", "cognito-idp:DeleteUser"):
             self.assertNotIn(forbidden, self.deploy.lower())
 
+    def test_worker_architecture_is_create_only_and_existing_workers_fail_closed(self):
+        create_command = next(
+            line for line in self.deploy.splitlines()
+            if "aws lambda create-function" in line
+        )
+        update_command = next(
+            line for line in self.deploy.splitlines()
+            if "aws lambda update-function-configuration" in line
+        )
+
+        self.assertIn("--architectures arm64", create_command)
+        self.assertNotIn("--architectures", update_command)
+        for command in (create_command, update_command):
+            self.assertIn("--timeout 900", command)
+            self.assertIn("--memory-size 1024", command)
+            self.assertIn(
+                '--ephemeral-storage Size="$EPHEMERAL_STORAGE_MB"',
+                command,
+            )
+
+        existing_worker_branch = self.deploy[
+            self.deploy.index("if aws lambda get-function"):
+            self.deploy.index("else\n  aws lambda create-function")
+        ]
+        architecture_query = "--query 'Architectures[0]'"
+        self.assertIn('WORKER_ARCHITECTURE="$(', existing_worker_branch)
+        self.assertIn(architecture_query, existing_worker_branch)
+        self.assertIn(
+            'if [ "$WORKER_ARCHITECTURE" != "arm64" ]',
+            existing_worker_branch,
+        )
+        self.assertIn(
+            "Account export worker architecture must be arm64.",
+            existing_worker_branch,
+        )
+        self.assertLess(
+            existing_worker_branch.index("WORKER_ARCHITECTURE"),
+            existing_worker_branch.index("aws lambda update-function-code"),
+        )
+
+        final_verification = self.deploy[
+            self.deploy.index("aws s3api get-public-access-block"):
+        ]
+        self.assertIn(architecture_query, final_verification)
+        self.assertIn("| grep -qx arm64", final_verification)
+        self.assertIn("EPHEMERAL_STORAGE_MB=6144", self.deploy)
+
     def test_packaging_precedes_aws_mutations_and_artifacts_follow_recreation(self):
         package = self.deploy.index("./bin/package")
         clean = self.deploy.index('rm -rf "$BUILD_DIR"')
