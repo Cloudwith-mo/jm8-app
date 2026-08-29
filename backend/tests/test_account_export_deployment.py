@@ -86,6 +86,72 @@ class AccountExportDeploymentTests(unittest.TestCase):
         self.assertIn("| grep -qx arm64", final_verification)
         self.assertIn("EPHEMERAL_STORAGE_MB=6144", self.deploy)
 
+    def test_concurrency_is_unreserved_outside_production_and_required_in_production(self):
+        configuration = self.deploy[
+            self.deploy.index('RESERVED_CONCURRENCY=""'):
+            self.deploy.index('if [ "$EXPORT_BUCKET"')
+        ]
+        self.assertIn('RESERVED_CONCURRENCY=""', configuration)
+        self.assertIn(
+            'if [ "$STAGE" = "prod" ]; then\n'
+            '  RESERVED_CONCURRENCY="2"\n'
+            "fi",
+            configuration,
+        )
+        self.assertNotIn("ACCOUNT_EXPORT_RESERVED_CONCURRENCY", self.deploy)
+        self.assertNotIn("delete-function-concurrency", self.deploy)
+
+        reconciliation = self.deploy[
+            self.deploy.index('jm8_reconcile_lambda_tags "$WORKER_NAME"'):
+            self.deploy.index('WORKER_ARN="$(')
+        ]
+        reservation_guard = reconciliation.index(
+            'if [ -n "$RESERVED_CONCURRENCY" ]'
+        )
+        put_reservation = reconciliation.index(
+            "aws lambda put-function-concurrency"
+        )
+        unreserved_branch = reconciliation.index("else", put_reservation)
+        self.assertLess(reservation_guard, put_reservation)
+        self.assertLess(put_reservation, unreserved_branch)
+        self.assertIn(
+            "--reserved-concurrent-executions \"$RESERVED_CONCURRENCY\"",
+            reconciliation,
+        )
+        self.assertIn(
+            "--query ReservedConcurrentExecutions",
+            reconciliation[unreserved_branch:],
+        )
+        self.assertIn(
+            'if [ "$CURRENT_RESERVATION" != "None" ] && '
+            '[ -n "$CURRENT_RESERVATION" ]',
+            reconciliation[unreserved_branch:],
+        )
+        self.assertIn(
+            'CONCURRENCY_STATUS="unreserved"',
+            reconciliation[unreserved_branch:],
+        )
+
+        final_verification = self.deploy[
+            self.deploy.index("aws s3api get-public-access-block"):
+        ]
+        self.assertIn(
+            'if [ "$CURRENT_RESERVATION" != "$RESERVED_CONCURRENCY" ]',
+            final_verification,
+        )
+        self.assertIn(
+            "Production export worker reserved concurrency must be 2.",
+            final_verification,
+        )
+        self.assertIn(
+            "Non-production export worker must use unreserved concurrency.",
+            final_verification,
+        )
+        self.assertIn(
+            "(concurrency: ${CONCURRENCY_STATUS})",
+            final_verification,
+        )
+
     def test_packaging_precedes_aws_mutations_and_artifacts_follow_recreation(self):
         package = self.deploy.index("./bin/package")
         clean = self.deploy.index('rm -rf "$BUILD_DIR"')

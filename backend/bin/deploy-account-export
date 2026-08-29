@@ -29,7 +29,10 @@ BUILD_DIR="$BACKEND_DIR/.build/account-export"
 ZIP_FILE="$BUILD_DIR/account-export.zip"
 TTL_ATTRIBUTE="accountExportTtlEpoch"
 EPHEMERAL_STORAGE_MB=6144
-RESERVED_CONCURRENCY="${ACCOUNT_EXPORT_RESERVED_CONCURRENCY:-$([ "$STAGE" = "prod" ] && printf '2' || printf '1')}"
+RESERVED_CONCURRENCY=""
+if [ "$STAGE" = "prod" ]; then
+  RESERVED_CONCURRENCY="2"
+fi
 
 if [ "$EXPORT_BUCKET" = "$RAW_BUCKET" ] || { [ -n "$FRONTEND_BUCKET" ] && [ "$EXPORT_BUCKET" = "$FRONTEND_BUCKET" ]; }; then
   echo "EXPORT_BUCKET must be distinct from RAW_BUCKET and FRONTEND_BUCKET." >&2
@@ -190,7 +193,17 @@ else
 fi
 aws lambda wait function-active-v2 --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
 jm8_reconcile_lambda_tags "$WORKER_NAME"
-aws lambda put-function-concurrency --function-name "$WORKER_NAME" --reserved-concurrent-executions "$RESERVED_CONCURRENCY" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+if [ -n "$RESERVED_CONCURRENCY" ]; then
+  aws lambda put-function-concurrency --function-name "$WORKER_NAME" --reserved-concurrent-executions "$RESERVED_CONCURRENCY" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  CONCURRENCY_STATUS="reserved=${RESERVED_CONCURRENCY}"
+else
+  CURRENT_RESERVATION="$(aws lambda get-function-concurrency --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query ReservedConcurrentExecutions --output text)"
+  if [ "$CURRENT_RESERVATION" != "None" ] && [ -n "$CURRENT_RESERVATION" ]; then
+    echo "Non-production export worker must use unreserved concurrency." >&2
+    exit 1
+  fi
+  CONCURRENCY_STATUS="unreserved"
+fi
 WORKER_ARN="$(aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Configuration.FunctionArn --output text)"
 
 ensure_role "$STEP_ROLE_NAME" "$BUILD_DIR/states-trust.json"
@@ -255,10 +268,19 @@ fi
 aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query '[Runtime,Architectures[0],Timeout,MemorySize,EphemeralStorage.Size]' --output text | grep -q 'python3.12'
 aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'Architectures[0]' --output text | grep -qx arm64
 aws lambda get-function-configuration --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query 'EphemeralStorage.Size' --output text | grep -qx "$EPHEMERAL_STORAGE_MB"
-aws lambda get-function-concurrency --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query ReservedConcurrentExecutions --output text | grep -qx "$RESERVED_CONCURRENCY"
+CURRENT_RESERVATION="$(aws lambda get-function-concurrency --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query ReservedConcurrentExecutions --output text)"
+if [ -n "$RESERVED_CONCURRENCY" ]; then
+  if [ "$CURRENT_RESERVATION" != "$RESERVED_CONCURRENCY" ]; then
+    echo "Production export worker reserved concurrency must be 2." >&2
+    exit 1
+  fi
+elif [ "$CURRENT_RESERVATION" != "None" ] && [ -n "$CURRENT_RESERVATION" ]; then
+  echo "Non-production export worker must use unreserved concurrency." >&2
+  exit 1
+fi
 aws iam get-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-account-export-worker" --profile "$AWS_PROFILE" >/dev/null
 aws iam get-role-policy --role-name "$STEP_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-invoke-account-export-worker" --profile "$AWS_PROFILE" >/dev/null
 aws stepfunctions describe-state-machine --state-machine-arn "$WORKFLOW_ARN" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query loggingConfiguration.includeExecutionData --output text | grep -qx False
 aws dynamodb describe-time-to-live --table-name "$TABLE_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query TimeToLiveDescription.AttributeName --output text | grep -qx "$TTL_ATTRIBUTE"
 
-echo "Account export infrastructure reconciled and verified."
+echo "Account export infrastructure reconciled and verified (concurrency: ${CONCURRENCY_STATUS})."
