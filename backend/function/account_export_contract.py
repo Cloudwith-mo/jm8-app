@@ -6,6 +6,7 @@ import hashlib
 import re
 import secrets
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -33,6 +34,13 @@ PUBLIC_JOB_FIELDS = (
     "error",
 )
 PUBLIC_ERROR_FIELDS = ("code", "message", "retryable")
+PUBLIC_INTEGER_FIELDS = (
+    "fileSizeBytes",
+    "entryCount",
+    "imageCount",
+    "askHistoryCount",
+    "warningCount",
+)
 
 
 def utc_now() -> datetime:
@@ -138,6 +146,9 @@ def public_error(value: object) -> dict[str, Any] | None:
 
 def serialize_public_job(item: dict[str, Any]) -> dict[str, Any]:
     result = {key: item[key] for key in PUBLIC_JOB_FIELDS if key in item}
+    for key in PUBLIC_INTEGER_FIELDS:
+        if isinstance(result.get(key), Decimal):
+            result[key] = int(result[key])
     if "error" in result:
         error = public_error(result["error"])
         if error is None:

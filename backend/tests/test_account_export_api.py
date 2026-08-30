@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -78,6 +79,43 @@ class AccountExportApiTests(unittest.TestCase):
         self.assertEqual(result["statusCode"], 200)
         list_exports.assert_called_once_with("jwt-user")
 
+    @patch.object(api, "list_export_jobs")
+    def test_completed_list_records_are_json_safe_and_storage_fields_are_hidden(
+        self, list_jobs,
+    ):
+        list_jobs.return_value = [{
+            "PK": "USER#secret-user",
+            "SK": f"ACCOUNT_EXPORT#{EXPORT_ID}",
+            "userId": "secret-user",
+            "objectKey": "exports/secret-user/private.zip",
+            "bucket": "secret-bucket",
+            "accountExportTtlEpoch": Decimal("1999999999"),
+            "accountProfile": {"email": "secret@example.com"},
+            "exportId": EXPORT_ID,
+            "status": "COMPLETED",
+            "fileSizeBytes": Decimal("123456"),
+            "entryCount": Decimal("12"),
+            "imageCount": Decimal("3"),
+            "askHistoryCount": Decimal("4"),
+            "warningCount": Decimal("1"),
+        }]
+
+        status, payload = api.list_account_exports("secret-user")
+
+        self.assertEqual(status, 200)
+        export = payload["exports"][0]
+        self.assertEqual(export["fileSizeBytes"], 123456)
+        self.assertEqual(export["entryCount"], 12)
+        self.assertEqual(export["imageCount"], 3)
+        self.assertEqual(export["askHistoryCount"], 4)
+        self.assertEqual(export["warningCount"], 1)
+        for internal in (
+            "PK", "SK", "userId", "objectKey", "bucket",
+            "accountExportTtlEpoch", "accountProfile",
+        ):
+            self.assertNotIn(internal, export)
+        json.dumps(payload)
+
     @patch.object(api.step_functions, "start_execution")
     @patch.object(api, "create_or_replay_export")
     def test_post_starts_exact_server_configured_workflow(self, create, start):
@@ -116,12 +154,27 @@ class AccountExportApiTests(unittest.TestCase):
             "expiresAt": "2999-01-01T00:00:00Z", "fileName": "jm8-export-20260828T121314Z.zip",
             "bucket": api.EXPORT_BUCKET,
             "objectKey": f"exports/user-a/{EXPORT_ID}/jm8-export.zip",
+            "PK": "USER#user-a", "SK": f"ACCOUNT_EXPORT#{EXPORT_ID}",
+            "userId": "user-a", "accountExportTtlEpoch": Decimal("1999999999"),
+            "fileSizeBytes": Decimal("123456"), "entryCount": Decimal("12"),
+            "imageCount": Decimal("3"), "askHistoryCount": Decimal("4"),
+            "warningCount": Decimal("1"),
         }
         presign.return_value = "https://signed.example"
         _, payload = api.get_account_export("user-a", EXPORT_ID)
         self.assertEqual(payload["export"]["downloadUrl"], "https://signed.example")
         self.assertEqual(presign.call_args.kwargs["ExpiresIn"], 900)
-        self.assertNotIn("objectKey", payload["export"])
+        export = payload["export"]
+        self.assertEqual(export["fileSizeBytes"], 123456)
+        self.assertEqual(export["entryCount"], 12)
+        self.assertEqual(export["imageCount"], 3)
+        self.assertEqual(export["askHistoryCount"], 4)
+        self.assertEqual(export["warningCount"], 1)
+        for internal in (
+            "PK", "SK", "userId", "objectKey", "bucket", "accountExportTtlEpoch",
+        ):
+            self.assertNotIn(internal, export)
+        json.dumps(payload)
 
     @patch.object(api, "mark_export_expired")
     @patch.object(api.s3, "head_object")

@@ -1,7 +1,9 @@
+import json
 import os
 import sys
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -84,6 +86,38 @@ class AccountExportContractTests(unittest.TestCase):
             "priceId": "price_secret", "idempotencyKey": "secret",
         })
         self.assertEqual(subscription, {"plan": "PRO", "status": "ACTIVE"})
+
+    def test_public_job_converts_dynamodb_numbers_to_json_safe_integers(self):
+        public = serialize_public_job({
+            "PK": "USER#secret-user",
+            "SK": "ACCOUNT_EXPORT#secret-export",
+            "userId": "secret-user",
+            "objectKey": "exports/secret-user/secret-export/export.zip",
+            "bucket": "secret-bucket",
+            "accountExportTtlEpoch": Decimal("1999999999"),
+            "accountProfile": {"email": "secret@example.com"},
+            "exportId": "exp_20260828T121314Z_aaaaaaaaaaaaaaaa",
+            "status": "COMPLETED",
+            "fileSizeBytes": Decimal("123456"),
+            "entryCount": Decimal("12"),
+            "imageCount": Decimal("3"),
+            "askHistoryCount": Decimal("4"),
+            "warningCount": Decimal("1"),
+        })
+
+        self.assertEqual(public["fileSizeBytes"], 123456)
+        self.assertEqual(public["entryCount"], 12)
+        self.assertEqual(public["imageCount"], 3)
+        self.assertEqual(public["askHistoryCount"], 4)
+        self.assertEqual(public["warningCount"], 1)
+        self.assertEqual(
+            set(public),
+            {
+                "exportId", "status", "fileSizeBytes", "entryCount",
+                "imageCount", "askHistoryCount", "warningCount",
+            },
+        )
+        json.dumps(public)
 
 
 if __name__ == "__main__":
