@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from boto3.dynamodb.conditions import Key
@@ -114,6 +115,14 @@ def create_or_replay_export(
                 if replay_job:
                     return replay_job, True
             raise ActiveExportExists() from None
+        metadata = exc.response.get("ResponseMetadata", {})
+        print(json.dumps({
+            "event": "AccountExportStoreFailure",
+            "operation": "TransactWriteItems",
+            "errorCode": code,
+            "httpStatus": metadata.get("HTTPStatusCode"),
+            "awsRequestId": metadata.get("RequestId"),
+        }))
         raise ExportStoreUnavailable() from None
     return job, False
 
