@@ -62,6 +62,61 @@ class AccountExportStoreTests(unittest.TestCase):
         self.assertEqual(len(transaction), 3)
         self.assertIn("#ttl <= :now", transaction[1]["Put"]["ConditionExpression"])
 
+    @patch.object(store, "_get_coordination", side_effect=[None, None])
+    def test_default_transaction_writer_uses_low_level_client_without_reserializing(
+        self, coordination,
+    ):
+        class RequestCaptured(Exception):
+            pass
+
+        event_name = "before-call.dynamodb.TransactWriteItems"
+        low_level_events = store.dynamodb_client.meta.events
+        resource_events = store.table.meta.client.meta.events
+        captured = []
+
+        def capture(client_kind):
+            def handler(params, **kwargs):
+                captured.append((client_kind, json.loads(params["body"])))
+                raise RequestCaptured()
+
+            return handler
+
+        low_level_handler = capture("low-level")
+        resource_handler = capture("resource")
+        low_level_events.register_last(
+            event_name, low_level_handler,
+            unique_id="account-export-test-low-level-capture",
+        )
+        resource_events.register_last(
+            event_name, resource_handler,
+            unique_id="account-export-test-resource-capture",
+        )
+        try:
+            with self.assertRaises(RequestCaptured):
+                store.create_or_replay_export(
+                    user_id="user-a",
+                    request_token="550e8400-e29b-41d4-a716-446655440000",
+                    profile={},
+                )
+        finally:
+            low_level_events.unregister(
+                event_name, unique_id="account-export-test-low-level-capture",
+            )
+            resource_events.unregister(
+                event_name, unique_id="account-export-test-resource-capture",
+            )
+
+        self.assertEqual(captured[0][0], "low-level")
+        transaction = captured[0][1]["TransactItems"]
+        self.assertEqual(
+            set(transaction[1]["Put"]["ExpressionAttributeValues"][":now"]),
+            {"N"},
+        )
+        self.assertEqual(
+            set(transaction[2]["Put"]["ExpressionAttributeValues"][":now"]),
+            {"N"},
+        )
+
     @patch("builtins.print")
     @patch.object(store, "new_export_id", return_value="exp_secret-export-id")
     @patch.object(store, "_get_coordination", side_effect=[None, None])

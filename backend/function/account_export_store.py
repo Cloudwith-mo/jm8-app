@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
@@ -24,6 +25,8 @@ IDEMPOTENCY_PREFIX = "ACCOUNT_EXPORT_REQUEST#"
 JOB_TTL_SECONDS = 7 * 24 * 60 * 60
 LOCK_TTL_SECONDS = 30 * 60
 TTL_ATTRIBUTE = "accountExportTtlEpoch"
+
+dynamodb_client = boto3.client("dynamodb")
 
 
 class ActiveExportExists(RuntimeError):
@@ -88,7 +91,11 @@ def create_or_replay_export(
         "entityType": "ACCOUNT_EXPORT_REQUEST", "exportId": export_id,
         TTL_ATTRIBUTE: epoch + JOB_TTL_SECONDS,
     }
-    writer = transact_writer or table.meta.client.transact_write_items
+    writer = (
+        transact_writer
+        if transact_writer is not None
+        else dynamodb_client.transact_write_items
+    )
     try:
         writer(TransactItems=[
             {"Put": {"TableName": table.name, "Item": serialize_attribute_map(job),
