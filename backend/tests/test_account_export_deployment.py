@@ -1,4 +1,5 @@
 import re
+import shlex
 import unittest
 from pathlib import Path
 
@@ -85,6 +86,40 @@ class AccountExportDeploymentTests(unittest.TestCase):
         self.assertIn(architecture_query, final_verification)
         self.assertIn("| grep -qx arm64", final_verification)
         self.assertIn("EPHEMERAL_STORAGE_MB=6144", self.deploy)
+
+    def test_create_commands_use_separate_aws_cli_option_tokens(self):
+        create_function = next(
+            line.strip() for line in self.deploy.splitlines()
+            if "aws lambda create-function" in line
+        )
+        create_state_machine = next(
+            line.strip() for line in self.deploy.splitlines()
+            if "aws stepfunctions create-state-machine" in line
+        )
+        create_state_machine = create_state_machine[
+            create_state_machine.index("aws "):
+            create_state_machine.rindex(")")
+        ]
+
+        lambda_tokens = shlex.split(create_function)
+        state_machine_tokens = shlex.split(create_state_machine)
+
+        def assert_option(tokens, option, value):
+            option_index = tokens.index(option)
+            self.assertEqual(tokens[option_index + 1], value)
+
+        assert_option(lambda_tokens, "--runtime", "python3.12")
+        assert_option(lambda_tokens, "--profile", "$AWS_PROFILE")
+        assert_option(lambda_tokens, "--region", "$AWS_REGION")
+        assert_option(state_machine_tokens, "--query", "stateMachineArn")
+
+        for malformed in (
+            '"$AWS_PROFILE"--region',
+            "--querystateMachineArn",
+            "--runtimepython",
+            '--region"$AWS_REGION"',
+        ):
+            self.assertNotIn(malformed, self.deploy)
 
     def test_concurrency_is_unreserved_outside_production_and_required_in_production(self):
         configuration = self.deploy[
