@@ -53,6 +53,10 @@ from ask_history_store import (  # noqa: E402
 from ask_usage import (  # noqa: E402
     AskUsageUnavailableError,
 )
+from account_deletion_guard import (  # noqa: E402
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+)
 
 
 def sample_answer():
@@ -232,6 +236,11 @@ def api_event():
 class AskHistoryPersistenceTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def test_stable_id_is_deterministic(
         self,
     ):
@@ -640,6 +649,38 @@ class AskHistoryPersistenceTests(
         )
 
         complete_usage.assert_not_called()
+
+    def test_final_guard_blocks_ask_persistence_after_answer_generation(self):
+        for guard_error, expected_status in (
+            (AccountDeletionInProgress(), 409),
+            (DeletionGuardUnavailable(), 503),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch(
+                    "app.ensure_user_mutation_allowed",
+                    side_effect=[None, guard_error],
+                ),
+                patch("app.list_insights_overview_entries", return_value=[]),
+                patch("app.build_ask_context", return_value=ready_context()),
+                patch("app.reserve_ask_usage", return_value=reservation()),
+                patch(
+                    "app.answer_journal_history",
+                    return_value=sample_answer(),
+                ) as answer,
+                patch("app.persist_ask_history") as persist_history,
+                patch("app.complete_ask_usage") as complete_usage,
+                patch("app.fail_ask_usage") as fail_usage,
+                patch("app.rollback_persisted_ask_history") as rollback_history,
+            ):
+                result = lambda_handler(api_event(), None)
+
+            self.assertEqual(result["statusCode"], expected_status)
+            answer.assert_called_once()
+            persist_history.assert_not_called()
+            complete_usage.assert_not_called()
+            fail_usage.assert_not_called()
+            rollback_history.assert_not_called()
 
     def test_completion_failure_rolls_back_history(
         self,

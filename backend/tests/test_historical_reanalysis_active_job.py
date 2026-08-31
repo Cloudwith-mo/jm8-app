@@ -99,6 +99,11 @@ def api_event() -> dict:
 class HistoricalReanalysisActiveJobTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     @patch.object(
         storage,
         "get_historical_reanalysis_job",

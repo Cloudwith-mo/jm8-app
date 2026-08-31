@@ -56,6 +56,10 @@ from usage_store import (  # noqa: E402
     UsageLimitExceededError,
     UsageStoreError,
 )
+from account_deletion_guard import (  # noqa: E402
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+)
 
 
 def reservation():
@@ -367,6 +371,11 @@ class EntryAnalysisUsageHelperTests(
 class EntryAnalysisUsageApiTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def test_missing_entry_does_not_reserve(
         self,
     ):
@@ -602,6 +611,40 @@ class EntryAnalysisUsageApiTests(
         )
 
         fail_usage.assert_not_called()
+
+    def test_final_guard_blocks_analysis_persistence_after_bedrock(self):
+        for guard_error, expected_status in (
+            (AccountDeletionInProgress(), 409),
+            (DeletionGuardUnavailable(), 503),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch(
+                    "app.ensure_user_mutation_allowed",
+                    side_effect=[None, guard_error],
+                ),
+                patch("app.get_entry_by_id", return_value=entry()),
+                patch(
+                    "app.reserve_entry_analysis_usage",
+                    return_value=reservation(),
+                ),
+                patch(
+                    "app.analyze_journal_entry_llm",
+                    return_value={"status": "ANALYZED"},
+                ) as analyze,
+                patch("app.update_entry_analysis") as update_analysis,
+                patch("app.complete_entry_analysis_usage") as complete_usage,
+                patch("app.fail_entry_analysis_usage") as fail_usage,
+                patch("app.mark_entry_analysis_failed") as mark_failed,
+            ):
+                result = lambda_handler(api_event(), None)
+
+            self.assertEqual(result["statusCode"], expected_status)
+            analyze.assert_called_once()
+            update_analysis.assert_not_called()
+            complete_usage.assert_not_called()
+            fail_usage.assert_not_called()
+            mark_failed.assert_not_called()
 
     def test_input_error_releases_usage(
         self,

@@ -112,6 +112,22 @@ class AccountDeletionStoreTests(unittest.TestCase):
                 table_resource=SimpleNamespace(name="journalm8-test-main"),
             )
 
+    @patch.object(store, "utc_now", return_value=FIXED_NOW)
+    @patch.object(store, "_get_item")
+    def test_durable_partial_deletion_cannot_be_superseded(self, get_item, utc_now):
+        get_item.side_effect = [None, {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+        }]
+
+        with self.assertRaises(store.ActiveDeletionExists):
+            store.create_or_replay_deletion(
+                subject="subject-a",
+                request_token="different-request-token",
+                transact_writer=MagicMock(),
+                table_resource=SimpleNamespace(name="journalm8-test-main"),
+            )
+
     @patch.object(store, "_get_item")
     def test_request_ownership_isolated_by_subject_digest(self, get_item):
         get_item.return_value = {
@@ -186,17 +202,18 @@ class AccountDeletionStoreTests(unittest.TestCase):
         log.assert_not_called()
 
     @patch.object(store, "utc_now", return_value=FIXED_NOW)
-    def test_failed_coordination_uses_updates_and_failed_ttl(self, utc_now):
-        resource = MagicMock()
-        resource.update_item.side_effect = [
-            {"Attributes": {
-                "requestId": REQUEST_ID,
-                "status": "FAILED",
-                "failureCode": "DeletionWorkflowStartFailed",
-                "retryable": True,
-            }},
-            {},
-        ]
+    @patch.object(store, "_request_by_digest")
+    def test_pre_destructive_failure_releases_coordination_and_retains_failed_ttl(
+        self, request_by_digest, utc_now,
+    ):
+        request_by_digest.return_value = {
+            "requestId": REQUEST_ID,
+            "status": "FAILED",
+            "failureCode": "DeletionWorkflowStartFailed",
+            "retryable": True,
+        }
+        resource = SimpleNamespace(name="journalm8-test-main")
+        writer = MagicMock()
 
         result = store.fail_deletion_request(
             subject="subject-a",
@@ -204,17 +221,292 @@ class AccountDeletionStoreTests(unittest.TestCase):
             failure_code="DeletionWorkflowStartFailed",
             retryable=True,
             table_resource=resource,
+            transact_writer=writer,
         )
 
         self.assertEqual(result["status"], "FAILED")
-        self.assertEqual(resource.update_item.call_count, 2)
-        self.assertIn(
-            store.TTL_ATTRIBUTE,
-            resource.update_item.call_args_list[0].kwargs[
-                "ExpressionAttributeNames"
-            ].values(),
+        transaction = writer.call_args.kwargs["TransactItems"]
+        self.assertEqual(len(transaction), 3)
+        audit_update = transaction[0]["Update"]
+        self.assertIn("#ttl = :ttl", audit_update["UpdateExpression"])
+        audit_values = deserialize_item(audit_update["ExpressionAttributeValues"])
+        self.assertEqual(
+            audit_values[":ttl"],
+            int(FIXED_NOW.timestamp()) + store.FAILED_AUDIT_TTL_SECONDS,
         )
-        self.assertFalse(hasattr(resource, "delete_item") and resource.delete_item.called)
+        self.assertTrue(all("Delete" in item for item in transaction[1:]))
+        deleted_sort_keys = {
+            deserialize_item(item["Delete"]["Key"])["SK"]
+            for item in transaction[1:]
+        }
+        self.assertEqual(
+            deleted_sort_keys, {store.ACTIVE_SK, store.BILLING_RECOVERY_SK},
+        )
+
+    @patch.object(store, "utc_now", return_value=FIXED_NOW)
+    @patch.object(store, "_request_by_digest")
+    def test_partial_failure_retains_lock_and_recovery_without_ttl(
+        self, request_by_digest, utc_now,
+    ):
+        request_by_digest.return_value = {
+            "requestId": REQUEST_ID,
+            "status": "FAILED",
+            "failureCode": "S3DeletionUnavailable",
+            "retryable": True,
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        resource = SimpleNamespace(name="journalm8-test-main")
+        writer = MagicMock()
+
+        store.fail_deletion_request(
+            subject="subject-a",
+            request_id=REQUEST_ID,
+            failure_code="S3DeletionUnavailable",
+            retryable=True,
+            phase="DELETE_RAW_OBJECTS",
+            destructive_started=True,
+            table_resource=resource,
+            transact_writer=writer,
+        )
+
+        transaction = writer.call_args.kwargs["TransactItems"]
+        self.assertEqual(len(transaction), 3)
+        self.assertTrue(all("Update" in item for item in transaction))
+        self.assertTrue(all(
+            "REMOVE #ttl" in item["Update"]["UpdateExpression"]
+            for item in transaction
+        ))
+        serialized = json.dumps(transaction)
+        self.assertNotIn(f'"{store.TTL_ATTRIBUTE}": {{"N"', serialized)
+        lock_values = deserialize_item(
+            transaction[1]["Update"]["ExpressionAttributeValues"]
+        )
+        self.assertEqual(lock_values[":active"], "IN_PROGRESS")
+
+    @patch.object(store, "utc_now", return_value=FIXED_NOW)
+    @patch.object(store, "_request_by_digest")
+    def test_destructive_boundary_atomically_removes_all_coordination_ttls(
+        self, request_by_digest, utc_now,
+    ):
+        request_by_digest.return_value = {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        writer = MagicMock()
+
+        result = store.begin_destructive_deletion(
+            subject="subject-a",
+            request_id=REQUEST_ID,
+            table_resource=SimpleNamespace(name="journalm8-test-main"),
+            transact_writer=writer,
+        )
+
+        self.assertEqual(result["destructiveStartedAt"], "2026-08-30T12:00:00Z")
+        transaction = writer.call_args.kwargs["TransactItems"]
+        self.assertEqual(len(transaction), 3)
+        self.assertTrue(all("Update" in item for item in transaction))
+        self.assertIn(
+            "destructiveStartedAt = if_not_exists",
+            transaction[0]["Update"]["UpdateExpression"],
+        )
+        self.assertTrue(all(
+            "REMOVE #ttl" in item["Update"]["UpdateExpression"]
+            for item in transaction
+        ))
+        self.assertEqual(
+            {
+                deserialize_item(item["Update"]["Key"])["SK"]
+                for item in transaction[1:]
+            },
+            {store.ACTIVE_SK, store.BILLING_RECOVERY_SK},
+        )
+
+    @patch.object(store, "utc_now", return_value=FIXED_NOW)
+    @patch.object(store, "_request_by_digest")
+    def test_raw_stripe_identifier_is_temporary_recovery_data_only(
+        self, request_by_digest, utc_now,
+    ):
+        resource = MagicMock()
+        resource.name = "journalm8-test-main"
+
+        store.write_billing_recovery(
+            subject="subject-a",
+            request_id=REQUEST_ID,
+            customer_id="cus_private_recovery",
+            livemode=False,
+            table_resource=resource,
+        )
+
+        recovery = resource.put_item.call_args.kwargs["Item"]
+        self.assertEqual(recovery["stripeCustomerId"], "cus_private_recovery")
+        self.assertIn(store.TTL_ATTRIBUTE, recovery)
+        request_by_digest.return_value = {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        writer = MagicMock()
+
+        store.begin_destructive_deletion(
+            subject="subject-a",
+            request_id=REQUEST_ID,
+            table_resource=resource,
+            transact_writer=writer,
+        )
+
+        boundary = json.dumps(writer.call_args.kwargs["TransactItems"])
+        self.assertNotIn("cus_private_recovery", boundary)
+        self.assertNotIn("stripeCustomerId", boundary)
+
+    @patch.object(store, "_get_item")
+    def test_billing_recovery_remains_discoverable_after_user_partition_is_gone(
+        self, get_item,
+    ):
+        recovery = {
+            "PK": store.subject_pk(store.subject_digest("subject-a")),
+            "SK": store.BILLING_RECOVERY_SK,
+            "requestId": REQUEST_ID,
+            "stripeCustomerId": "cus_private_recovery",
+            "livemode": False,
+        }
+        get_item.return_value = recovery
+
+        self.assertEqual(
+            store.get_billing_recovery(
+                subject="subject-a",
+                request_id=REQUEST_ID,
+                table_resource=SimpleNamespace(name="journalm8-test-main"),
+            ),
+            recovery,
+        )
+        self.assertNotIn(store.TTL_ATTRIBUTE, recovery)
+
+    @patch.object(
+        store,
+        "utc_now",
+        return_value=datetime(2035, 1, 1, tzinfo=timezone.utc),
+    )
+    @patch.object(store, "_get_item")
+    def test_durable_active_lock_survives_far_beyond_former_ttl(
+        self, get_item, utc_now,
+    ):
+        get_item.return_value = {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2025-01-01T00:00:00Z",
+        }
+
+        self.assertTrue(store.has_active_deletion("subject-a"))
+
+    @patch.object(store, "_request_by_digest")
+    def test_same_request_resumes_long_after_partial_failure_without_ttl(
+        self, request_by_digest,
+    ):
+        failed = {
+            "requestId": REQUEST_ID,
+            "status": "FAILED",
+            "destructiveStartedAt": "2025-01-01T00:00:00Z",
+            "failureCode": "S3DeletionUnavailable",
+        }
+        resumed = {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2025-01-01T00:00:00Z",
+        }
+        request_by_digest.side_effect = [failed, resumed]
+        writer = MagicMock()
+
+        result = store.start_deletion_request(
+            subject="subject-a",
+            request_id=REQUEST_ID,
+            table_resource=SimpleNamespace(name="journalm8-test-main"),
+            transact_writer=writer,
+        )
+
+        self.assertEqual(result, resumed)
+        transaction = writer.call_args.kwargs["TransactItems"]
+        self.assertEqual(len(transaction), 3)
+        self.assertTrue(all(
+            "REMOVE" in item["Update"]["UpdateExpression"]
+            and "#ttl" in item["Update"]["UpdateExpression"]
+            for item in transaction
+        ))
+
+    @patch.object(store, "utc_now", return_value=FIXED_NOW)
+    @patch.object(store, "_request_by_digest")
+    def test_completion_requires_verification_then_removes_lock_and_recovery(
+        self, request_by_digest, utc_now,
+    ):
+        in_progress = {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+            "verifiedAt": "2026-08-30T12:00:00Z",
+        }
+        completed = {
+            "requestId": REQUEST_ID,
+            "status": "COMPLETED",
+            "completedAt": "2026-08-30T12:00:00Z",
+        }
+        request_by_digest.side_effect = [in_progress, completed]
+        resource = SimpleNamespace(name="journalm8-test-main")
+        writer = MagicMock()
+
+        result = store.complete_deletion_request(
+            subject="subject-a",
+            request_id=REQUEST_ID,
+            table_resource=resource,
+            transact_writer=writer,
+        )
+
+        self.assertEqual(result["status"], "COMPLETED")
+        transaction = writer.call_args.kwargs["TransactItems"]
+        self.assertEqual(len(transaction), 3)
+        self.assertIn(
+            "attribute_exists(verifiedAt)",
+            transaction[0]["Update"]["ConditionExpression"],
+        )
+        deleted_sort_keys = {
+            deserialize_item(item["Delete"]["Key"])["SK"]
+            for item in transaction[1:]
+        }
+        self.assertEqual(deleted_sort_keys, {store.ACTIVE_SK, store.BILLING_RECOVERY_SK})
+        serialized = json.dumps(transaction)
+        self.assertNotIn("cus_private_recovery", serialized)
+        completion_values = deserialize_item(
+            transaction[0]["Update"]["ExpressionAttributeValues"]
+        )
+        self.assertEqual(
+            set(completion_values),
+            {":completed", ":completed_at", ":subject"},
+        )
+
+    @patch("builtins.print")
+    @patch.object(store, "_request_by_digest")
+    def test_completion_conditional_conflict_is_nonretryable_invariant(
+        self, request_by_digest, log,
+    ):
+        request_by_digest.return_value = {
+            "requestId": REQUEST_ID,
+            "status": "IN_PROGRESS",
+            "verifiedAt": "2026-08-30T12:00:00Z",
+        }
+        writer = MagicMock(side_effect=ClientError({
+            "Error": {"Code": "TransactionCanceledException", "Message": "private"},
+            "CancellationReasons": [
+                {"Code": "None"},
+                {"Code": "ConditionalCheckFailed", "Message": "private"},
+                {"Code": "None"},
+            ],
+        }, "TransactWriteItems"))
+        with self.assertRaises(store.DeletionStoreInvariant):
+            store.complete_deletion_request(
+                subject="subject-a",
+                request_id=REQUEST_ID,
+                table_resource=SimpleNamespace(name="journalm8-test-main"),
+                transact_writer=writer,
+            )
+        log.assert_not_called()
 
 
 if __name__ == "__main__":

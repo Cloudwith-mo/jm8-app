@@ -4,6 +4,12 @@ from typing import Any
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from account_deletion_guard import (
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+    ensure_user_mutation_allowed,
+)
+
 from ocr import extract_text_from_s3_image
 from storage import (
     OcrStateError,
@@ -131,6 +137,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if not entry_id:
         raise ValueError("entryId is required.")
 
+    ensure_user_mutation_allowed(user_id)
+
     entry = get_entry_by_id(
         user_id=user_id,
         entry_id=entry_id,
@@ -152,6 +160,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     try:
         _ensure_upload_is_ready(bucket=bucket, key=key)
     except OcrInputError as exc:
+        ensure_user_mutation_allowed(user_id)
         mark_ocr_failed(
             user_id=user_id,
             entry_id=entry_id,
@@ -174,6 +183,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             key=key,
         )
 
+        ensure_user_mutation_allowed(user_id)
         updated_entry = update_entry_ocr_result(
             user_id=user_id,
             entry_id=entry_id,
@@ -201,6 +211,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         return result
 
+    except (AccountDeletionInProgress, DeletionGuardUnavailable):
+        raise
     except Exception as exc:
         try:
             _raise_classified_ocr_error(exc)
@@ -216,6 +228,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         except OcrInputError as classified_exc:
             exc = classified_exc
 
+        ensure_user_mutation_allowed(user_id)
         failed_entry = mark_ocr_failed(
             user_id=user_id,
             entry_id=entry_id,

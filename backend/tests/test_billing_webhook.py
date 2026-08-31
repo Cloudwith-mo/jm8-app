@@ -7,6 +7,7 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
@@ -18,10 +19,15 @@ os.environ.setdefault("RAW_BUCKET", "journalm8-test-raw")
 
 
 from billing_identity import build_billing_user_reference  # noqa: E402
+from account_deletion_guard import (  # noqa: E402
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+)
 from billing_webhook import (  # noqa: E402
     BillingWebhookError,
     process_billing_webhook,
 )
+import billing_webhook as webhook  # noqa: E402
 from stripe_secret_loader import StripeSecretLoadError  # noqa: E402
 
 
@@ -86,6 +92,45 @@ def customer_reader(customer_id, *, livemode):
 
 
 class BillingWebhookTests(unittest.TestCase):
+    def test_entitlement_write_is_blocked_or_fails_closed_during_deletion(self):
+        for error, expected_status, expected_code in (
+            (AccountDeletionInProgress(), 409, "AccountDeletionInProgress"),
+            (DeletionGuardUnavailable(), 503, "AccountDeletionGuardUnavailable"),
+        ):
+            reader = MagicMock()
+            creator = MagicMock()
+            replacer = MagicMock()
+            customer_lookup = MagicMock(side_effect=customer_reader)
+
+            def blocked(_user_id, raised=error):
+                values.assert_called_once()
+                raise raised
+
+            with (
+                self.subTest(expected_code=expected_code),
+                patch.object(
+                    webhook,
+                    "_entitlement_values",
+                    wraps=webhook._entitlement_values,
+                ) as values,
+                self.assertRaises(BillingWebhookError) as captured,
+            ):
+                process_billing_webhook(
+                    signed_event(checkout_payload()),
+                    secret_loader=lambda _environment: {"STRIPE_WEBHOOK_SECRET": SECRET},
+                    customer_reader=customer_lookup,
+                    deletion_guard=blocked,
+                    entitlement_reader=reader,
+                    entitlement_creator=creator,
+                    entitlement_replacer=replacer,
+                )
+            self.assertEqual(captured.exception.status_code, expected_status)
+            self.assertEqual(captured.exception.code, expected_code)
+            customer_lookup.assert_called_once_with(CUSTOMER_ID, livemode=False)
+            reader.assert_not_called()
+            creator.assert_not_called()
+            replacer.assert_not_called()
+
     def test_completed_checkout_creates_active_pro_entitlement(self):
         writes = []
 
@@ -95,6 +140,7 @@ class BillingWebhookTests(unittest.TestCase):
                 "STRIPE_WEBHOOK_SECRET": SECRET,
             },
             customer_reader=customer_reader,
+            deletion_guard=lambda _user_id: None,
             entitlement_reader=lambda _user_id: None,
             entitlement_creator=lambda user_id, **values: writes.append((user_id, values)) or values,
             entitlement_replacer=lambda *_args, **_kwargs: self.fail("replace must not run"),
@@ -163,6 +209,7 @@ class BillingWebhookTests(unittest.TestCase):
                 "STRIPE_WEBHOOK_SECRET": SECRET,
             },
             customer_reader=customer_reader,
+            deletion_guard=lambda _user_id: None,
             entitlement_reader=lambda _user_id: {"updatedAt": "2026-01-01T00:00:00+00:00"},
             entitlement_creator=lambda *_args, **_kwargs: self.fail("create must not run"),
             entitlement_replacer=lambda user_id, **values: writes.append((user_id, values)) or values,
@@ -196,6 +243,7 @@ class BillingWebhookTests(unittest.TestCase):
             signed_event(payload),
             secret_loader=lambda _environment: {"STRIPE_WEBHOOK_SECRET": SECRET},
             customer_reader=customer_reader,
+            deletion_guard=lambda _user_id: None,
             entitlement_reader=lambda _user_id: {"updatedAt": "2026-01-01T00:00:00+00:00"},
             entitlement_creator=lambda *_args, **_kwargs: self.fail("create must not run"),
             entitlement_replacer=lambda user_id, **values: writes.append((user_id, values)) or values,
@@ -228,6 +276,7 @@ class BillingWebhookTests(unittest.TestCase):
             signed_event(payload),
             secret_loader=lambda _environment: {"STRIPE_WEBHOOK_SECRET": SECRET},
             customer_reader=customer_reader,
+            deletion_guard=lambda _user_id: None,
             entitlement_reader=lambda _user_id: {"updatedAt": "2026-01-01T00:00:00+00:00"},
             entitlement_creator=lambda *_args, **_kwargs: self.fail("create must not run"),
             entitlement_replacer=lambda user_id, **values: writes.append((user_id, values)) or values,

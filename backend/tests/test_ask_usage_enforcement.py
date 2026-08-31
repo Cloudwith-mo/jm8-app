@@ -401,6 +401,11 @@ class AskUsageHelperTests(
 class AskUsageApiTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def test_quota_limit_returns_429_before_answer(
         self,
     ):

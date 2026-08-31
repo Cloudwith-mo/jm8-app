@@ -35,6 +35,10 @@ from account_export_store import (
     release_active_lock,
     update_export_status,
 )
+from account_deletion_guard import (
+    AccountDeletionInProgress,
+    ensure_user_mutation_allowed,
+)
 from storage import RAW_BUCKET, table, user_pk
 
 
@@ -279,6 +283,7 @@ def run_export(user_id: str, export_id: str) -> dict[str, Any]:
         file_name = archive_path.name
         key = f"{export_object_prefix(user_id, export_id)}{file_name}"
         validate_export_object_key(user_id, export_id, key)
+        ensure_user_mutation_allowed(user_id)
         with archive_path.open("rb") as body:
             s3.put_object(
                 Bucket=EXPORT_BUCKET, Key=key, Body=body,
@@ -286,6 +291,7 @@ def run_export(user_id: str, export_id: str) -> dict[str, Any]:
                 ContentDisposition=f'attachment; filename="{file_name}"',
                 ServerSideEncryption="AES256",
             )
+        ensure_user_mutation_allowed(user_id)
         completed = utc_now()
         completed_job = update_export_status(
             user_id, export_id, "COMPLETED",
@@ -309,6 +315,10 @@ def run_export(user_id: str, export_id: str) -> dict[str, Any]:
 def record_failure(user_id: str, export_id: str, error_code: str = "ExportFailed") -> dict[str, str]:
     if not user_id or not is_valid_export_id(export_id):
         raise ExportSecurityError("invalid workflow input")
+    try:
+        ensure_user_mutation_allowed(user_id)
+    except AccountDeletionInProgress:
+        return {"exportId": export_id, "status": "ABORTED"}
     # PutObject is atomic: a failed upload leaves no readable destination
     # object. Multipart uploads, if introduced, are aborted by the scoped role
     # and the bucket lifecycle safety rule.

@@ -33,9 +33,11 @@ ZIP_FILE="dist/function.zip"
 OCR_WORKFLOW_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 HISTORICAL_REANALYSIS_WORKFLOW_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
 ACCOUNT_EXPORT_WORKFLOW_NAME="${APP_NAME}-${STAGE}-account-export-workflow"
+ACCOUNT_DELETION_WORKFLOW_NAME="${APP_NAME}-${STAGE}-account-deletion-workflow"
 API_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-ocr-workflow"
 API_HISTORICAL_REANALYSIS_WORKFLOW_POLICY_NAME="${APP_NAME}-${STAGE}-start-historical-reanalysis-workflow"
 API_ACCOUNT_EXPORT_POLICY_NAME="${APP_NAME}-${STAGE}-account-export"
+API_ACCOUNT_DELETION_POLICY_NAME="${APP_NAME}-${STAGE}-start-account-deletion-workflow"
 API_BATCH_WRITE_POLICY_NAME="${APP_NAME}-${STAGE}-batch-write-main-table"
 API_STRIPE_SECRET_POLICY_NAME="${APP_NAME}-${STAGE}-read-stripe-secret"
 
@@ -110,6 +112,18 @@ if [ -z "$ACCOUNT_EXPORT_WORKFLOW_ARN" ] || [ "$ACCOUNT_EXPORT_WORKFLOW_ARN" = "
   echo "Account export workflow was not found."
   echo "Run: ./bin/deploy-account-export"
   exit 1
+fi
+
+echo "Resolving optional account deletion workflow: $ACCOUNT_DELETION_WORKFLOW_NAME"
+ACCOUNT_DELETION_WORKFLOW_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "stateMachines[?name=='${ACCOUNT_DELETION_WORKFLOW_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+if [ "$ACCOUNT_DELETION_WORKFLOW_ARN" = "None" ]; then
+  ACCOUNT_DELETION_WORKFLOW_ARN=""
 fi
 
 TABLE_ARN="$(
@@ -240,6 +254,34 @@ aws iam put-role-policy \
 
 echo "API role can coordinate and download completed account exports."
 
+if [ -n "$ACCOUNT_DELETION_WORKFLOW_ARN" ]; then
+  python3 - "$ACCOUNT_DELETION_WORKFLOW_ARN" \
+    > .build/api-account-deletion-policy.json <<'PY_ACCOUNT_DELETION'
+import json
+import sys
+print(json.dumps({"Version":"2012-10-17","Statement":[{
+    "Effect":"Allow",
+    "Action":["states:StartExecution","states:ListExecutions"],
+    "Resource":sys.argv[1],
+}]}))
+PY_ACCOUNT_DELETION
+  aws iam put-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
+    --policy-document file://.build/api-account-deletion-policy.json \
+    --profile "$AWS_PROFILE"
+else
+  if aws iam get-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
+    --profile "$AWS_PROFILE" >/dev/null 2>&1; then
+    aws iam delete-role-policy \
+      --role-name "$ROLE_NAME" \
+      --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
+      --profile "$AWS_PROFILE"
+  fi
+fi
+
 echo "Verifying Stripe secret reference."
 
 aws secretsmanager describe-secret \
@@ -320,6 +362,7 @@ export RAW_BUCKET
 export OCR_WORKFLOW_ARN
 export HISTORICAL_REANALYSIS_WORKFLOW_ARN
 export ACCOUNT_EXPORT_WORKFLOW_ARN
+export ACCOUNT_DELETION_WORKFLOW_ARN
 export EXPORT_BUCKET
 export BEDROCK_ANALYSIS_MODEL_ID
 export ANALYSIS_SCHEMA_VERSION
@@ -381,6 +424,12 @@ for key in environment_keys:
         )
 
     variables[key] = value
+
+optional_workflow_arn = str(
+    os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN") or ""
+).strip()
+if optional_workflow_arn:
+    variables["ACCOUNT_DELETION_WORKFLOW_ARN"] = optional_workflow_arn
 
 if "STRIPE_SECRET_KEY" in variables:
     raise SystemExit(

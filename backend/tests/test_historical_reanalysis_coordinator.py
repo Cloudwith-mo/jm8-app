@@ -36,11 +36,22 @@ from storage import (  # noqa: E402
     historical_reanalysis_page_id,
     summarize_historical_reanalysis_results,
 )
+from account_deletion_guard import (  # noqa: E402
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+)
 
 
 class HistoricalReanalysisCoordinatorTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch(
+            "historical_reanalysis_coordinator.ensure_user_mutation_allowed"
+        )
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def test_invalid_action_is_rejected(
         self,
     ):
@@ -155,6 +166,61 @@ class HistoricalReanalysisCoordinatorTests(
         self.assertTrue(
             result["hasMore"]
         )
+
+    def test_final_guard_blocks_page_and_failure_persistence(self):
+        event = {
+            "action": "RECORD",
+            "userId": "user-test",
+            "jobId": "reanalysis-test",
+            "page": {"pageId": "a" * 32, "hasMore": False},
+            "results": [{"outcome": "COMPLETED"}],
+        }
+        for guard_error in (
+            AccountDeletionInProgress(),
+            DeletionGuardUnavailable(),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch(
+                    "historical_reanalysis_coordinator.ensure_user_mutation_allowed",
+                    side_effect=guard_error,
+                ),
+                patch(
+                    "historical_reanalysis_coordinator.record_historical_reanalysis_page",
+                ) as record_page,
+                patch(
+                    "historical_reanalysis_coordinator.fail_historical_reanalysis_job",
+                ) as fail_job,
+                self.assertRaises(type(guard_error)),
+            ):
+                lambda_handler(event, None)
+            record_page.assert_not_called()
+            fail_job.assert_not_called()
+
+    def test_workflow_failure_handler_also_fails_closed(self):
+        event = {
+            "action": "FAIL",
+            "userId": "user-test",
+            "jobId": "reanalysis-test",
+            "workflowError": {"Error": "SyntheticFailure"},
+        }
+        for guard_error in (
+            AccountDeletionInProgress(),
+            DeletionGuardUnavailable(),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch(
+                    "historical_reanalysis_coordinator.ensure_user_mutation_allowed",
+                    side_effect=guard_error,
+                ),
+                patch(
+                    "historical_reanalysis_coordinator.fail_historical_reanalysis_job",
+                ) as fail_job,
+                self.assertRaises(type(guard_error)),
+            ):
+                lambda_handler(event, None)
+            fail_job.assert_not_called()
 
     @patch(
         "historical_reanalysis_coordinator."

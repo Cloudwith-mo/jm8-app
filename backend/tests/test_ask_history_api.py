@@ -294,6 +294,11 @@ class AskHistoryApiServiceTests(
 class AskHistoryApiRouteTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     @patch(
         "app.list_ask_history_for_api"
     )

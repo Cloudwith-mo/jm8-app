@@ -129,6 +129,11 @@ def portal_event():
 class BillingCheckoutRouteTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def test_webhook_route_runs_before_authenticated_user_resolution(self):
         with patch.object(
             app,

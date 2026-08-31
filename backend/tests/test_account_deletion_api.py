@@ -7,6 +7,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import ClientError
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "function"))
 
@@ -50,6 +52,58 @@ def request(status="REQUESTED"):
 
 
 class AccountDeletionApiTests(unittest.TestCase):
+    def test_default_starter_uses_minimum_safe_input_and_exact_execution_name(self):
+        client = MagicMock(return_value=None)
+        client.start_execution.return_value = {
+            "executionArn": "arn:aws:states:us-east-1:000:execution:deletion:test",
+        }
+        with patch.dict(os.environ, {
+            "ACCOUNT_DELETION_WORKFLOW_ARN": "arn:aws:states:us-east-1:000:stateMachine:deletion",
+        }):
+            result = api.start_account_deletion_workflow(
+                request_id=REQUEST_ID,
+                subject="raw-cognito-subject",
+                client=client,
+            )
+        self.assertIn("executionArn", result)
+        arguments = client.start_execution.call_args.kwargs
+        self.assertEqual(arguments["name"], REQUEST_ID)
+        self.assertEqual(json.loads(arguments["input"]), {
+            "requestId": REQUEST_ID,
+            "userId": "raw-cognito-subject",
+        })
+        for forbidden in ("email", "requestToken", "claims", "stripe"):
+            self.assertNotIn(forbidden, arguments["input"])
+
+    def test_execution_already_exists_requires_exact_request_name(self):
+        error = ClientError({
+            "Error": {"Code": "ExecutionAlreadyExists", "Message": "private"},
+        }, "StartExecution")
+        client = MagicMock()
+        client.start_execution.side_effect = error
+        client.list_executions.return_value = {"executions": [{
+            "name": REQUEST_ID,
+            "executionArn": "arn:aws:states:us-east-1:000:execution:deletion:actual",
+        }]}
+        with patch.dict(os.environ, {
+            "ACCOUNT_DELETION_WORKFLOW_ARN": "arn:aws:states:us-east-1:000:stateMachine:deletion",
+        }):
+            result = api.start_account_deletion_workflow(
+                request_id=REQUEST_ID, subject="subject-a", client=client,
+            )
+        self.assertEqual(result["executionArn"], client.list_executions.return_value["executions"][0]["executionArn"])
+
+        client.list_executions.return_value = {"executions": [{
+            "name": "del_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "executionArn": "arn:aws:states:us-east-1:000:execution:deletion:other",
+        }]}
+        with patch.dict(os.environ, {
+            "ACCOUNT_DELETION_WORKFLOW_ARN": "arn:aws:states:us-east-1:000:stateMachine:deletion",
+        }), self.assertRaises(ClientError):
+            api.start_account_deletion_workflow(
+                request_id=REQUEST_ID, subject="subject-a", client=client,
+            )
+
     @patch.object(api.time, "time", return_value=NOW)
     def test_recent_authentication_rejects_missing_stale_and_future_claims(self, now):
         starter = MagicMock()
@@ -221,6 +275,7 @@ class AccountDeletionApiTests(unittest.TestCase):
         log_text = " ".join(call.args[0] for call in log.call_args_list)
         self.assertNotIn("subject-a", log_text)
         self.assertNotIn("private@example.com", log_text)
+        self.assertNotIn("cus_secret", log_text)
         self.assertNotIn(VALID_BODY["requestToken"], log_text)
 
     @patch("builtins.print")

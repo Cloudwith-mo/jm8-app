@@ -125,6 +125,11 @@ def analyzed_entry() -> dict:
 class AskJm8ApiTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     @patch(
         "app.complete_ask_usage"
     )

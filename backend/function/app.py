@@ -85,6 +85,12 @@ from account_deletion_api import (
     create_account_deletion_request,
     get_account_deletion_request,
 )
+from account_deletion_guard import (
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+    ensure_user_mutation_allowed,
+    route_requires_deletion_guard,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -114,6 +120,24 @@ from storage import (
     update_entry_review,
     delete_entry,
 )
+
+
+def deletion_guard_response(user_id):
+    try:
+        ensure_user_mutation_allowed(user_id)
+    except AccountDeletionInProgress:
+        return response(409, {
+            "error": "AccountDeletionInProgress",
+            "message": "Account deletion is in progress.",
+            "retryable": False,
+        })
+    except DeletionGuardUnavailable:
+        return response(503, {
+            "error": "AccountDeletionGuardUnavailable",
+            "message": "Account status is temporarily unavailable.",
+            "retryable": True,
+        })
+    return None
 
 
 def lambda_handler(event, context):
@@ -189,6 +213,9 @@ def lambda_handler(event, context):
             export_user_id = str(claims["sub"])
             try:
                 if method == "POST" and path == "/account/exports":
+                    guard_response = deletion_guard_response(export_user_id)
+                    if guard_response is not None:
+                        return guard_response
                     try:
                         export_body = parse_body(event)
                     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
@@ -225,6 +252,11 @@ def lambda_handler(event, context):
                 "error": "Unauthorized",
                 "message": "Authentication is required.",
             })
+
+        if route_requires_deletion_guard(method, path):
+            guard_response = deletion_guard_response(user_id)
+            if guard_response is not None:
+                return guard_response
 
         if method == "POST" and path == "/entries":
             body = parse_body(event)
@@ -668,6 +700,9 @@ def lambda_handler(event, context):
                 })
 
             try:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 history = (
                     persist_ask_history(
                         user_id,
@@ -1138,6 +1173,9 @@ def lambda_handler(event, context):
                     type(exc).__name__
                 )
 
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 try:
                     failed_job = (
                         fail_historical_reanalysis_job(
@@ -1398,6 +1436,9 @@ def lambda_handler(event, context):
                     type(exc).__name__
                 )
 
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 try:
                     failed_job = (
                         fail_historical_reanalysis_job(
@@ -1673,6 +1714,9 @@ def lambda_handler(event, context):
                 )
 
             except AnalyzerInputError as exc:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 fail_entry_analysis_usage(
                     user_id,
                     analysis_usage_reservation,
@@ -1703,6 +1747,9 @@ def lambda_handler(event, context):
                 })
 
             except AnalyzerInvocationError as exc:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 fail_entry_analysis_usage(
                     user_id,
                     analysis_usage_reservation,
@@ -1759,6 +1806,9 @@ def lambda_handler(event, context):
                 )
 
             except AnalyzerResponseError as exc:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 fail_entry_analysis_usage(
                     user_id,
                     analysis_usage_reservation,
@@ -1796,6 +1846,9 @@ def lambda_handler(event, context):
                 })
 
             try:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 updated_entry = update_entry_analysis(
                     user_id=user_id,
                     entry_id=entry_id,
@@ -1927,6 +1980,9 @@ def lambda_handler(event, context):
                     force=force,
                 )
             except Exception as exc:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 failed_entry = mark_ocr_failed(
                     user_id=user_id,
                     entry_id=entry_id,
@@ -1987,6 +2043,9 @@ def lambda_handler(event, context):
                     entry_id=entry_id,
                 )
             except Exception as exc:
+                guard_response = deletion_guard_response(user_id)
+                if guard_response is not None:
+                    return guard_response
                 failed_entry = mark_ocr_failed(
                     user_id=user_id,
                     entry_id=entry_id,

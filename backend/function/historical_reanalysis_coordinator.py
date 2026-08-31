@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+from account_deletion_guard import ensure_user_mutation_allowed
+
 from storage import (
     begin_historical_reanalysis_job,
     fail_historical_reanalysis_job,
@@ -57,6 +59,7 @@ def prepare_page(
         event,
         "jobId",
     )
+    ensure_user_mutation_allowed(user_id)
 
     cursor_value = event.get("cursor")
 
@@ -128,7 +131,6 @@ def record_page(
         event,
         "jobId",
     )
-
     page = event.get("page")
     results = event.get("results")
 
@@ -155,6 +157,7 @@ def record_page(
         "nextCursor"
     )
 
+    ensure_user_mutation_allowed(user_id)
     job = record_historical_reanalysis_page(
         user_id,
         job_id,
@@ -264,7 +267,6 @@ def record_workflow_failure(
         event,
         "jobId",
     )
-
     workflow_error = event.get(
         "workflowError"
     )
@@ -280,6 +282,7 @@ def record_workflow_failure(
         or "WorkflowFailure"
     ).strip()
 
+    ensure_user_mutation_allowed(user_id)
     job = fail_historical_reanalysis_job(
         user_id,
         job_id,

@@ -46,6 +46,10 @@ STRIPE_CUSTOMER_PATTERN = re.compile(
     r"^cus_[A-Za-z0-9]{6,}$"
 )
 
+STRIPE_SUBSCRIPTION_PATTERN = re.compile(
+    r"^sub_[A-Za-z0-9]{6,}$"
+)
+
 STRIPE_USER_REFERENCE_PATTERN = (
     re.compile(
         r"^jm8usr_[0-9a-f]{32}$"
@@ -918,6 +922,33 @@ class StripeCheckoutGateway:
                 return subscription
 
         return None
+
+    def stop_subscription_renewal(
+        self,
+        subscription_id: Any,
+    ) -> dict[str, Any]:
+        normalized = str(
+            subscription_id or ""
+        ).strip()
+        if STRIPE_SUBSCRIPTION_PATTERN.fullmatch(normalized) is None:
+            raise _invalid_gateway_input(
+                "InvalidStripeSubscription",
+                "A valid Stripe subscription identifier is required.",
+            )
+        subscription = self._request(
+            "POST",
+            "/subscriptions/" + quote(normalized, safe=""),
+            parameters=[("cancel_at_period_end", "true")],
+        )
+        if subscription.get("object") != "subscription":
+            raise StripeGatewayError(
+                "InvalidStripeSubscription",
+                "Stripe returned an invalid subscription.",
+                retryable=False,
+                status_code=502,
+            )
+        self._verify_livemode(subscription)
+        return subscription
 
     def create_checkout_session(
         self,

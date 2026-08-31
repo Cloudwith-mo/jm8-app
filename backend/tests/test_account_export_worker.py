@@ -22,12 +22,21 @@ os.environ.setdefault("RAW_BUCKET", "journalm8-test-raw-000000000000")
 os.environ.setdefault("EXPORT_BUCKET", "journalm8-test-exports-000000000000")
 
 import account_export_worker as worker  # noqa: E402
+from account_deletion_guard import (  # noqa: E402
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+)
 
 
 EXPORT_ID = "exp_20260828T121314Z_aaaaaaaaaaaaaaaa"
 
 
 class AccountExportWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.guard = patch.object(worker, "ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def _job(self):
         return {
             "exportId": EXPORT_ID, "userId": "user-a", "status": "QUEUED",
@@ -196,6 +205,97 @@ class AccountExportWorkerTests(unittest.TestCase):
         fail.assert_called_once_with(
             "user-a", EXPORT_ID, "ExportFailed", "The export could not be completed.", True
         )
+
+    def test_final_guard_blocks_archive_and_status_writes_after_assembly(self):
+        for guard_error in (
+            AccountDeletionInProgress(),
+            DeletionGuardUnavailable(),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch.object(worker, "get_export_job", return_value=self._job()),
+                patch.object(worker, "_query_user_records", return_value=[]) as query,
+                patch.object(worker, "_build_zip", wraps=worker._build_zip) as build_zip,
+                patch.object(worker.s3, "put_object") as put_object,
+                patch.object(worker, "update_export_status") as update,
+                patch.object(worker, "release_active_lock") as release,
+                patch.object(
+                    worker,
+                    "ensure_user_mutation_allowed",
+                    side_effect=guard_error,
+                ),
+                self.assertRaises(type(guard_error)),
+            ):
+                update.side_effect = (
+                    lambda _user_id, _export_id, status, **values:
+                    {"status": status, **values}
+                )
+                worker.run_export("user-a", EXPORT_ID)
+
+            query.assert_called_once()
+            build_zip.assert_called()
+            put_object.assert_not_called()
+            self.assertEqual(
+                [call.args[2] for call in update.call_args_list],
+                ["RUNNING"],
+            )
+            release.assert_not_called()
+
+    def test_failure_writer_also_fails_closed_after_deletion_starts(self):
+        for guard_error in (
+            AccountDeletionInProgress(),
+            DeletionGuardUnavailable(),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch.object(
+                    worker,
+                    "ensure_user_mutation_allowed",
+                    side_effect=guard_error,
+                ),
+                patch.object(worker, "fail_export") as fail_export,
+            ):
+                if isinstance(guard_error, AccountDeletionInProgress):
+                    result = worker.record_failure("user-a", EXPORT_ID)
+                    self.assertEqual(result["status"], "ABORTED")
+                else:
+                    with self.assertRaises(DeletionGuardUnavailable):
+                        worker.record_failure("user-a", EXPORT_ID)
+                fail_export.assert_not_called()
+
+    def test_guard_blocks_completion_if_deletion_starts_after_archive_upload(self):
+        for guard_error in (
+            AccountDeletionInProgress(),
+            DeletionGuardUnavailable(),
+        ):
+            with (
+                self.subTest(error=type(guard_error).__name__),
+                patch.object(worker, "get_export_job", return_value=self._job()),
+                patch.object(worker, "_query_user_records", return_value=[]),
+                patch.object(worker.s3, "put_object") as put_object,
+                patch.object(worker, "update_export_status") as update,
+                patch.object(worker, "release_active_lock") as release,
+                patch.object(worker, "fail_export") as fail_export,
+                patch.object(
+                    worker,
+                    "ensure_user_mutation_allowed",
+                    side_effect=[None, guard_error],
+                ),
+                self.assertRaises(type(guard_error)),
+            ):
+                update.side_effect = (
+                    lambda _user_id, _export_id, status, **values:
+                    {"status": status, **values}
+                )
+                worker.run_export("user-a", EXPORT_ID)
+
+            put_object.assert_called_once()
+            self.assertEqual(
+                [call.args[2] for call in update.call_args_list],
+                ["RUNNING"],
+            )
+            release.assert_not_called()
+            fail_export.assert_not_called()
 
 
 if __name__ == "__main__":

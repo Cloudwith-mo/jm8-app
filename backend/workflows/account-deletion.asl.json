@@ -1,0 +1,80 @@
+{
+  "Comment": "JM8 retry-safe account deletion",
+  "StartAt": "START",
+  "TimeoutSeconds": 7200,
+  "States": {
+    "START": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "START", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureSTART"}], "Next": "QUIESCE"
+    },
+    "QUIESCE": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "QUIESCE", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureQUIESCE"}], "Next": "Quiesced"
+    },
+    "Quiesced": {"Type": "Choice", "Choices": [{"Variable": "$.phaseResult.quiesced", "BooleanEquals": true, "Next": "CANCEL_SUBSCRIPTION"}], "Default": "QuiesceWait"},
+    "QuiesceWait": {"Type": "Wait", "SecondsPath": "$.phaseResult.waitSeconds", "Next": "QUIESCE"},
+    "CANCEL_SUBSCRIPTION": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "CANCEL_SUBSCRIPTION", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureCANCEL_SUBSCRIPTION"}], "Next": "DELETE_RAW_OBJECTS"
+    },
+    "DELETE_RAW_OBJECTS": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "DELETE_RAW_OBJECTS", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_RAW_OBJECTS"}], "Next": "DELETE_EXPORT_OBJECTS"
+    },
+    "DELETE_EXPORT_OBJECTS": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "DELETE_EXPORT_OBJECTS", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_EXPORT_OBJECTS"}], "Next": "DELETE_APPLICATION_DATA"
+    },
+    "DELETE_APPLICATION_DATA": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "DELETE_APPLICATION_DATA", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_APPLICATION_DATA"}], "Next": "DELETE_COGNITO_IDENTITY"
+    },
+    "DELETE_COGNITO_IDENTITY": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "DELETE_COGNITO_IDENTITY", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_COGNITO_IDENTITY"}], "Next": "VERIFY"
+    },
+    "VERIFY": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "VERIFY", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureVERIFY"}], "Next": "COMPLETE"
+    },
+    "COMPLETE": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "COMPLETE", "requestId.$": "$.requestId", "userId.$": "$.userId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureCOMPLETE"}], "End": true
+    },
+    "FailureSTART": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "START", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureQUIESCE": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "QUIESCE", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureCANCEL_SUBSCRIPTION": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "CANCEL_SUBSCRIPTION", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureDELETE_RAW_OBJECTS": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_RAW_OBJECTS", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureDELETE_EXPORT_OBJECTS": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_EXPORT_OBJECTS", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureDELETE_APPLICATION_DATA": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_APPLICATION_DATA", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureDELETE_COGNITO_IDENTITY": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_COGNITO_IDENTITY", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureVERIFY": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "VERIFY", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "FailureCOMPLETE": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "COMPLETE", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId", "userId.$": "$.userId"}, "Next": "ClassifyFailure"},
+    "ClassifyFailure": {"Type": "Choice", "Choices": [{"Variable": "$.failureCode", "StringMatches": "*AccountDeletionInvariantError", "Next": "MarkFailureNonRetryable"}], "Default": "FAIL"},
+    "MarkFailureNonRetryable": {"Type": "Pass", "Result": false, "ResultPath": "$.retryable", "Next": "FAIL"},
+    "FAIL": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Retry": [{"ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Next": "DeletionFailed"
+    },
+    "DeletionFailed": {"Type": "Fail", "Error": "AccountDeletionFailed", "Cause": "Account deletion failed; safe status is retained in the audit."}
+  }
+}

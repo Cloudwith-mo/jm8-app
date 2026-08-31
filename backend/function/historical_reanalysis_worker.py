@@ -1,6 +1,8 @@
 import json
 from typing import Any
 
+from account_deletion_guard import ensure_user_mutation_allowed
+
 from llm_journal_analyzer import (
     AnalyzerInputError,
     AnalyzerInvocationError,
@@ -46,6 +48,7 @@ def record_worker_failure(
     failure_message: str,
 ) -> None:
     try:
+        ensure_user_mutation_allowed(user_id)
         mark_entry_analysis_failed(
             user_id=user_id,
             entry_id=entry_id,
@@ -241,6 +244,7 @@ def process_historical_reanalysis_entry(
             sdkRetryAttempts=0,
         )
 
+    ensure_user_mutation_allowed(user_id)
     updated_entry = update_entry_analysis(
         user_id=user_id,
         entry_id=entry_id,

@@ -40,6 +40,11 @@ def event(method="GET", path="/account/exports", claims=None):
 
 
 class AccountExportApiTests(unittest.TestCase):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     def test_profile_includes_only_explicitly_verified_email(self):
         for verified in (True, "true"):
             with self.subTest(verified=verified):

@@ -41,6 +41,11 @@ def image_entry(*, attempt_count=1, ocr_status="FAILED"):
 
 
 class OcrJobsApiRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     @patch("app.list_ocr_jobs")
     def test_list_is_user_scoped_filtered_and_paginated(self, list_jobs):
         list_jobs.return_value = {

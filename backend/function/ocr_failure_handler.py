@@ -1,5 +1,6 @@
 from typing import Any
 
+from account_deletion_guard import ensure_user_mutation_allowed
 from storage import record_ocr_workflow_failure
 
 
@@ -30,6 +31,7 @@ def lambda_handler(
         or "The OCR workflow failed."
     )
 
+    ensure_user_mutation_allowed(user_id)
     updated_entry = record_ocr_workflow_failure(
         user_id=user_id,
         entry_id=entry_id,

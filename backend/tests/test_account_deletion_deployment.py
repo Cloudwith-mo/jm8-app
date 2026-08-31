@@ -122,34 +122,31 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         self.assertEqual(payload["error"], "AccountDeletionUnavailable")
         self.assertTrue(payload["retryable"])
 
-    def test_phase_3c3a_contains_no_destructive_service_operations(self):
-        source = "\n".join(
-            (ROOT / "function" / name).read_text()
-            for name in (
-                "account_deletion_contract.py",
-                "account_deletion_store.py",
-                "account_deletion_api.py",
-                "account_deletion_guard.py",
-            )
-        ).lower()
-        for forbidden in (
-            'boto3.client("s3")',
-            'boto3.client("cognito-idp")',
-            "import stripe",
-            "delete_user",
-            "admin_delete_user",
-            "batch_write_item",
-            "delete_item(",
-            "delete_object",
-            "delete_objects",
-            "subscription.delete",
+    def test_phase_3c3b_deployment_source_is_explicit_and_not_auto_invoked(self):
+        deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
+        main_deploy = (ROOT / "bin" / "deploy").read_text()
+        for required in (
+            "account_deletion_worker.lambda_handler",
+            "cognito-idp:AdminDeleteUser",
+            "dynamodb:BatchWriteItem",
+            "s3:DeleteObjectVersion",
+            "states:StopExecution",
+            "secretsmanager:GetSecretValue",
+            '"includeExecutionData":False',
+            '"level":"ERROR"',
+            "--reserved-concurrent-executions",
+            "put-metric-alarm",
+            "put-dashboard",
         ):
-            self.assertNotIn(forbidden, source)
+            self.assertIn(required, deploy)
+        self.assertNotIn("./bin/deploy-account-deletion", main_deploy)
+        self.assertIn("ACCOUNT_DELETION_WORKFLOW_ARN", main_deploy)
+        self.assertIn("states:StartExecution", main_deploy)
 
     def test_documented_contract_preserves_order_and_retention(self):
         self.assertIn("Phase 3C3 account deletion coordination", self.contract)
-        self.assertIn("Destructive account deletion execution is not", self.contract)
-        self.assertIn("Phase 3C3B/3C3C", self.contract)
+        self.assertIn("account deletion execution remains inactive", self.contract)
+        self.assertIn("Phase 3C3C", self.contract)
         for required in (
             "ACCOUNT_DELETION#<del_request_id>",
             "ACCOUNT_DELETION_SUBJECT#<subject_digest>",
@@ -161,13 +158,15 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         ):
             self.assertIn(required, self.contract)
         order = (
-            "Verify the requester",
-            "Block new writes",
-            "Cancel future Stripe subscription renewal",
-            "Delete every current and noncurrent S3 object version",
-            "Delete every item in the `USER#<user_id>` DynamoDB partition",
-            "Delete the corresponding `STRIPE_CUSTOMER#<mode>#<customer_id>`",
-            "Delete the Cognito identity last",
+            "`START` verifies",
+            "`QUIESCE` inspects",
+            "`CANCEL_SUBSCRIPTION` stops",
+            "`DELETE_RAW_OBJECTS` deletes",
+            "`DELETE_EXPORT_OBJECTS` performs",
+            "`DELETE_APPLICATION_DATA` repeatedly",
+            "`DELETE_COGNITO_IDENTITY` first",
+            "`VERIFY` proves",
+            "`COMPLETE` records",
         )
         positions = [self.contract.index(step) for step in order]
         self.assertEqual(positions, sorted(positions))

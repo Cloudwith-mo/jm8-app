@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required}"
+: "${AWS_REGION:?AWS_REGION is required}"
+: "${APP_NAME:?APP_NAME is required}"
+: "${STAGE:?STAGE is required}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required}"
+: "${TABLE_NAME:?TABLE_NAME is required}"
+: "${RAW_BUCKET:?RAW_BUCKET is required}"
+: "${EXPORT_BUCKET:?EXPORT_BUCKET is required}"
+: "${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required}"
+: "${STRIPE_SECRET_ARN:?STRIPE_SECRET_ARN is required}"
+: "${OCR_WORKFLOW_ARN:?OCR_WORKFLOW_ARN is required}"
+: "${HISTORICAL_REANALYSIS_WORKFLOW_ARN:?HISTORICAL_REANALYSIS_WORKFLOW_ARN is required}"
+: "${ACCOUNT_EXPORT_WORKFLOW_ARN:?ACCOUNT_EXPORT_WORKFLOW_ARN is required}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+source "$SCRIPT_DIR/jm8_resource_tags.sh"
+export JM8_OPERATION="deploy-account-deletion"
+jm8_validate_contract_or_exit
+
+ACCOUNT_ID="$EXPECTED_AWS_ACCOUNT_ID"
+WORKER_NAME="${APP_NAME}-${STAGE}-account-deletion-worker"
+WORKER_ROLE_NAME="${WORKER_NAME}-role"
+STEP_ROLE_NAME="${APP_NAME}-${STAGE}-account-deletion-step-role"
+WORKFLOW_NAME="${APP_NAME}-${STAGE}-account-deletion-workflow"
+WORKER_LOG_GROUP="/aws/lambda/${WORKER_NAME}"
+WORKFLOW_LOG_GROUP="/aws/vendedlogs/states/${WORKFLOW_NAME}"
+BUILD_DIR="$BACKEND_DIR/.build/account-deletion"
+ZIP_FILE="$BUILD_DIR/account-deletion.zip"
+RESERVED_CONCURRENCY="2"
+if [ "$STAGE" = "prod" ]; then
+  RESERVED_CONCURRENCY="1"
+fi
+
+CALLER_ACCOUNT="$(aws sts get-caller-identity --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Account --output text)"
+if [ "$CALLER_ACCOUNT" != "$ACCOUNT_ID" ]; then
+  echo "Caller account does not match EXPECTED_AWS_ACCOUNT_ID." >&2
+  exit 1
+fi
+
+cd "$BACKEND_DIR"
+./bin/package
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR"
+cp dist/function.zip "$ZIP_FILE"
+
+python3 > "$BUILD_DIR/lambda-trust.json" <<'PY_LAMBDA_TRUST'
+import json
+print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
+PY_LAMBDA_TRUST
+python3 > "$BUILD_DIR/states-trust.json" <<'PY_STATES_TRUST'
+import json
+print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
+PY_STATES_TRUST
+
+python3 - "$AWS_REGION" "$ACCOUNT_ID" "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" > "$BUILD_DIR/worker-policy.json" <<'PY_WORKER_POLICY'
+import json
+import sys
+
+region, account, table, raw, exports, pool, secret, *workflows = sys.argv[1:]
+table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{table}"
+pool_arn = f"arn:aws:cognito-idp:{region}:{account}:userpool/{pool}"
+execution_arns = [arn.replace(":stateMachine:", ":execution:") + ":*" for arn in workflows]
+print(json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [
+        {"Sid":"ExactMainTable","Effect":"Allow","Action":["dynamodb:Query","dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchWriteItem","dynamodb:TransactWriteItems"],"Resource":[table_arn, table_arn + "/index/*"]},
+        {"Sid":"ListRawDeletionPrefixes","Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":f"arn:aws:s3:::{raw}","Condition":{"StringLike":{"s3:prefix":"users/*/uploads/*"}}},
+        {"Sid":"ListExportDeletionPrefixes","Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":f"arn:aws:s3:::{exports}","Condition":{"StringLike":{"s3:prefix":"exports/*"}}},
+        {"Sid":"DeleteRawPrefix","Effect":"Allow","Action":["s3:DeleteObject","s3:DeleteObjectVersion"],"Resource":f"arn:aws:s3:::{raw}/users/*/uploads/*"},
+        {"Sid":"DeleteExportPrefix","Effect":"Allow","Action":["s3:DeleteObject","s3:DeleteObjectVersion"],"Resource":f"arn:aws:s3:::{exports}/exports/*"},
+        {"Sid":"ExactCognitoPool","Effect":"Allow","Action":["cognito-idp:ListUsers","cognito-idp:AdminUserGlobalSignOut","cognito-idp:AdminDeleteUser","cognito-idp:AdminGetUser"],"Resource":pool_arn},
+        {"Sid":"InspectKnownWorkflows","Effect":"Allow","Action":["states:ListExecutions"],"Resource":workflows},
+        {"Sid":"StopActualExecutions","Effect":"Allow","Action":["states:DescribeExecution","states:StopExecution"],"Resource":execution_arns},
+        {"Sid":"ReadExistingStripeSecret","Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":secret},
+    ],
+}))
+PY_WORKER_POLICY
+
+ensure_role() {
+  local role_name="$1"
+  local trust_file="$2"
+  if ! aws iam get-role --role-name "$role_name" --profile "$AWS_PROFILE" >/dev/null 2>&1; then
+    aws iam create-role --role-name "$role_name" --assume-role-policy-document "file://${trust_file}" --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli --profile "$AWS_PROFILE" >/dev/null
+  else
+    aws iam update-assume-role-policy --role-name "$role_name" --policy-document "file://${trust_file}" --profile "$AWS_PROFILE"
+    aws iam tag-role --role-name "$role_name" --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli --profile "$AWS_PROFILE"
+  fi
+}
+
+ensure_role "$WORKER_ROLE_NAME" "$BUILD_DIR/lambda-trust.json"
+aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-account-deletion-worker" --policy-document "file://${BUILD_DIR}/worker-policy.json" --profile "$AWS_PROFILE"
+aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole --profile "$AWS_PROFILE"
+WORKER_ROLE_ARN="$(aws iam get-role --role-name "$WORKER_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
+
+python3 - "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" "$STAGE" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
+import json
+import sys
+table, raw, exports, pool, secret, ocr, reanalysis, export_workflow, stage = sys.argv[1:]
+print(json.dumps({"Variables": {
+    "TABLE_NAME": table,
+    "RAW_BUCKET": raw,
+    "EXPORT_BUCKET": exports,
+    "COGNITO_USER_POOL_ID": pool,
+    "STRIPE_SECRET_ARN": secret,
+    "OCR_WORKFLOW_ARN": ocr,
+    "HISTORICAL_REANALYSIS_WORKFLOW_ARN": reanalysis,
+    "ACCOUNT_EXPORT_WORKFLOW_ARN": export_workflow,
+    "STAGE": stage,
+}}))
+PY_ENV
+chmod 600 "$BUILD_DIR/worker-environment.json"
+
+if aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws lambda update-function-code --function-name "$WORKER_NAME" --zip-file "fileb://${ZIP_FILE}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+  aws lambda update-function-configuration --function-name "$WORKER_NAME" --runtime python3.12 --role "$WORKER_ROLE_ARN" --handler account_deletion_worker.lambda_handler --timeout 900 --memory-size 512 --environment "file://${BUILD_DIR}/worker-environment.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+else
+  aws lambda create-function --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_deletion_worker.lambda_handler --zip-file "fileb://${ZIP_FILE}" --timeout 900 --memory-size 512 --environment "file://${BUILD_DIR}/worker-environment.json" --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+fi
+aws lambda wait function-active-v2 --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws lambda put-function-concurrency --function-name "$WORKER_NAME" --reserved-concurrent-executions "$RESERVED_CONCURRENCY" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+jm8_reconcile_lambda_tags "$WORKER_NAME"
+WORKER_ARN="$(aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Configuration.FunctionArn --output text)"
+
+ensure_role "$STEP_ROLE_NAME" "$BUILD_DIR/states-trust.json"
+python3 - "$WORKER_ARN" > "$BUILD_DIR/step-policy.json" <<'PY_STEP_POLICY'
+import json
+import sys
+print(json.dumps({"Version":"2012-10-17","Statement":[
+    {"Effect":"Allow","Action":["lambda:InvokeFunction"],"Resource":sys.argv[1]},
+    {"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:GetLogDelivery","logs:UpdateLogDelivery","logs:DeleteLogDelivery","logs:ListLogDeliveries","logs:PutResourcePolicy","logs:DescribeResourcePolicies","logs:DescribeLogGroups"],"Resource":"*"},
+]}))
+PY_STEP_POLICY
+aws iam put-role-policy --role-name "$STEP_ROLE_NAME" --policy-name "${APP_NAME}-${STAGE}-invoke-account-deletion-worker" --policy-document "file://${BUILD_DIR}/step-policy.json" --profile "$AWS_PROFILE"
+STEP_ROLE_ARN="$(aws iam get-role --role-name "$STEP_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
+
+python3 - "$BACKEND_DIR/workflows/account-deletion.asl.json" "$WORKER_ARN" > "$BUILD_DIR/account-deletion.asl.json" <<'PY_ASL'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).read_text().replace("${ACCOUNT_DELETION_WORKER_ARN}", sys.argv[2]))
+PY_ASL
+
+aws logs create-log-group --log-group-name "$WORKER_LOG_GROUP" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1 || true
+aws logs create-log-group --log-group-name "$WORKFLOW_LOG_GROUP" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1 || true
+aws logs put-retention-policy --log-group-name "$WORKER_LOG_GROUP" --retention-in-days 30 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-retention-policy --log-group-name "$WORKFLOW_LOG_GROUP" --retention-in-days 30 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+WORKFLOW_LOG_GROUP_ARN="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${WORKFLOW_LOG_GROUP}:*"
+python3 - "$WORKFLOW_LOG_GROUP_ARN" > "$BUILD_DIR/workflow-logging.json" <<'PY_LOGGING'
+import json
+import sys
+print(json.dumps({"level":"ERROR","includeExecutionData":False,"destinations":[{"cloudWatchLogsLogGroup":{"logGroupArn":sys.argv[1]}}]}))
+PY_LOGGING
+
+WORKFLOW_ARN="$(aws stepfunctions list-state-machines --profile "$AWS_PROFILE" --region "$AWS_REGION" --query "stateMachines[?name=='${WORKFLOW_NAME}'].stateMachineArn | [0]" --output text)"
+if [ -z "$WORKFLOW_ARN" ] || [ "$WORKFLOW_ARN" = "None" ]; then
+  WORKFLOW_ARN="$(aws stepfunctions create-state-machine --name "$WORKFLOW_NAME" --definition "file://${BUILD_DIR}/account-deletion.asl.json" --role-arn "$STEP_ROLE_ARN" --type STANDARD --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --query stateMachineArn --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+else
+  aws stepfunctions update-state-machine --state-machine-arn "$WORKFLOW_ARN" --definition "file://${BUILD_DIR}/account-deletion.asl.json" --role-arn "$STEP_ROLE_ARN" --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+fi
+aws stepfunctions tag-resource --resource-arn "$WORKFLOW_ARN" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+aws logs put-metric-filter --log-group-name "$WORKER_LOG_GROUP" --filter-name AccountDeletionCompleted --filter-pattern '{ $.event = "AccountDeletionActionCompleted" && $.action = "COMPLETE" && $.status = "COMPLETED" }' --metric-transformations metricName=Completed,metricNamespace="JM8/${STAGE}/AccountDeletion",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-worker-errors" --namespace AWS/Lambda --metric-name Errors --dimensions Name=FunctionName,Value="$WORKER_NAME" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-workflow-failed" --namespace AWS/States --metric-name ExecutionsFailed --dimensions Name=StateMachineArn,Value="$WORKFLOW_ARN" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --profile "$AWS_PROFILE" --region "$AWS_REGION"
+python3 - "$AWS_REGION" "$WORKER_NAME" "$WORKFLOW_ARN" > "$BUILD_DIR/dashboard.json" <<'PY_DASHBOARD'
+import json
+import sys
+region, worker, workflow = sys.argv[1:]
+print(json.dumps({"widgets":[{"type":"metric","width":12,"height":6,"properties":{"region":region,"title":"Account deletion","metrics":[["AWS/Lambda","Errors","FunctionName",worker],["AWS/States","ExecutionsFailed","StateMachineArn",workflow],["AWS/States","ExecutionsTimedOut","StateMachineArn",workflow]]}}]}))
+PY_DASHBOARD
+aws cloudwatch put-dashboard --dashboard-name "${APP_NAME}-${STAGE}-account-deletion" --dashboard-body "file://${BUILD_DIR}/dashboard.json" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+echo "Account deletion deployment source reconciled: ${WORKFLOW_ARN}"

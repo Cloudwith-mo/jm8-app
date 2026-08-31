@@ -12,6 +12,11 @@ from billing_customer_store import (
     BillingCustomerStoreError,
     get_billing_user_for_customer,
 )
+from account_deletion_guard import (
+    AccountDeletionInProgress,
+    DeletionGuardUnavailable,
+    ensure_user_mutation_allowed,
+)
 from billing_identity import build_billing_user_reference
 from billing_policy import (
     BILLING_OFFER_PRO_MONTHLY,
@@ -356,6 +361,7 @@ def process_billing_webhook(
     entitlement_reader=get_entitlement_record,
     entitlement_creator=create_entitlement_record,
     entitlement_replacer=replace_entitlement_record,
+    deletion_guard=ensure_user_mutation_allowed,
 ) -> dict[str, Any]:
     payload = _raw_body(event)
     try:
@@ -437,6 +443,22 @@ def process_billing_webhook(
         _error("InvalidBillingMetadata", "The Stripe billing metadata is invalid.", status_code=400)
 
     values = _entitlement_values(event_type, stripe_object)
+    try:
+        deletion_guard(mapping["userId"])
+    except AccountDeletionInProgress:
+        raise BillingWebhookError(
+            "AccountDeletionInProgress",
+            "Account deletion is in progress.",
+            status_code=409,
+            retryable=False,
+        ) from None
+    except DeletionGuardUnavailable:
+        raise BillingWebhookError(
+            "AccountDeletionGuardUnavailable",
+            "Account status is temporarily unavailable.",
+            status_code=503,
+            retryable=True,
+        ) from None
     try:
         _save_entitlement(
             mapping["userId"],

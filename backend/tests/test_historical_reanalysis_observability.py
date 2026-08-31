@@ -69,6 +69,13 @@ def captured_events(
 class HistoricalReanalysisObservabilityTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch(
+            "historical_reanalysis_coordinator.ensure_user_mutation_allowed"
+        )
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     @patch(
         "historical_reanalysis_coordinator."
         "list_historical_reanalysis_candidates"

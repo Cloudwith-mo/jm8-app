@@ -7,6 +7,9 @@ import os
 import time
 from typing import Any, Callable
 
+import boto3
+from botocore.exceptions import ClientError
+
 from account_deletion_contract import (
     is_valid_deletion_request_id,
     request_token_digest,
@@ -26,6 +29,7 @@ from account_deletion_store import (
 DEFAULT_RECENT_AUTH_SECONDS = 5 * 60
 MAX_RECENT_AUTH_SECONDS = 60 * 60
 WorkflowStarter = Callable[..., Any]
+stepfunctions = boto3.client("stepfunctions")
 
 
 class AccountDeletionApiError(RuntimeError):
@@ -90,6 +94,49 @@ def _execution_arn(value: object) -> str:
     return value
 
 
+def start_account_deletion_workflow(
+    *,
+    request_id: str,
+    subject: str,
+    client: Any = None,
+) -> dict[str, str]:
+    workflow_arn = os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN", "").strip()
+    if not workflow_arn:
+        raise AccountDeletionApiError(
+            503,
+            "AccountDeletionUnavailable",
+            "Account deletion is temporarily unavailable.",
+            True,
+        )
+    resource = client or stepfunctions
+    try:
+        response = resource.start_execution(
+            stateMachineArn=workflow_arn,
+            name=request_id,
+            input=json.dumps(
+                {"requestId": request_id, "userId": subject},
+                separators=(",", ":"),
+            ),
+        )
+        return {"executionArn": response["executionArn"]}
+    except ClientError as error:
+        code = (error.response.get("Error") or {}).get("Code")
+        if code != "ExecutionAlreadyExists":
+            raise
+        token = None
+        while True:
+            arguments = {"stateMachineArn": workflow_arn}
+            if token:
+                arguments["nextToken"] = token
+            page = resource.list_executions(**arguments)
+            for execution in page.get("executions", []):
+                if execution.get("name") == request_id:
+                    return {"executionArn": execution["executionArn"]}
+            token = page.get("nextToken")
+            if not token:
+                raise
+
+
 def create_account_deletion_request(
     subject: str,
     claims: dict[str, Any],
@@ -122,7 +169,10 @@ def create_account_deletion_request(
             "The request token is invalid.",
         ) from None
 
-    if workflow_starter is None:
+    starter = workflow_starter
+    if starter is None and os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN", "").strip():
+        starter = start_account_deletion_workflow
+    if starter is None:
         raise AccountDeletionApiError(
             503,
             "AccountDeletionUnavailable",
@@ -151,7 +201,7 @@ def create_account_deletion_request(
 
     if not replayed:
         try:
-            execution = workflow_starter(
+            execution = starter(
                 request_id=request["requestId"],
                 subject=subject,
             )

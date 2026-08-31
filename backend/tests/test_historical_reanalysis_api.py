@@ -135,6 +135,11 @@ def sample_job(
 class HistoricalReanalysisApiTests(
     unittest.TestCase
 ):
+    def setUp(self):
+        self.guard = patch("app.ensure_user_mutation_allowed")
+        self.guard.start()
+        self.addCleanup(self.guard.stop)
+
     @patch.object(
         app,
         "start_historical_reanalysis_execution",

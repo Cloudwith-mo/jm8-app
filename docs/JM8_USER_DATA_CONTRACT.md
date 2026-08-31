@@ -7,8 +7,8 @@ Effective date: August 28, 2026
 This document maps user-related data across JM8 and defines the intended scope
 and order for account export and deletion workflows. It documents the current
 storage model, the Phase 3C2 in-app export boundary, and the Phase 3C3 account
-deletion coordination contract. Destructive account deletion execution is not
-active until Phase 3C3B/3C3C.
+deletion coordination and Phase 3C3B execution-source contract. Destructive
+account deletion execution remains inactive until Phase 3C3C deployment approval.
 
 ## Identity boundary
 
@@ -157,7 +157,7 @@ applicable law.
 
 ## Phase 3C3 account deletion coordination
 
-Phase 3C3A provides only authenticated request coordination and status lookup:
+Phase 3C3A provides authenticated request coordination and status lookup:
 
 ```text
 POST /account/deletion-requests
@@ -165,11 +165,13 @@ GET  /account/deletion-requests/{requestId}
 ```
 
 POST requires the exact explicit confirmation value `DELETE_MY_ACCOUNT`, a
-request token, and a recent Cognito `auth_time`. A new coordinated request will
-return 202 once a workflow starter is configured; replaying the same request
-token returns 200. Until Phase 3C3B/3C3C configures destructive execution, the
-production POST returns a retryable temporary-unavailable response. GET remains
-available to the same authenticated Cognito subject that owns the request.
+request token, and a recent Cognito `auth_time`. A new coordinated request
+returns 202 when the account-deletion workflow ARN is configured; replaying the
+same request token returns 200 without starting another execution. Until the
+Phase 3C3B deployment source is deliberately activated during Phase 3C3C, the
+production POST retains its retryable temporary-unavailable behavior. GET
+remains available to the same authenticated Cognito subject that owns the
+request, and workflow execution history is never exposed by the public API.
 
 The durable audit is outside the deletable `USER#<user_id>` partition:
 
@@ -183,10 +185,13 @@ status, lifecycle timestamps, a safe failure code and retryability flag, and a
 workflow execution ARN. It must not contain the raw Cognito subject, email,
 journal content, request token, Stripe customer ID, access token, secret, or
 complete Cognito claims. A separate `ACCOUNT_DELETION_SUBJECT#<subject_digest>`
-partition holds the active lock and request-token digest coordination. Failed
-audit and idempotency records use the table's configured TTL attribute;
-completed audits retain the minimum request ID and completion evidence needed
-to prevent restored data from becoming active without reapplying deletion.
+partition holds the active lock and request-token digest coordination. Temporary
+pre-destructive coordination and failed audits use the table's configured TTL
+attribute. At the destructive boundary, one atomic transaction removes TTL from
+the audit, active lock, and internal billing recovery record. Those records do
+not expire automatically while destructive recovery is incomplete. Completed
+audits retain the minimum request ID and completion evidence needed to prevent
+restored data from becoming active without reapplying deletion.
 
 Public responses strictly exclude DynamoDB keys, the subject digest, workflow
 ARN, TTL, and all other storage coordination. They disclose that CloudWatch
@@ -194,40 +199,72 @@ logs may remain for up to 30 days, S3 retained versions for up to 30 days if
 immediate removal fails, DynamoDB PITR data for up to 35 days, and Stripe
 financial records according to Stripe and applicable legal retention.
 
-Phase 3C3A also defines, but deliberately does not globally enforce, the 3C3B
-write-blocking boundary. GET deletion status must remain available. Entry
+Phase 3C3B enforces the write-blocking boundary. GET deletion status, deletion
+request replay, and necessary read-only routes remain available. Entry
 creation/update/deletion, upload URLs, OCR and retries, analysis/reanalysis,
-Ask JM8, billing checkout/portal, and new account exports must be blocked once
-complete dispatcher enforcement is added. Applying only a subset of those
-guards would leave unsafe write paths and is prohibited.
+Ask JM8 creation and history deletion, billing checkout/portal, Stripe webhook
+entitlement writes, and new account exports are blocked while the lock is
+active. A lock read failure fails closed for mutations. Workers check the lock
+again immediately before final user-scoped persistence.
 
 ## Account deletion execution order
 
-The Phase 3C3B/3C3C destructive workflow must be idempotent, auditable without
-logging journal content, and preserve this order:
+The Phase 3C3B Standard Step Functions workflow source is idempotent, auditable
+without logging journal content, and preserves this order:
 
-1. Verify the requester and record a deletion request identifier without
-   copying journal content into the audit record.
-2. Block new writes and capture the Stripe customer identifier and S3 keys
-   needed to finish cleanup.
-3. Cancel future Stripe subscription renewal, where applicable. Do not attempt
-   to erase financial records that Stripe must retain.
-4. Delete every current and noncurrent S3 object version and delete marker under
-   `users/<user_id>/uploads/`.
-5. Delete every item in the `USER#<user_id>` DynamoDB partition, including
-   entries, analysis history, Ask JM8 history, usage, entitlement, billing
-   mapping, and re-analysis records.
-6. Delete the corresponding `STRIPE_CUSTOMER#<mode>#<customer_id>` reverse
-   lookup item.
-7. Delete the Cognito identity last so authentication remains available while
-   the preceding user-scoped cleanup is verified.
-8. Verify that active S3, DynamoDB, reverse-lookup, and Cognito records are gone;
-   then record completion using only the request identifier and completion time.
+1. `START` verifies request ownership and makes the deletion lock active.
+2. `QUIESCE` inspects the complete user partition, lists configured OCR,
+   re-analysis, and export workflows, and stops only actual execution ARNs whose
+   stored execution input belongs to the subject. It then waits out the maximum
+   already-running Lambda duration before destructive work.
+3. `CANCEL_SUBSCRIPTION` stops future Stripe renewal, where applicable. It does
+   not erase Stripe financial records.
+4. `DELETE_RAW_OBJECTS` deletes every current version, noncurrent version, and
+   delete marker under `users/<user_id>/uploads/`.
+5. `DELETE_EXPORT_OBJECTS` performs the same version-aware deletion under
+   `exports/<user_id>/`.
+6. `DELETE_APPLICATION_DATA` repeatedly queries and batch-deletes the exact
+   `USER#<user_id>` partition, then deletes the Stripe reverse lookup.
+7. `DELETE_COGNITO_IDENTITY` first verifies S3, DynamoDB, and reverse-lookup
+   absence, globally signs out the exact matched user, and deletes the Cognito
+   identity last.
+8. `VERIFY` proves both S3 prefixes, the user partition, reverse lookup, and
+   Cognito identity are absent.
+9. `COMPLETE` records minimal completion evidence and atomically removes the
+   active lock and internal billing recovery record.
 
-CloudWatch records expire within 30 days, S3 versions within the applicable
-30-day lifecycle window if any version could not be immediately removed, and
-DynamoDB backup recovery within 35 days. The completion response must explain
-those residual recovery windows.
+The state machine input is limited to the opaque deletion request ID and the
+authenticated Cognito subject. ERROR logging uses `includeExecutionData=false`.
+AWS Standard Step Functions execution history can nevertheless retain this
+minimum pseudonymous input for the AWS-managed execution-history retention
+period. It must not contain email, claims, tokens, journal content, or Stripe
+identifiers.
+
+Before destructive work begins, the worker copies only the validated Stripe
+customer identifier and mode to a subject-digest-scoped internal recovery item
+outside the `USER#` partition. It may have a bounded TTL while work remains
+non-destructive. The destructive-boundary transaction removes that TTL, so the
+record persists until verified completion or explicit operator remediation.
+This is not audit or workflow data and is never logged or returned. It permits
+an idempotent retry to remove the reverse lookup after the user partition is
+gone, without a table scan. Verified completion atomically removes the recovery
+item with the active lock.
+
+A terminal pre-destructive failure records a fixed safe code, removes any
+temporary billing recovery record, releases the active lock, and permits normal
+account use. A failure after destructive work begins retains the active lock
+and billing recovery record without TTL, blocking normal account writes and
+preventing data recreation until recovery is verified. The same request can be
+operator-redriven safely because every action is idempotent; a persistent
+partial failure may require explicit operator intervention. Neither failure
+path records exception text. The destructive workflow and deployment source
+remain undeployed until Phase 3C3C approval.
+
+CloudWatch records expire within 30 days. S3 versions can remain within the
+applicable 30-day lifecycle window if immediate removal fails. DynamoDB PITR
+and backup recovery can retain deleted values for up to 35 days. Stripe retains
+financial/compliance records under its own and legal schedules. The completion
+response explains these residual windows.
 
 ## Stripe financial records
 
