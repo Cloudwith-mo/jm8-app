@@ -80,6 +80,11 @@ from account_export_api import (
     get_account_export,
     list_account_exports,
 )
+from account_deletion_api import (
+    AccountDeletionApiError,
+    create_account_deletion_request,
+    get_account_deletion_request,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import json
@@ -124,6 +129,55 @@ def lambda_handler(event, context):
             except BillingWebhookError as exc:
                 return response(exc.status_code, exc.payload)
             return response(200, result)
+
+        if (
+            path == "/account/deletion-requests"
+            or path.startswith("/account/deletion-requests/")
+        ):
+            claims = get_verified_cognito_claims(event)
+            if claims is None:
+                return response(401, {
+                    "error": "Unauthorized",
+                    "message": "Authentication is required.",
+                })
+            deletion_subject = str(claims["sub"])
+            try:
+                if method == "POST" and path == "/account/deletion-requests":
+                    try:
+                        deletion_body = parse_body(event)
+                    except (
+                        json.JSONDecodeError,
+                        UnicodeDecodeError,
+                        ValueError,
+                    ):
+                        return response(400, {
+                            "error": "InvalidRequest",
+                            "message": "The request body must be valid JSON.",
+                            "retryable": False,
+                        })
+                    if not isinstance(deletion_body, dict):
+                        return response(400, {
+                            "error": "InvalidRequest",
+                            "message": "The request body must be a JSON object.",
+                            "retryable": False,
+                        })
+                    status_code, payload = create_account_deletion_request(
+                        deletion_subject,
+                        claims,
+                        deletion_body,
+                    )
+                    return response(status_code, payload)
+                if method == "GET" and path.startswith(
+                    "/account/deletion-requests/"
+                ):
+                    request_id = path[len("/account/deletion-requests/"):]
+                    status_code, payload = get_account_deletion_request(
+                        deletion_subject,
+                        request_id,
+                    )
+                    return response(status_code, payload)
+            except AccountDeletionApiError as exc:
+                return response(exc.status_code, exc.payload)
 
         if path == "/account/exports" or path.startswith("/account/exports/"):
             claims = get_verified_cognito_claims(event)

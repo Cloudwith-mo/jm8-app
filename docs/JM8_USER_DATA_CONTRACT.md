@@ -6,8 +6,9 @@ Effective date: August 28, 2026
 
 This document maps user-related data across JM8 and defines the intended scope
 and order for account export and deletion workflows. It documents the current
-storage model and the Phase 3C2 in-app export boundary. Automated account
-deletion remains planned for Phase 3C3 and is not available today.
+storage model, the Phase 3C2 in-app export boundary, and the Phase 3C3 account
+deletion coordination contract. Destructive account deletion execution is not
+active until Phase 3C3B/3C3C.
 
 ## Identity boundary
 
@@ -154,10 +155,56 @@ Exclusion from the portable export does not prevent a verified access request
 from being evaluated for additional personal information when required by
 applicable law.
 
-## Proposed deletion order
+## Phase 3C3 account deletion coordination
 
-Automated deletion is not yet available. A future deletion workflow should be
-idempotent, auditable without logging journal content, and use this order:
+Phase 3C3A provides only authenticated request coordination and status lookup:
+
+```text
+POST /account/deletion-requests
+GET  /account/deletion-requests/{requestId}
+```
+
+POST requires the exact explicit confirmation value `DELETE_MY_ACCOUNT`, a
+request token, and a recent Cognito `auth_time`. A new coordinated request will
+return 202 once a workflow starter is configured; replaying the same request
+token returns 200. Until Phase 3C3B/3C3C configures destructive execution, the
+production POST returns a retryable temporary-unavailable response. GET remains
+available to the same authenticated Cognito subject that owns the request.
+
+The durable audit is outside the deletable `USER#<user_id>` partition:
+
+```text
+PK = ACCOUNT_DELETION#<del_request_id>
+SK = REQUEST
+```
+
+The audit may contain only the request ID, a one-way Cognito-subject digest,
+status, lifecycle timestamps, a safe failure code and retryability flag, and a
+workflow execution ARN. It must not contain the raw Cognito subject, email,
+journal content, request token, Stripe customer ID, access token, secret, or
+complete Cognito claims. A separate `ACCOUNT_DELETION_SUBJECT#<subject_digest>`
+partition holds the active lock and request-token digest coordination. Failed
+audit and idempotency records use the table's configured TTL attribute;
+completed audits retain the minimum request ID and completion evidence needed
+to prevent restored data from becoming active without reapplying deletion.
+
+Public responses strictly exclude DynamoDB keys, the subject digest, workflow
+ARN, TTL, and all other storage coordination. They disclose that CloudWatch
+logs may remain for up to 30 days, S3 retained versions for up to 30 days if
+immediate removal fails, DynamoDB PITR data for up to 35 days, and Stripe
+financial records according to Stripe and applicable legal retention.
+
+Phase 3C3A also defines, but deliberately does not globally enforce, the 3C3B
+write-blocking boundary. GET deletion status must remain available. Entry
+creation/update/deletion, upload URLs, OCR and retries, analysis/reanalysis,
+Ask JM8, billing checkout/portal, and new account exports must be blocked once
+complete dispatcher enforcement is added. Applying only a subset of those
+guards would leave unsafe write paths and is prohibited.
+
+## Account deletion execution order
+
+The Phase 3C3B/3C3C destructive workflow must be idempotent, auditable without
+logging journal content, and preserve this order:
 
 1. Verify the requester and record a deletion request identifier without
    copying journal content into the audit record.
