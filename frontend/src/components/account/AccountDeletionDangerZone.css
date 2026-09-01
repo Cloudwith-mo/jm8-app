@@ -1,0 +1,69 @@
+.account-deletion-danger-zone {
+  display: grid;
+  gap: 11px;
+  margin-top: 8px;
+  padding: 15px;
+  border: 1px solid #e7b9b9;
+  border-radius: 14px;
+  background: #fffafa;
+  outline: none;
+}
+
+.account-deletion-danger-zone:focus-visible {
+  outline: 3px solid #d7b0b0;
+  outline-offset: 2px;
+}
+
+.account-deletion-danger-zone header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-deletion-danger-zone header p,
+.account-deletion-danger-zone header h2,
+.account-deletion-danger-zone p {
+  margin: 0;
+}
+
+.account-deletion-danger-zone header p {
+  color: #8a3f3f;
+  font-size: .72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.account-deletion-danger-zone header h2 { font-size: .98rem; }
+.account-deletion-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: #9b3030; background: #fde8e8; }
+.account-deletion-warning { color: #792f2f; font-size: .84rem; font-weight: 750; }
+.account-deletion-copy { color: var(--jm8-muted, #6d6d80); font-size: .8rem; line-height: 1.55; }
+.account-deletion-status { display: grid; gap: 4px; padding: 10px; border-radius: 10px; background: #fff; }
+.account-deletion-status strong { color: #8a3f3f; font-size: .72rem; letter-spacing: .04em; }
+.account-deletion-status span { font-size: .81rem; line-height: 1.45; }
+.account-deletion-error { color: #8a2f2f; font-size: .81rem; line-height: 1.45; }
+.account-deletion-open,
+.account-deletion-secondary,
+.account-deletion-submit { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 12px; border-radius: 10px; font: inherit; font-size: .8rem; font-weight: 750; cursor: pointer; }
+.account-deletion-open,
+.account-deletion-submit { border: 1px solid #9b3030; color: #fff; background: #9b3030; }
+.account-deletion-secondary { border: 1px solid #c99a9a; color: #713636; background: #fff; }
+.account-deletion-open:disabled,
+.account-deletion-secondary:disabled,
+.account-deletion-submit:disabled { cursor: not-allowed; opacity: .58; }
+.account-deletion-open:focus-visible,
+.account-deletion-secondary:focus-visible,
+.account-deletion-submit:focus-visible,
+.account-deletion-confirmation input:focus-visible { outline: 3px solid #d7b0b0; outline-offset: 2px; }
+.account-deletion-confirmation { display: grid; gap: 10px; padding: 12px; border: 1px solid #e7caca; border-radius: 11px; background: #fff; }
+.account-deletion-confirmation h3 { margin: 0; font-size: .9rem; }
+.account-deletion-confirmation p,
+.account-deletion-confirmation label { font-size: .8rem; line-height: 1.45; }
+.account-deletion-confirmation label { font-weight: 700; }
+.account-deletion-confirmation input { min-height: 44px; width: 100%; box-sizing: border-box; border: 1px solid #c9baba; border-radius: 9px; padding: 9px 10px; font: inherit; }
+.account-deletion-confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.account-deletion-confirm-actions > * { flex: 1 1 150px; }
+.account-deletion-spin { animation: account-deletion-spin 1s linear infinite; }
+@keyframes account-deletion-spin { to { transform: rotate(360deg); } }
+@media (max-width: 520px) { .account-deletion-confirm-actions > * { flex-basis: 100%; } }
+@media (prefers-reduced-motion: reduce) { .account-deletion-spin { animation: none; } }

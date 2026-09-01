@@ -368,6 +368,63 @@ def validate_export_bucket_name(
         )
 
 
+def validate_account_deletion_targets(
+    app_name: str,
+    stage: str,
+    region: str,
+    account_id: str,
+    environment: Mapping[str, str],
+    *,
+    require_workflows: bool,
+) -> None:
+    """Reject cross-environment resources before deletion deployment can run."""
+    pool_name = str(environment.get("COGNITO_USER_POOL_NAME") or "").strip()
+    pool_id = str(environment.get("COGNITO_USER_POOL_ID") or "").strip()
+    if pool_name != f"{app_name}-{stage}-users":
+        raise EnvironmentContractError(
+            "COGNITO_USER_POOL_NAME must identify the exact deployment environment"
+        )
+    if not re.fullmatch(re.escape(region) + r"_[A-Za-z0-9]+", pool_id):
+        raise EnvironmentContractError(
+            "COGNITO_USER_POOL_ID must identify a pool in the deployment region"
+        )
+
+    issuer = str(environment.get("COGNITO_ISSUER") or "").strip()
+    expected_issuer = f"https://cognito-idp.{region}.amazonaws.com/{pool_id}"
+    if issuer and issuer != expected_issuer:
+        raise EnvironmentContractError(
+            "COGNITO_ISSUER must identify the exact configured user pool"
+        )
+
+    secret_arn = str(environment.get("STRIPE_SECRET_ARN") or "").strip()
+    secret_pattern = re.compile(
+        rf"^arn:aws:secretsmanager:{re.escape(region)}:{re.escape(account_id)}:"
+        rf"secret:{re.escape(app_name)}/{re.escape(stage)}/stripe-[A-Za-z0-9]{{6,}}$"
+    )
+    if secret_pattern.fullmatch(secret_arn) is None:
+        raise EnvironmentContractError(
+            "STRIPE_SECRET_ARN must identify the exact deployment environment"
+        )
+
+    if not require_workflows:
+        return
+    workflow_names = {
+        "OCR_WORKFLOW_ARN": f"{app_name}-{stage}-ocr-workflow",
+        "HISTORICAL_REANALYSIS_WORKFLOW_ARN": (
+            f"{app_name}-{stage}-historical-reanalysis-workflow"
+        ),
+        "ACCOUNT_EXPORT_WORKFLOW_ARN": f"{app_name}-{stage}-account-export-workflow",
+    }
+    for key, workflow_name in workflow_names.items():
+        expected = (
+            f"arn:aws:states:{region}:{account_id}:stateMachine:{workflow_name}"
+        )
+        if str(environment.get(key) or "").strip() != expected:
+            raise EnvironmentContractError(
+                f"{key} must identify the exact deployment environment"
+            )
+
+
 def validate_non_dev_urls(stage: str, *urls: str) -> None:
     """
     For non-dev stages, URLs must not contain localhost or 127.0.0.1.
@@ -828,6 +885,14 @@ def validate_operation_specific(
             os.environ.get("RAW_BUCKET", "").strip(),
             os.environ.get("FRONTEND_BUCKET", "").strip(),
         )
+        validate_account_deletion_targets(
+            os.environ.get("APP_NAME", "").strip(),
+            stage,
+            os.environ.get("AWS_REGION", "").strip(),
+            actual_account_id or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
+            os.environ,
+            require_workflows=False,
+        )
 
     if op == "deploy-account-export":
         validate_export_bucket_name(
@@ -837,6 +902,24 @@ def validate_operation_specific(
             actual_account_id or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
             os.environ.get("RAW_BUCKET", "").strip(),
             os.environ.get("FRONTEND_BUCKET", "").strip(),
+        )
+
+    if op == "deploy-account-deletion":
+        validate_export_bucket_name(
+            os.environ.get("APP_NAME", "").strip(),
+            stage,
+            os.environ.get("EXPORT_BUCKET", "").strip(),
+            actual_account_id or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
+            os.environ.get("RAW_BUCKET", "").strip(),
+            os.environ.get("FRONTEND_BUCKET", "").strip(),
+        )
+        validate_account_deletion_targets(
+            os.environ.get("APP_NAME", "").strip(),
+            stage,
+            os.environ.get("AWS_REGION", "").strip(),
+            actual_account_id or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
+            os.environ,
+            require_workflows=True,
         )
 
     if op in {"provision-stripe-secret", "setup-stripe-catalog"}:

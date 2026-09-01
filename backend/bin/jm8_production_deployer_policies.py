@@ -141,6 +141,8 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         "journalm8-prod-historical-reanalysis-step-role",
         "journalm8-prod-account-export-worker-role",
         "journalm8-prod-account-export-step-role",
+        "journalm8-prod-account-deletion-worker-role",
+        "journalm8-prod-account-deletion-step-role",
     )
     runtime_role_arns = tuple(
         f"arn:aws:iam::{ACCOUNT_ID}:role/{name}"
@@ -151,6 +153,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         if arn.endswith("step-functions-role")
         or arn.endswith("historical-reanalysis-step-role")
         or arn.endswith("account-export-step-role")
+        or arn.endswith("account-deletion-step-role")
     )
     lambda_role_arns = tuple(arn for arn in runtime_role_arns if arn not in step_role_arns)
     production_tag_condition = {
@@ -605,7 +608,11 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         ),
         _statement(
             "ManageProductionAlarms",
-            ("cloudwatch:DescribeAlarms", "cloudwatch:PutMetricAlarm"),
+            (
+                "cloudwatch:DescribeAlarms",
+                "cloudwatch:PutMetricAlarm",
+                "cloudwatch:TagResource",
+            ),
             alarm_arn,
         ),
         _statement(

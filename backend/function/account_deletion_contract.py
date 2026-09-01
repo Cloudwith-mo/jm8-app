@@ -12,6 +12,9 @@ from typing import Any
 DELETION_REQUEST_ID_PATTERN = re.compile(r"^del_[a-f0-9]{32}$")
 REQUEST_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 FAILURE_CODE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+UTC_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
+)
 DELETION_STATUSES = {"REQUESTED", "IN_PROGRESS", "COMPLETED", "FAILED"}
 ACTIVE_DELETION_STATUSES = {"REQUESTED", "IN_PROGRESS"}
 CONFIRMATION_VALUE = "DELETE_MY_ACCOUNT"
@@ -20,6 +23,7 @@ PUBLIC_REQUEST_FIELDS = (
     "status",
     "requestedAt",
     "startedAt",
+    "destructiveStartedAt",
     "completedAt",
     "failedAt",
 )
@@ -91,13 +95,15 @@ def safe_failure_code(value: object) -> str:
 def serialize_public_deletion_request(item: object) -> dict[str, Any]:
     if not isinstance(item, dict):
         return {"residualRetention": dict(RESIDUAL_RETENTION)}
-    result = {
-        key: item[key]
-        for key in PUBLIC_REQUEST_FIELDS
-        if key in item
-    }
-    if result.get("status") not in DELETION_STATUSES:
-        result.pop("status", None)
+    result: dict[str, Any] = {}
+    if is_valid_deletion_request_id(item.get("requestId")):
+        result["requestId"] = item["requestId"]
+    if item.get("status") in DELETION_STATUSES:
+        result["status"] = item["status"]
+    for field in PUBLIC_REQUEST_FIELDS[2:]:
+        value = item.get(field)
+        if isinstance(value, str) and UTC_TIMESTAMP_PATTERN.fullmatch(value):
+            result[field] = value
     if item.get("status") == "FAILED" and item.get("failureCode"):
         result["failure"] = {
             "code": safe_failure_code(item["failureCode"]),

@@ -61,6 +61,7 @@ class AccountDeletionContractTests(unittest.TestCase):
             "subjectDigest": "secret-subject-digest",
             "status": "FAILED",
             "requestedAt": "2026-08-30T12:00:00Z",
+            "destructiveStartedAt": "2026-08-30T12:00:30Z",
             "failedAt": "2026-08-30T12:01:00Z",
             "failureCode": "DeletionWorkflowStartFailed",
             "retryable": True,
@@ -81,6 +82,7 @@ class AccountDeletionContractTests(unittest.TestCase):
                 "requestId",
                 "status",
                 "requestedAt",
+                "destructiveStartedAt",
                 "failedAt",
                 "failure",
                 "residualRetention",
@@ -106,6 +108,31 @@ class AccountDeletionContractTests(unittest.TestCase):
             "ACCOUNT_DELETION#del_secret",
         ):
             self.assertNotIn(secret, serialized)
+
+    def test_public_projection_rejects_malformed_values_and_malicious_extras(self):
+        public = contract.serialize_public_deletion_request({
+            "requestId": "../../raw-cognito-subject",
+            "status": "IN_PROGRESS",
+            "requestedAt": {"email": "user@example.com"},
+            "destructiveStartedAt": "not-a-timestamp",
+            "PK": "USER#raw-cognito-subject",
+            "stripeCustomerId": "cus_secret",
+            "requestTokenDigest": "private-token-digest",
+            "journalContent": "private journal text",
+        })
+        self.assertEqual(public, {
+            "status": "IN_PROGRESS",
+            "residualRetention": contract.RESIDUAL_RETENTION,
+        })
+        serialized = json.dumps(public)
+        for sensitive in (
+            "raw-cognito-subject",
+            "user@example.com",
+            "cus_secret",
+            "private-token-digest",
+            "private journal text",
+        ):
+            self.assertNotIn(sensitive, serialized)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,9 @@ Effective date: August 28, 2026
 This document maps user-related data across JM8 and defines the intended scope
 and order for account export and deletion workflows. It documents the current
 storage model, the Phase 3C2 in-app export boundary, and the Phase 3C3 account
-deletion coordination and Phase 3C3B execution-source contract. Destructive
-account deletion execution remains inactive until Phase 3C3C deployment approval.
+deletion coordination, Phase 3C3B execution contract, and Phase 3C3C
+user-experience and deployment integration. The deployment source activates
+account deletion only through the guarded, stage-scoped deployment path.
 
 ## Identity boundary
 
@@ -167,11 +168,12 @@ GET  /account/deletion-requests/{requestId}
 POST requires the exact explicit confirmation value `DELETE_MY_ACCOUNT`, a
 request token, and a recent Cognito `auth_time`. A new coordinated request
 returns 202 when the account-deletion workflow ARN is configured; replaying the
-same request token returns 200 without starting another execution. Until the
-Phase 3C3B deployment source is deliberately activated during Phase 3C3C, the
-production POST retains its retryable temporary-unavailable behavior. GET
-remains available to the same authenticated Cognito subject that owns the
-request, and workflow execution history is never exposed by the public API.
+same request token returns 200 without starting another execution. Phase 3C3C
+requires the exact stage-scoped workflow during guarded deployment and passes
+that ARN to the shared API. If this configuration is absent or mismatched, POST
+fails closed with its retryable temporary-unavailable response. GET remains
+available to the same authenticated Cognito subject that owns the request, and
+workflow execution history is never exposed by the public API.
 
 The durable audit is outside the deletable `USER#<user_id>` partition:
 
@@ -233,12 +235,16 @@ without logging journal content, and preserves this order:
 9. `COMPLETE` records minimal completion evidence and atomically removes the
    active lock and internal billing recovery record.
 
-The state machine input is limited to the opaque deletion request ID and the
-authenticated Cognito subject. ERROR logging uses `includeExecutionData=false`.
-AWS Standard Step Functions execution history can nevertheless retain this
-minimum pseudonymous input for the AWS-managed execution-history retention
-period. It must not contain email, claims, tokens, journal content, or Stripe
-identifiers.
+The state machine input is limited to the opaque deletion request ID. The raw
+Cognito subject is never placed in workflow input or execution history. A
+separate internal `SUBJECT_RECOVERY` item, keyed by the opaque request ID,
+contains the subject only while deletion coordination requires it. It has a
+bounded TTL before destructive work, loses that TTL at the destructive boundary,
+survives a durable partial failure, and is atomically removed on verified
+completion or a terminal pre-destructive failure. It is never logged or returned
+by the public API. ERROR logging uses `includeExecutionData=false`; workflow
+history must not contain subjects, email, claims, tokens, journal content, or
+Stripe identifiers.
 
 Before destructive work begins, the worker copies only the validated Stripe
 customer identifier and mode to a subject-digest-scoped internal recovery item
@@ -257,8 +263,21 @@ and billing recovery record without TTL, blocking normal account writes and
 preventing data recreation until recovery is verified. The same request can be
 operator-redriven safely because every action is idempotent; a persistent
 partial failure may require explicit operator intervention. Neither failure
-path records exception text. The destructive workflow and deployment source
-remain undeployed until Phase 3C3C approval.
+path records exception text. Phase 3C3C integrates the workflow into the
+stage-scoped deployment source; source integration does not itself deploy or
+invoke a deletion.
+
+The worker policy scopes DynamoDB, S3, Cognito, Step Functions, and Secrets
+Manager access to the exact stage resources. The Step Functions execution role
+uses `Resource: "*"` only for the CloudWatch Logs delivery control-plane actions
+for which AWS does not support resource-level authorization; that statement is
+limited to the documented log-delivery action set and is covered by deployment
+regression tests.
+The worker's remaining resource patterns are limited to dynamic identifiers the
+deletion engine must discover: `users/*/uploads/*` and `exports/*` inside the
+two exact stage buckets, and `execution:<known-workflow-name>:*` for actual
+executions of the three exact asynchronous workflows. No wildcard service
+actions are granted, and the DynamoDB policy targets only the exact main table.
 
 CloudWatch records expire within 30 days. S3 versions can remain within the
 applicable 30-day lifecycle window if immediate removal fails. DynamoDB PITR

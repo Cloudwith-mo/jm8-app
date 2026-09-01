@@ -22,9 +22,11 @@ FAILURE_FUNCTION_NAME="${APP_NAME}-${STAGE}-ocr-failure-handler"
 HISTORICAL_WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-worker"
 HISTORICAL_COORDINATOR_FUNCTION_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-coordinator"
 ACCOUNT_EXPORT_WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-account-export-worker"
+ACCOUNT_DELETION_WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-account-deletion-worker"
 STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 HISTORICAL_STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
 ACCOUNT_EXPORT_STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-account-export-workflow"
+ACCOUNT_DELETION_STATE_MACHINE_NAME="${APP_NAME}-${STAGE}-account-deletion-workflow"
 
 API_LOG_GROUP="/aws/lambda/${API_FUNCTION_NAME}"
 WORKER_LOG_GROUP="/aws/lambda/${WORKER_FUNCTION_NAME}"
@@ -33,6 +35,8 @@ HISTORICAL_WORKER_LOG_GROUP="/aws/lambda/${HISTORICAL_WORKER_FUNCTION_NAME}"
 HISTORICAL_COORDINATOR_LOG_GROUP="/aws/lambda/${HISTORICAL_COORDINATOR_FUNCTION_NAME}"
 ACCOUNT_EXPORT_WORKER_LOG_GROUP="/aws/lambda/${ACCOUNT_EXPORT_WORKER_FUNCTION_NAME}"
 ACCOUNT_EXPORT_WORKFLOW_LOG_GROUP="/aws/vendedlogs/states/${ACCOUNT_EXPORT_STATE_MACHINE_NAME}"
+ACCOUNT_DELETION_WORKER_LOG_GROUP="/aws/lambda/${ACCOUNT_DELETION_WORKER_FUNCTION_NAME}"
+ACCOUNT_DELETION_WORKFLOW_LOG_GROUP="/aws/vendedlogs/states/${ACCOUNT_DELETION_STATE_MACHINE_NAME}"
 ANALYZE_ENTRY_FUNCTION_NAME="${APP_NAME}-${STAGE}-analyze-entry"
 ANALYZE_ENTRY_LOG_GROUP="/aws/lambda/${ANALYZE_ENTRY_FUNCTION_NAME}"
 API_GATEWAY_NAME="${APP_NAME}-${STAGE}-api"
@@ -44,6 +48,7 @@ METRIC_NAMESPACE="JM8/${STAGE}/OCR"
 REANALYSIS_METRIC_NAMESPACE="JM8/${STAGE}/HistoricalReanalysis"
 BILLING_METRIC_NAMESPACE="JM8/${STAGE}/Billing"
 ACCOUNT_EXPORT_METRIC_NAMESPACE="JM8/${STAGE}/AccountExport"
+ACCOUNT_DELETION_METRIC_NAMESPACE="JM8/${STAGE}/AccountDeletion"
 
 API_ERRORS_ALARM="${APP_NAME}-${STAGE}-api-errors"
 API_THROTTLES_ALARM="${APP_NAME}-${STAGE}-api-throttles"
@@ -66,6 +71,11 @@ BILLING_WEBHOOK_FAILURES_ALARM="${APP_NAME}-${STAGE}-billing-webhook-failures"
 ACCOUNT_EXPORT_WORKER_ERRORS_ALARM="${APP_NAME}-${STAGE}-account-export-worker-errors"
 ACCOUNT_EXPORT_WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-account-export-workflow-failed"
 ACCOUNT_EXPORT_WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-account-export-workflow-timed-out"
+ACCOUNT_DELETION_WORKER_ERRORS_ALARM="${APP_NAME}-${STAGE}-account-deletion-worker-errors"
+ACCOUNT_DELETION_WORKFLOW_FAILED_ALARM="${APP_NAME}-${STAGE}-account-deletion-workflow-failed"
+ACCOUNT_DELETION_WORKFLOW_TIMEOUT_ALARM="${APP_NAME}-${STAGE}-account-deletion-workflow-timed-out"
+ACCOUNT_DELETION_FAILURES_ALARM="${APP_NAME}-${STAGE}-account-deletion-failures"
+ACCOUNT_DELETION_PARTIAL_FAILURES_ALARM="${APP_NAME}-${STAGE}-account-deletion-durable-partial-failures"
 
 mkdir -p .build
 
@@ -118,6 +128,18 @@ ACCOUNT_EXPORT_STATE_MACHINE_ARN="$(
 )"
 if [ -z "$ACCOUNT_EXPORT_STATE_MACHINE_ARN" ] || [ "$ACCOUNT_EXPORT_STATE_MACHINE_ARN" = "None" ]; then
   echo "Account export state machine was not found: $ACCOUNT_EXPORT_STATE_MACHINE_NAME"
+  exit 1
+fi
+
+ACCOUNT_DELETION_STATE_MACHINE_ARN="$(
+  aws stepfunctions list-state-machines \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query "stateMachines[?name=='${ACCOUNT_DELETION_STATE_MACHINE_NAME}'].stateMachineArn | [0]" \
+    --output text
+)"
+if [ -z "$ACCOUNT_DELETION_STATE_MACHINE_ARN" ] || [ "$ACCOUNT_DELETION_STATE_MACHINE_ARN" = "None" ]; then
+  echo "Account deletion state machine was not found: $ACCOUNT_DELETION_STATE_MACHINE_NAME"
   exit 1
 fi
 
@@ -254,6 +276,8 @@ for LOG_GROUP in \
   "$HISTORICAL_COORDINATOR_LOG_GROUP" \
   "$ACCOUNT_EXPORT_WORKER_LOG_GROUP" \
   "$ACCOUNT_EXPORT_WORKFLOW_LOG_GROUP" \
+  "$ACCOUNT_DELETION_WORKER_LOG_GROUP" \
+  "$ACCOUNT_DELETION_WORKFLOW_LOG_GROUP" \
   "$ANALYZE_ENTRY_LOG_GROUP" \
   "$API_ACCESS_LOG_GROUP"
 do
@@ -553,6 +577,14 @@ put_log_metric \
   "PackageSizeBytes" \
   '$.fileSizeBytes'
 
+echo "Creating privacy-safe account deletion metric filters..."
+
+put_log_metric "$API_LOG_GROUP" "${APP_NAME}-${STAGE}-account-deletion-requested" '{ $.event = "AccountDeletionRequested" }' "$ACCOUNT_DELETION_METRIC_NAMESPACE" "Requested" "1"
+put_log_metric "$API_LOG_GROUP" "${APP_NAME}-${STAGE}-account-deletion-workflow-start-failed" '{ $.event = "AccountDeletionWorkflowStartFailed" && $.failureCode = "DeletionWorkflowStartFailed" }' "$ACCOUNT_DELETION_METRIC_NAMESPACE" "DeletionFailures" "1"
+put_log_metric "$ACCOUNT_DELETION_WORKER_LOG_GROUP" "${APP_NAME}-${STAGE}-account-deletion-completed" '{ $.event = "AccountDeletionActionCompleted" && $.action = "COMPLETE" && $.status = "COMPLETED" }' "$ACCOUNT_DELETION_METRIC_NAMESPACE" "Completed" "1"
+put_log_metric "$ACCOUNT_DELETION_WORKER_LOG_GROUP" "${APP_NAME}-${STAGE}-account-deletion-failed" '{ $.event = "AccountDeletionActionCompleted" && $.action = "FAIL" && $.status = "FAILED" }' "$ACCOUNT_DELETION_METRIC_NAMESPACE" "DeletionFailures" "1"
+put_log_metric "$ACCOUNT_DELETION_WORKER_LOG_GROUP" "${APP_NAME}-${STAGE}-account-deletion-durable-partial-failed" '{ $.event = "AccountDeletionActionCompleted" && $.action = "FAIL" && $.durablePartialFailure = true }' "$ACCOUNT_DELETION_METRIC_NAMESPACE" "DurablePartialFailures" "1"
+
 put_count_alarm() {
   local alarm_name="$1"
   local description="$2"
@@ -805,6 +837,12 @@ put_count_alarm \
   "StateMachineArn" \
   "$ACCOUNT_EXPORT_STATE_MACHINE_ARN"
 
+put_count_alarm "$ACCOUNT_DELETION_WORKER_ERRORS_ALARM" "JM8 account deletion worker reported an error." "AWS/Lambda" "Errors" "FunctionName" "$ACCOUNT_DELETION_WORKER_FUNCTION_NAME"
+put_count_alarm "$ACCOUNT_DELETION_WORKFLOW_FAILED_ALARM" "JM8 account deletion workflow failed." "AWS/States" "ExecutionsFailed" "StateMachineArn" "$ACCOUNT_DELETION_STATE_MACHINE_ARN"
+put_count_alarm "$ACCOUNT_DELETION_WORKFLOW_TIMEOUT_ALARM" "JM8 account deletion workflow timed out." "AWS/States" "ExecutionsTimedOut" "StateMachineArn" "$ACCOUNT_DELETION_STATE_MACHINE_ARN"
+put_undimensioned_count_alarm "$ACCOUNT_DELETION_FAILURES_ALARM" "JM8 account deletion reported a safe failure signal." "$ACCOUNT_DELETION_METRIC_NAMESPACE" "DeletionFailures"
+put_undimensioned_count_alarm "$ACCOUNT_DELETION_PARTIAL_FAILURES_ALARM" "JM8 account deletion requires durable partial-failure recovery." "$ACCOUNT_DELETION_METRIC_NAMESPACE" "DurablePartialFailures"
+
 echo "CloudWatch alarms created."
 
 python3 - \
@@ -831,6 +869,9 @@ python3 - \
   "$ACCOUNT_EXPORT_WORKER_FUNCTION_NAME" \
   "$ACCOUNT_EXPORT_STATE_MACHINE_ARN" \
   "$ACCOUNT_EXPORT_METRIC_NAMESPACE" \
+  "$ACCOUNT_DELETION_WORKER_FUNCTION_NAME" \
+  "$ACCOUNT_DELETION_STATE_MACHINE_ARN" \
+  "$ACCOUNT_DELETION_METRIC_NAMESPACE" \
   > .build/operations-dashboard.json <<'PY'
 import json
 import sys
@@ -858,6 +899,9 @@ api_id = sys.argv[20]
 account_export_worker_function = sys.argv[21]
 account_export_state_machine_arn = sys.argv[22]
 account_export_metric_namespace = sys.argv[23]
+account_deletion_worker_function = sys.argv[24]
+account_deletion_state_machine_arn = sys.argv[25]
+account_deletion_metric_namespace = sys.argv[26]
 
 alarm_names = [
     f"{app_name}-{stage}-api-errors",
@@ -873,6 +917,11 @@ alarm_names = [
     f"{app_name}-{stage}-account-export-worker-errors",
     f"{app_name}-{stage}-account-export-workflow-failed",
     f"{app_name}-{stage}-account-export-workflow-timed-out",
+    f"{app_name}-{stage}-account-deletion-worker-errors",
+    f"{app_name}-{stage}-account-deletion-workflow-failed",
+    f"{app_name}-{stage}-account-deletion-workflow-timed-out",
+    f"{app_name}-{stage}-account-deletion-failures",
+    f"{app_name}-{stage}-account-deletion-durable-partial-failures",
 ]
 
 alarm_arns = [
@@ -1698,6 +1747,25 @@ dashboard["widgets"].extend([
                 ["AWS/Lambda", "Duration", "FunctionName", account_export_worker_function, {"stat": "p95", "label": "Duration p95 (ms)"}],
                 [account_export_metric_namespace, "PackageSizeBytes", {"stat": "Average", "label": "Package size (bytes)", "yAxis": "right"}],
                 ["AWS/States", "ExecutionsFailed", "StateMachineArn", account_export_state_machine_arn, {"stat": "Sum", "label": "Workflow failed"}],
+            ],
+        },
+    },
+])
+
+dashboard["widgets"].extend([
+    {
+        "type": "metric", "x": 0, "y": 86, "width": 24, "height": 6,
+        "properties": {
+            "title": "Account deletion safety and completion",
+            "region": region, "period": 300, "view": "timeSeries",
+            "metrics": [
+                [account_deletion_metric_namespace, "Requested", {"stat": "Sum"}],
+                [".", "Completed", {"stat": "Sum"}],
+                [".", "DeletionFailures", {"stat": "Sum"}],
+                [".", "DurablePartialFailures", {"stat": "Sum"}],
+                ["AWS/Lambda", "Errors", "FunctionName", account_deletion_worker_function, {"stat": "Sum", "label": "Worker errors"}],
+                ["AWS/States", "ExecutionsFailed", "StateMachineArn", account_deletion_state_machine_arn, {"stat": "Sum", "label": "Workflow failed"}],
+                ["AWS/States", "ExecutionsTimedOut", "StateMachineArn", account_deletion_state_machine_arn, {"stat": "Sum", "label": "Workflow timed out"}],
             ],
         },
     },

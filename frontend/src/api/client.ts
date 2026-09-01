@@ -49,6 +49,11 @@ import type {
   AccountExportListResponse,
   AccountExportResponse,
 } from "../types/accountExport";
+import {
+  parseAccountDeletionResponse,
+  type AccountDeletionCreateResult,
+  type AccountDeletionResponse,
+} from "../types/accountDeletion";
 
 const API_ENDPOINT = frontendEnv.apiEndpoint;
 const DEVELOPMENT_IDENTITY_HEADERS: Record<string, string> =
@@ -111,10 +116,10 @@ type ApiRequestOptions = RequestInit & {
   useIdentityToken?: boolean;
 };
 
-async function apiRequest<T>(
+async function apiRequestResult<T>(
   path: string,
   options: ApiRequestOptions = {}
-): Promise<T> {
+): Promise<{ data: T; status: number }> {
   const { useIdentityToken, ...requestOptions } = options;
   const accessToken = useIdentityToken ? getIdToken() : getAccessToken();
 
@@ -165,7 +170,14 @@ async function apiRequest<T>(
     );
   }
 
-  return data as T;
+  return { data: data as T, status: response.status };
+}
+
+async function apiRequest<T>(
+  path: string,
+  options: ApiRequestOptions = {}
+): Promise<T> {
+  return (await apiRequestResult<T>(path, options)).data;
 }
 
 export async function getUsage():
@@ -209,6 +221,40 @@ export async function getAccountExport(
     `/account/exports/${encodeURIComponent(exportId)}`,
     { signal, useIdentityToken: true }
   );
+}
+
+export async function requestAccountDeletion(
+  confirmation: "DELETE_MY_ACCOUNT",
+  requestToken: string,
+  signal?: AbortSignal,
+): Promise<AccountDeletionCreateResult> {
+  const result = await apiRequestResult<unknown>(
+    "/account/deletion-requests",
+    {
+      method: "POST",
+      body: JSON.stringify({ confirmation, requestToken }),
+      signal,
+      useIdentityToken: true,
+    },
+  );
+  if (result.status !== 200 && result.status !== 202) {
+    throw new Error("Invalid account deletion response.");
+  }
+  return {
+    ...parseAccountDeletionResponse(result.data),
+    httpStatus: result.status,
+  };
+}
+
+export async function getAccountDeletionRequest(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<AccountDeletionResponse> {
+  const result = await apiRequest<unknown>(
+    `/account/deletion-requests/${encodeURIComponent(requestId)}`,
+    { signal, useIdentityToken: true },
+  );
+  return parseAccountDeletionResponse(result);
 }
 
 

@@ -15,7 +15,7 @@ from account_deletion_cognito import (
     delete_identity,
     identity_is_absent,
 )
-from account_deletion_contract import is_valid_deletion_request_id
+from account_deletion_contract import is_valid_deletion_request_id, subject_digest
 from account_deletion_dynamodb import (
     DeletionDynamoError,
     delete_user_partition,
@@ -37,7 +37,8 @@ from account_deletion_store import (
     DeletionStoreUnavailable,
     complete_deletion_request,
     get_billing_recovery,
-    get_deletion_request,
+    get_deletion_audit,
+    get_deletion_subject,
     mark_deletion_checkpoint,
     start_deletion_request,
     fail_deletion_request,
@@ -130,17 +131,24 @@ def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[
     dependencies = deps or Dependencies()
     action = str(event.get("action") or "").strip().upper()
     request_id = str(event.get("requestId") or "").strip()
-    subject = str(event.get("userId") or "").strip()
-    if action not in ACTIONS or not is_valid_deletion_request_id(request_id) or not subject:
+    if action not in ACTIONS or not is_valid_deletion_request_id(request_id):
         raise AccountDeletionInvariantError("InvalidDeletionWorkflowInput")
     try:
-        audit = get_deletion_request(
-            subject, request_id, table_resource=dependencies.table_resource
+        audit = get_deletion_audit(
+            request_id, table_resource=dependencies.table_resource
         )
         if audit is None:
             raise AccountDeletionInvariantError("DeletionOwnershipInvariant")
         if audit.get("status") == "COMPLETED":
             return {"action": action, "status": "COMPLETED", "idempotent": True}
+        subject = get_deletion_subject(
+            request_id, table_resource=dependencies.table_resource
+        )
+        if (
+            subject is None
+            or audit.get("subjectDigest") != subject_digest(subject)
+        ):
+            raise AccountDeletionInvariantError("DeletionOwnershipInvariant")
 
         if action != "FAIL" and audit.get("status") == "FAILED":
             audit = start_deletion_request(
@@ -317,7 +325,11 @@ def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[
                 table_resource=dependencies.table_resource,
                 transact_writer=dependencies.dynamodb.transact_write_items,
             )
-            return {"action": action, "status": audit["status"]}
+            return {
+                "action": action,
+                "status": audit["status"],
+                "durablePartialFailure": bool(audit.get("destructiveStartedAt")),
+            }
 
         return {"action": action, "status": "IN_PROGRESS", "idempotent": True}
     except (AccountDeletionRetryableError, AccountDeletionInvariantError):
@@ -342,5 +354,6 @@ def lambda_handler(event: dict[str, Any], context: object) -> dict[str, Any]:
         "event": "AccountDeletionActionCompleted",
         "action": result["action"],
         "status": result["status"],
+        "durablePartialFailure": result.get("durablePartialFailure", False),
     }))
     return result

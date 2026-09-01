@@ -12,6 +12,10 @@ const REFRESH_TOKEN_KEY = "jm8_refresh_token";
 const TOKEN_EXPIRES_AT_KEY = "jm8_token_expires_at";
 const PKCE_VERIFIER_KEY = "jm8_pkce_verifier";
 const OAUTH_STATE_KEY = "jm8_oauth_state";
+const ACCOUNT_DELETION_RETURN_KEY = "jm8_auth_return_intent";
+const ACCOUNT_DELETION_ACKNOWLEDGEMENT_KEY = "jm8_deletion_acknowledgement";
+const ACCOUNT_DELETION_RETURN_VALUE = "account-deletion";
+const ACCOUNT_DELETION_ACKNOWLEDGEMENT_VALUE = "processed";
 
 export const AUTH_SESSION_EXPIRED_EVENT = "jm8:auth-session-expired";
 
@@ -311,6 +315,38 @@ export function clearAuthTokens() {
   localStorage.removeItem(TOKEN_EXPIRES_AT_KEY);
   localStorage.removeItem(PKCE_VERIFIER_KEY);
   localStorage.removeItem(OAUTH_STATE_KEY);
+}
+
+export function rememberAccountDeletionReturnIntent() {
+  sessionStorage.setItem(
+    ACCOUNT_DELETION_RETURN_KEY,
+    ACCOUNT_DELETION_RETURN_VALUE,
+  );
+}
+
+export function consumeAccountDeletionReturnIntent(): boolean {
+  const matches = sessionStorage.getItem(ACCOUNT_DELETION_RETURN_KEY)
+    === ACCOUNT_DELETION_RETURN_VALUE;
+  sessionStorage.removeItem(ACCOUNT_DELETION_RETURN_KEY);
+  return matches;
+}
+
+export function clearAccountDeletionReturnIntent() {
+  sessionStorage.removeItem(ACCOUNT_DELETION_RETURN_KEY);
+}
+
+export function rememberAccountDeletionAcknowledgement() {
+  sessionStorage.setItem(
+    ACCOUNT_DELETION_ACKNOWLEDGEMENT_KEY,
+    ACCOUNT_DELETION_ACKNOWLEDGEMENT_VALUE,
+  );
+}
+
+export function consumeAccountDeletionAcknowledgement(): boolean {
+  const matches = sessionStorage.getItem(ACCOUNT_DELETION_ACKNOWLEDGEMENT_KEY)
+    === ACCOUNT_DELETION_ACKNOWLEDGEMENT_VALUE;
+  sessionStorage.removeItem(ACCOUNT_DELETION_ACKNOWLEDGEMENT_KEY);
+  return matches;
 }
 
 export function expireAuthSession() {

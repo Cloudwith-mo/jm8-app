@@ -55,10 +55,11 @@ class AccountDeletionStoreTests(unittest.TestCase):
         self.assertFalse(replayed)
         self.assertEqual(request["requestId"], REQUEST_ID)
         transaction = writer.call_args.kwargs["TransactItems"]
-        self.assertEqual(len(transaction), 3)
+        self.assertEqual(len(transaction), 4)
         audit = deserialize_item(transaction[0]["Put"]["Item"])
         lock = deserialize_item(transaction[1]["Put"]["Item"])
         idempotency = deserialize_item(transaction[2]["Put"]["Item"])
+        subject_recovery = deserialize_item(transaction[3]["Put"]["Item"])
         self.assertEqual(audit["PK"], f"ACCOUNT_DELETION#{REQUEST_ID}")
         self.assertEqual(audit["SK"], "REQUEST")
         self.assertEqual(
@@ -69,10 +70,17 @@ class AccountDeletionStoreTests(unittest.TestCase):
         self.assertEqual(lock["SK"], "ACTIVE")
         self.assertTrue(idempotency["SK"].startswith("REQUEST_TOKEN#"))
         self.assertIn(store.TTL_ATTRIBUTE, idempotency)
+        self.assertEqual(subject_recovery["SK"], store.SUBJECT_RECOVERY_SK)
+        self.assertEqual(
+            subject_recovery["cognitoSubject"], "raw-cognito-subject"
+        )
+        self.assertIn(store.TTL_ATTRIBUTE, subject_recovery)
         serialized = json.dumps(transaction)
         self.assertNotIn("USER#", serialized)
-        self.assertNotIn("raw-cognito-subject", serialized)
         self.assertNotIn("secret-request-token-1234", serialized)
+        self.assertNotIn("raw-cognito-subject", json.dumps(audit))
+        self.assertNotIn("raw-cognito-subject", repr(lock))
+        self.assertNotIn("raw-cognito-subject", repr(idempotency))
 
     @patch.object(store, "_get_item")
     def test_request_token_replay_returns_same_audit_without_writing(self, get_item):
@@ -95,6 +103,22 @@ class AccountDeletionStoreTests(unittest.TestCase):
         self.assertTrue(replayed)
         self.assertEqual(request, audit)
         writer.assert_not_called()
+
+    @patch.object(store, "_get_item")
+    def test_subject_recovery_is_internal_validated_and_tamper_evident(self, get_item):
+        digest = store.subject_digest("raw-cognito-subject")
+        get_item.return_value = {
+            "PK": store.audit_pk(REQUEST_ID),
+            "SK": store.SUBJECT_RECOVERY_SK,
+            "requestId": REQUEST_ID,
+            "subjectDigest": digest,
+            "cognitoSubject": "raw-cognito-subject",
+        }
+        self.assertEqual(
+            store.get_deletion_subject(REQUEST_ID), "raw-cognito-subject"
+        )
+        get_item.return_value["subjectDigest"] = store.subject_digest("other")
+        self.assertIsNone(store.get_deletion_subject(REQUEST_ID))
 
     @patch.object(store, "utc_now", return_value=FIXED_NOW)
     @patch.object(store, "_get_item")
@@ -226,7 +250,7 @@ class AccountDeletionStoreTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "FAILED")
         transaction = writer.call_args.kwargs["TransactItems"]
-        self.assertEqual(len(transaction), 3)
+        self.assertEqual(len(transaction), 4)
         audit_update = transaction[0]["Update"]
         self.assertIn("#ttl = :ttl", audit_update["UpdateExpression"])
         audit_values = deserialize_item(audit_update["ExpressionAttributeValues"])
@@ -240,7 +264,12 @@ class AccountDeletionStoreTests(unittest.TestCase):
             for item in transaction[1:]
         }
         self.assertEqual(
-            deleted_sort_keys, {store.ACTIVE_SK, store.BILLING_RECOVERY_SK},
+            deleted_sort_keys,
+            {
+                store.ACTIVE_SK,
+                store.BILLING_RECOVERY_SK,
+                store.SUBJECT_RECOVERY_SK,
+            },
         )
 
     @patch.object(store, "utc_now", return_value=FIXED_NOW)
@@ -270,7 +299,7 @@ class AccountDeletionStoreTests(unittest.TestCase):
         )
 
         transaction = writer.call_args.kwargs["TransactItems"]
-        self.assertEqual(len(transaction), 3)
+        self.assertEqual(len(transaction), 4)
         self.assertTrue(all("Update" in item for item in transaction))
         self.assertTrue(all(
             "REMOVE #ttl" in item["Update"]["UpdateExpression"]
@@ -304,7 +333,7 @@ class AccountDeletionStoreTests(unittest.TestCase):
 
         self.assertEqual(result["destructiveStartedAt"], "2026-08-30T12:00:00Z")
         transaction = writer.call_args.kwargs["TransactItems"]
-        self.assertEqual(len(transaction), 3)
+        self.assertEqual(len(transaction), 4)
         self.assertTrue(all("Update" in item for item in transaction))
         self.assertIn(
             "destructiveStartedAt = if_not_exists",
@@ -319,7 +348,11 @@ class AccountDeletionStoreTests(unittest.TestCase):
                 deserialize_item(item["Update"]["Key"])["SK"]
                 for item in transaction[1:]
             },
-            {store.ACTIVE_SK, store.BILLING_RECOVERY_SK},
+            {
+                store.ACTIVE_SK,
+                store.BILLING_RECOVERY_SK,
+                store.SUBJECT_RECOVERY_SK,
+            },
         )
 
     @patch.object(store, "utc_now", return_value=FIXED_NOW)
@@ -426,7 +459,7 @@ class AccountDeletionStoreTests(unittest.TestCase):
 
         self.assertEqual(result, resumed)
         transaction = writer.call_args.kwargs["TransactItems"]
-        self.assertEqual(len(transaction), 3)
+        self.assertEqual(len(transaction), 4)
         self.assertTrue(all(
             "REMOVE" in item["Update"]["UpdateExpression"]
             and "#ttl" in item["Update"]["UpdateExpression"]
@@ -461,7 +494,7 @@ class AccountDeletionStoreTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "COMPLETED")
         transaction = writer.call_args.kwargs["TransactItems"]
-        self.assertEqual(len(transaction), 3)
+        self.assertEqual(len(transaction), 4)
         self.assertIn(
             "attribute_exists(verifiedAt)",
             transaction[0]["Update"]["ConditionExpression"],
@@ -470,7 +503,14 @@ class AccountDeletionStoreTests(unittest.TestCase):
             deserialize_item(item["Delete"]["Key"])["SK"]
             for item in transaction[1:]
         }
-        self.assertEqual(deleted_sort_keys, {store.ACTIVE_SK, store.BILLING_RECOVERY_SK})
+        self.assertEqual(
+            deleted_sort_keys,
+            {
+                store.ACTIVE_SK,
+                store.BILLING_RECOVERY_SK,
+                store.SUBJECT_RECOVERY_SK,
+            },
+        )
         serialized = json.dumps(transaction)
         self.assertNotIn("cus_private_recovery", serialized)
         completion_values = deserialize_item(

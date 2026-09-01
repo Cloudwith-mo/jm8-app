@@ -10,6 +10,7 @@ set -euo pipefail
 : "${RAW_BUCKET:?RAW_BUCKET is required}"
 : "${EXPORT_BUCKET:?EXPORT_BUCKET is required}"
 : "${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required}"
+: "${COGNITO_USER_POOL_NAME:?COGNITO_USER_POOL_NAME is required}"
 : "${STRIPE_SECRET_ARN:?STRIPE_SECRET_ARN is required}"
 : "${OCR_WORKFLOW_ARN:?OCR_WORKFLOW_ARN is required}"
 : "${HISTORICAL_REANALYSIS_WORKFLOW_ARN:?HISTORICAL_REANALYSIS_WORKFLOW_ARN is required}"
@@ -32,6 +33,7 @@ WORKFLOW_LOG_GROUP="/aws/vendedlogs/states/${WORKFLOW_NAME}"
 BUILD_DIR="$BACKEND_DIR/.build/account-deletion"
 ZIP_FILE="$BUILD_DIR/account-deletion.zip"
 RESERVED_CONCURRENCY="2"
+EPHEMERAL_STORAGE_MB="512"
 if [ "$STAGE" = "prod" ]; then
   RESERVED_CONCURRENCY="1"
 fi
@@ -41,6 +43,13 @@ if [ "$CALLER_ACCOUNT" != "$ACCOUNT_ID" ]; then
   echo "Caller account does not match EXPECTED_AWS_ACCOUNT_ID." >&2
   exit 1
 fi
+
+RESOLVED_USER_POOL_NAME="$(aws cognito-idp describe-user-pool --user-pool-id "$COGNITO_USER_POOL_ID" --query UserPool.Name --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+if [ "$RESOLVED_USER_POOL_NAME" != "$COGNITO_USER_POOL_NAME" ] || [ "$COGNITO_USER_POOL_NAME" != "${APP_NAME}-${STAGE}-users" ]; then
+  echo "Cognito user pool does not match the exact deployment environment." >&2
+  exit 1
+fi
+aws secretsmanager describe-secret --secret-id "$STRIPE_SECRET_ARN" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
 
 cd "$BACKEND_DIR"
 ./bin/package
@@ -68,7 +77,7 @@ execution_arns = [arn.replace(":stateMachine:", ":execution:") + ":*" for arn in
 print(json.dumps({
     "Version": "2012-10-17",
     "Statement": [
-        {"Sid":"ExactMainTable","Effect":"Allow","Action":["dynamodb:Query","dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchWriteItem","dynamodb:TransactWriteItems"],"Resource":[table_arn, table_arn + "/index/*"]},
+        {"Sid":"ExactMainTable","Effect":"Allow","Action":["dynamodb:Query","dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchWriteItem","dynamodb:TransactWriteItems"],"Resource":table_arn},
         {"Sid":"ListRawDeletionPrefixes","Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":f"arn:aws:s3:::{raw}","Condition":{"StringLike":{"s3:prefix":"users/*/uploads/*"}}},
         {"Sid":"ListExportDeletionPrefixes","Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":f"arn:aws:s3:::{exports}","Condition":{"StringLike":{"s3:prefix":"exports/*"}}},
         {"Sid":"DeleteRawPrefix","Effect":"Allow","Action":["s3:DeleteObject","s3:DeleteObjectVersion"],"Resource":f"arn:aws:s3:::{raw}/users/*/uploads/*"},
@@ -97,10 +106,10 @@ aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAM
 aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole --profile "$AWS_PROFILE"
 WORKER_ROLE_ARN="$(aws iam get-role --role-name "$WORKER_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
 
-python3 - "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" "$STAGE" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
+python3 - "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" "$APP_NAME" "$STAGE" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
 import json
 import sys
-table, raw, exports, pool, secret, ocr, reanalysis, export_workflow, stage = sys.argv[1:]
+table, raw, exports, pool, secret, ocr, reanalysis, export_workflow, app, stage = sys.argv[1:]
 print(json.dumps({"Variables": {
     "TABLE_NAME": table,
     "RAW_BUCKET": raw,
@@ -110,18 +119,19 @@ print(json.dumps({"Variables": {
     "OCR_WORKFLOW_ARN": ocr,
     "HISTORICAL_REANALYSIS_WORKFLOW_ARN": reanalysis,
     "ACCOUNT_EXPORT_WORKFLOW_ARN": export_workflow,
+    "APP_NAME": app,
     "STAGE": stage,
 }}))
 PY_ENV
 chmod 600 "$BUILD_DIR/worker-environment.json"
 
 if aws lambda get-function --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
-  aws lambda update-function-code --function-name "$WORKER_NAME" --zip-file "fileb://${ZIP_FILE}" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda update-function-code --function-name "$WORKER_NAME" --zip-file "fileb://${ZIP_FILE}" --architectures arm64 --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
-  aws lambda update-function-configuration --function-name "$WORKER_NAME" --runtime python3.12 --role "$WORKER_ROLE_ARN" --handler account_deletion_worker.lambda_handler --timeout 900 --memory-size 512 --environment "file://${BUILD_DIR}/worker-environment.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda update-function-configuration --function-name "$WORKER_NAME" --runtime python3.12 --role "$WORKER_ROLE_ARN" --handler account_deletion_worker.lambda_handler --timeout 900 --memory-size 512 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-updated --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
 else
-  aws lambda create-function --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_deletion_worker.lambda_handler --zip-file "fileb://${ZIP_FILE}" --timeout 900 --memory-size 512 --environment "file://${BUILD_DIR}/worker-environment.json" --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda create-function --function-name "$WORKER_NAME" --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" --handler account_deletion_worker.lambda_handler --zip-file "fileb://${ZIP_FILE}" --timeout 900 --memory-size 512 --ephemeral-storage Size="$EPHEMERAL_STORAGE_MB" --environment "file://${BUILD_DIR}/worker-environment.json" --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
 fi
 aws lambda wait function-active-v2 --function-name "$WORKER_NAME" --profile "$AWS_PROFILE" --region "$AWS_REGION"
 aws lambda put-function-concurrency --function-name "$WORKER_NAME" --reserved-concurrent-executions "$RESERVED_CONCURRENCY" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
@@ -166,14 +176,26 @@ else
 fi
 aws stepfunctions tag-resource --resource-arn "$WORKFLOW_ARN" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --profile "$AWS_PROFILE" --region "$AWS_REGION"
 
-aws logs put-metric-filter --log-group-name "$WORKER_LOG_GROUP" --filter-name AccountDeletionCompleted --filter-pattern '{ $.event = "AccountDeletionActionCompleted" && $.action = "COMPLETE" && $.status = "COMPLETED" }' --metric-transformations metricName=Completed,metricNamespace="JM8/${STAGE}/AccountDeletion",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
-aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-worker-errors" --namespace AWS/Lambda --metric-name Errors --dimensions Name=FunctionName,Value="$WORKER_NAME" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --profile "$AWS_PROFILE" --region "$AWS_REGION"
-aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-workflow-failed" --namespace AWS/States --metric-name ExecutionsFailed --dimensions Name=StateMachineArn,Value="$WORKFLOW_ARN" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --profile "$AWS_PROFILE" --region "$AWS_REGION"
-python3 - "$AWS_REGION" "$WORKER_NAME" "$WORKFLOW_ARN" > "$BUILD_DIR/dashboard.json" <<'PY_DASHBOARD'
+ACCOUNT_DELETION_METRIC_NAMESPACE="JM8/${STAGE}/AccountDeletion"
+API_LOG_GROUP="/aws/lambda/${APP_NAME}-${STAGE}-api"
+aws logs create-log-group --log-group-name "$API_LOG_GROUP" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1 || true
+aws logs put-retention-policy --log-group-name "$API_LOG_GROUP" --retention-in-days 30 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-metric-filter --log-group-name "$API_LOG_GROUP" --filter-name "${APP_NAME}-${STAGE}-account-deletion-requested" --filter-pattern '{ $.event = "AccountDeletionRequested" }' --metric-transformations metricName=Requested,metricNamespace="$ACCOUNT_DELETION_METRIC_NAMESPACE",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-metric-filter --log-group-name "$API_LOG_GROUP" --filter-name "${APP_NAME}-${STAGE}-account-deletion-workflow-start-failed" --filter-pattern '{ $.event = "AccountDeletionWorkflowStartFailed" && $.failureCode = "DeletionWorkflowStartFailed" }' --metric-transformations metricName=DeletionFailures,metricNamespace="$ACCOUNT_DELETION_METRIC_NAMESPACE",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-metric-filter --log-group-name "$WORKER_LOG_GROUP" --filter-name "${APP_NAME}-${STAGE}-account-deletion-completed" --filter-pattern '{ $.event = "AccountDeletionActionCompleted" && $.action = "COMPLETE" && $.status = "COMPLETED" }' --metric-transformations metricName=Completed,metricNamespace="JM8/${STAGE}/AccountDeletion",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-metric-filter --log-group-name "$WORKER_LOG_GROUP" --filter-name "${APP_NAME}-${STAGE}-account-deletion-failed" --filter-pattern '{ $.event = "AccountDeletionActionCompleted" && $.action = "FAIL" && $.status = "FAILED" }' --metric-transformations metricName=DeletionFailures,metricNamespace="$ACCOUNT_DELETION_METRIC_NAMESPACE",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws logs put-metric-filter --log-group-name "$WORKER_LOG_GROUP" --filter-name "${APP_NAME}-${STAGE}-account-deletion-durable-partial-failed" --filter-pattern '{ $.event = "AccountDeletionActionCompleted" && $.action = "FAIL" && $.durablePartialFailure = true }' --metric-transformations metricName=DurablePartialFailures,metricNamespace="$ACCOUNT_DELETION_METRIC_NAMESPACE",metricValue=1 --profile "$AWS_PROFILE" --region "$AWS_REGION"
+ALARM_TAGS=(Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli)
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-worker-errors" --namespace AWS/Lambda --metric-name Errors --dimensions Name=FunctionName,Value="$WORKER_NAME" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --tags "${ALARM_TAGS[@]}" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-workflow-failed" --namespace AWS/States --metric-name ExecutionsFailed --dimensions Name=StateMachineArn,Value="$WORKFLOW_ARN" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --tags "${ALARM_TAGS[@]}" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-workflow-timed-out" --namespace AWS/States --metric-name ExecutionsTimedOut --dimensions Name=StateMachineArn,Value="$WORKFLOW_ARN" --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --tags "${ALARM_TAGS[@]}" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-failures" --namespace "$ACCOUNT_DELETION_METRIC_NAMESPACE" --metric-name DeletionFailures --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --tags "${ALARM_TAGS[@]}" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${APP_NAME}-${STAGE}-account-deletion-durable-partial-failures" --namespace "$ACCOUNT_DELETION_METRIC_NAMESPACE" --metric-name DurablePartialFailures --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching --tags "${ALARM_TAGS[@]}" --profile "$AWS_PROFILE" --region "$AWS_REGION"
+python3 - "$AWS_REGION" "$WORKER_NAME" "$WORKFLOW_ARN" "$ACCOUNT_DELETION_METRIC_NAMESPACE" > "$BUILD_DIR/dashboard.json" <<'PY_DASHBOARD'
 import json
 import sys
-region, worker, workflow = sys.argv[1:]
-print(json.dumps({"widgets":[{"type":"metric","width":12,"height":6,"properties":{"region":region,"title":"Account deletion","metrics":[["AWS/Lambda","Errors","FunctionName",worker],["AWS/States","ExecutionsFailed","StateMachineArn",workflow],["AWS/States","ExecutionsTimedOut","StateMachineArn",workflow]]}}]}))
+region, worker, workflow, namespace = sys.argv[1:]
+print(json.dumps({"widgets":[{"type":"metric","width":12,"height":6,"properties":{"region":region,"title":"Account deletion","metrics":[["AWS/Lambda","Errors","FunctionName",worker],["AWS/States","ExecutionsFailed","StateMachineArn",workflow],["AWS/States","ExecutionsTimedOut","StateMachineArn",workflow],[namespace,"Requested"],[namespace,"Completed"],[namespace,"DeletionFailures"],[namespace,"DurablePartialFailures"]]}}]}))
 PY_DASHBOARD
 aws cloudwatch put-dashboard --dashboard-name "${APP_NAME}-${STAGE}-account-deletion" --dashboard-body "file://${BUILD_DIR}/dashboard.json" --profile "$AWS_PROFILE" --region "$AWS_REGION"
 

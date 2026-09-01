@@ -23,6 +23,17 @@ import account_deletion_api as api  # noqa: E402
 
 
 REQUEST_ID = "del_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+WORKFLOW_ARN = (
+    "arn:aws:states:us-east-1:000000000000:"
+    "stateMachine:journalm8-test-account-deletion-workflow"
+)
+WORKFLOW_ENV = {
+    "APP_NAME": "journalm8",
+    "STAGE": "test",
+    "AWS_REGION": "us-east-1",
+    "EXPECTED_AWS_ACCOUNT_ID": "000000000000",
+    "ACCOUNT_DELETION_WORKFLOW_ARN": WORKFLOW_ARN,
+}
 NOW = 1_777_800_000
 VALID_BODY = {
     "confirmation": "DELETE_MY_ACCOUNT",
@@ -57,9 +68,7 @@ class AccountDeletionApiTests(unittest.TestCase):
         client.start_execution.return_value = {
             "executionArn": "arn:aws:states:us-east-1:000:execution:deletion:test",
         }
-        with patch.dict(os.environ, {
-            "ACCOUNT_DELETION_WORKFLOW_ARN": "arn:aws:states:us-east-1:000:stateMachine:deletion",
-        }):
+        with patch.dict(os.environ, WORKFLOW_ENV):
             result = api.start_account_deletion_workflow(
                 request_id=REQUEST_ID,
                 subject="raw-cognito-subject",
@@ -70,9 +79,11 @@ class AccountDeletionApiTests(unittest.TestCase):
         self.assertEqual(arguments["name"], REQUEST_ID)
         self.assertEqual(json.loads(arguments["input"]), {
             "requestId": REQUEST_ID,
-            "userId": "raw-cognito-subject",
         })
-        for forbidden in ("email", "requestToken", "claims", "stripe"):
+        for forbidden in (
+            "userId", "raw-cognito-subject", "email", "requestToken",
+            "claims", "stripe",
+        ):
             self.assertNotIn(forbidden, arguments["input"])
 
     def test_execution_already_exists_requires_exact_request_name(self):
@@ -85,9 +96,7 @@ class AccountDeletionApiTests(unittest.TestCase):
             "name": REQUEST_ID,
             "executionArn": "arn:aws:states:us-east-1:000:execution:deletion:actual",
         }]}
-        with patch.dict(os.environ, {
-            "ACCOUNT_DELETION_WORKFLOW_ARN": "arn:aws:states:us-east-1:000:stateMachine:deletion",
-        }):
+        with patch.dict(os.environ, WORKFLOW_ENV):
             result = api.start_account_deletion_workflow(
                 request_id=REQUEST_ID, subject="subject-a", client=client,
             )
@@ -97,9 +106,7 @@ class AccountDeletionApiTests(unittest.TestCase):
             "name": "del_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "executionArn": "arn:aws:states:us-east-1:000:execution:deletion:other",
         }]}
-        with patch.dict(os.environ, {
-            "ACCOUNT_DELETION_WORKFLOW_ARN": "arn:aws:states:us-east-1:000:stateMachine:deletion",
-        }), self.assertRaises(ClientError):
+        with patch.dict(os.environ, WORKFLOW_ENV), self.assertRaises(ClientError):
             api.start_account_deletion_workflow(
                 request_id=REQUEST_ID, subject="subject-a", client=client,
             )
@@ -221,6 +228,31 @@ class AccountDeletionApiTests(unittest.TestCase):
                 source = module.read_text()
                 self.assertNotIn("str(exc)", source)
                 self.assertNotIn("repr(exc)", source)
+
+    def test_default_starter_is_enabled_only_for_exact_stage_workflow(self):
+        for workflow_arn in (
+            "arn:aws:states:us-east-1:000000000000:stateMachine:journalm8-dev-account-deletion-workflow",
+            "arn:aws:states:us-west-2:000000000000:stateMachine:journalm8-test-account-deletion-workflow",
+            "arn:aws:states:us-east-1:999999999999:stateMachine:journalm8-test-account-deletion-workflow",
+            "arn:aws-us-gov:states:us-east-1:000000000000:stateMachine:journalm8-test-account-deletion-workflow",
+            "arn:aws:states:us-west-2:999999999999:stateMachine:unrelated",
+            "not-an-arn",
+        ):
+            with self.subTest(workflow_arn=workflow_arn), patch.dict(
+                os.environ,
+                {
+                    "APP_NAME": "journalm8",
+                    "STAGE": "test",
+                    "AWS_REGION": "us-east-1",
+                    "EXPECTED_AWS_ACCOUNT_ID": "000000000000",
+                    "ACCOUNT_DELETION_WORKFLOW_ARN": workflow_arn,
+                },
+            ):
+                self.assertEqual(api.configured_account_deletion_workflow_arn(), "")
+        with patch.dict(os.environ, WORKFLOW_ENV):
+            self.assertEqual(
+                api.configured_account_deletion_workflow_arn(), WORKFLOW_ARN
+            )
 
     @patch.object(api, "create_or_replay_deletion")
     @patch.object(api.time, "time", return_value=NOW)

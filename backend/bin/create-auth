@@ -166,6 +166,7 @@ COGNITO_DOMAIN="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognit
 
 COGNITO_ENV_TEMP="$(mktemp "$COGNITO_ENV_DIR/.${STAGE}.cognito.env.XXXXXX")"
 {
+  printf 'export COGNITO_USER_POOL_NAME=%q\n' "$USER_POOL_NAME"
   printf 'export COGNITO_USER_POOL_ID=%q\n' "$USER_POOL_ID"
   printf 'export COGNITO_APP_CLIENT_ID=%q\n' "$APP_CLIENT_ID"
   printf 'export COGNITO_DOMAIN=%q\n' "$COGNITO_DOMAIN"

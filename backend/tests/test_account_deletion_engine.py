@@ -268,8 +268,30 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
             "event": "AccountDeletionActionCompleted",
             "action": "COMPLETE",
             "status": "COMPLETED",
+            "durablePartialFailure": False,
         })
         self.assertNotIn("cus_private_recovery", json.dumps(record))
+
+    @patch("builtins.print")
+    @patch.object(worker, "run_action")
+    def test_partial_failure_log_is_boolean_only(self, run_action, log):
+        run_action.return_value = {
+            "action": "FAIL",
+            "status": "FAILED",
+            "durablePartialFailure": True,
+            "stripeCustomerId": "cus_private_recovery",
+            "userId": SUBJECT,
+        }
+        worker.lambda_handler({}, None)
+        record = json.loads(log.call_args.args[0])
+        self.assertEqual(record, {
+            "event": "AccountDeletionActionCompleted",
+            "action": "FAIL",
+            "status": "FAILED",
+            "durablePartialFailure": True,
+        })
+        self.assertNotIn("cus_private_recovery", json.dumps(record))
+        self.assertNotIn(SUBJECT, json.dumps(record))
 
     def test_actions_and_workflow_order_are_exact(self):
         expected = (
@@ -291,9 +313,9 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
         self.assertEqual(observed, list(expected[:-1]))
         self.assertEqual(definition["TimeoutSeconds"], 7200)
 
-    @patch.object(worker, "get_deletion_request")
-    def test_every_action_is_idempotent_after_completion(self, get_request):
-        get_request.return_value = {
+    @patch.object(worker, "get_deletion_audit")
+    def test_every_action_is_idempotent_after_completion(self, get_audit):
+        get_audit.return_value = {
             "requestId": REQUEST_ID,
             "status": "COMPLETED",
         }
@@ -327,16 +349,20 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
             failure = definition["States"][f"Failure{phase}"]
             self.assertEqual(failure["Parameters"]["action"], "FAIL")
             self.assertEqual(failure["Parameters"]["failedPhase"], phase)
+            self.assertNotIn("userId.$", state.get("Parameters", {}))
+            self.assertNotIn("userId.$", failure["Parameters"])
 
     @patch.object(worker, "mark_deletion_checkpoint")
     @patch.object(worker, "prefix_is_empty", return_value=False)
     @patch.object(worker, "get_billing_recovery", return_value=None)
-    @patch.object(worker, "get_deletion_request")
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
     def test_verification_failure_prevents_completion(
-        self, get_request, recovery, prefix_empty, checkpoint,
+        self, get_audit, get_subject, recovery, prefix_empty, checkpoint,
     ):
-        get_request.return_value = {
+        get_audit.return_value = {
             "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
             "status": "IN_PROGRESS",
             "destructiveStartedAt": "2026-08-30T12:00:00Z",
         }
@@ -348,12 +374,14 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
 
     @patch.object(worker, "delete_user_partition")
     @patch.object(worker, "get_billing_recovery")
-    @patch.object(worker, "get_deletion_request")
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
     def test_reverse_lookup_recovery_survives_partition_delete_failure_window(
-        self, get_request, recovery, delete_partition,
+        self, get_audit, get_subject, recovery, delete_partition,
     ):
-        get_request.return_value = {
+        get_audit.return_value = {
             "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
             "status": "IN_PROGRESS",
             "destructiveStartedAt": "2026-08-30T12:00:00Z",
         }
@@ -396,7 +424,7 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
         workflow = (ROOT / "workflows" / "account-deletion.asl.json").read_text()
         for sensitive in (
             "email", "journal", "requestToken", "stripeCustomerId",
-            "subscriptionId", "claims", "objectKey",
+            "subscriptionId", "claims", "objectKey", "userId",
         ):
             self.assertNotIn(sensitive, workflow)
 

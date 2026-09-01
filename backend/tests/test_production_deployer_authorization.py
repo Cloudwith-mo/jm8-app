@@ -555,6 +555,14 @@ class PolicyGenerationTests(unittest.TestCase):
             item for item in statements
             if item["Sid"] == "ManageProductionAlarms"
         )
+        self.assertEqual(
+            set(alarms["Action"]),
+            {
+                "cloudwatch:DescribeAlarms",
+                "cloudwatch:PutMetricAlarm",
+                "cloudwatch:TagResource",
+            },
+        )
         for alarm_name in (
             "journalm8-prod-ocr-worker-errors",
             "journalm8-prod-api-gateway-5xx",
@@ -1031,7 +1039,41 @@ class PolicyGenerationTests(unittest.TestCase):
                     f"arn:aws:iam::{ACCOUNT_ID}:role/"
                     "journalm8-prod-account-export-worker-role"
                 ),
+                (
+                    f"arn:aws:iam::{ACCOUNT_ID}:role/"
+                    "journalm8-prod-account-deletion-worker-role"
+                ),
             },
+        )
+
+    def test_account_deletion_roles_are_exactly_authorized(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-iam"
+        ]["Statement"]
+        managed = next(
+            statement
+            for statement in statements
+            if statement["Sid"] == "ManageOnlyProductionRuntimeRoles"
+        )
+        self.assertIn(
+            f"arn:aws:iam::{ACCOUNT_ID}:role/"
+            "journalm8-prod-account-deletion-worker-role",
+            managed["Resource"],
+        )
+        self.assertIn(
+            f"arn:aws:iam::{ACCOUNT_ID}:role/"
+            "journalm8-prod-account-deletion-step-role",
+            managed["Resource"],
+        )
+        step_pass = next(
+            statement
+            for statement in statements
+            if statement["Sid"] == "PassOnlyProductionWorkflowRolesToStepFunctions"
+        )
+        self.assertIn(
+            f"arn:aws:iam::{ACCOUNT_ID}:role/"
+            "journalm8-prod-account-deletion-step-role",
+            step_pass["Resource"],
         )
 
     def test_generated_documents_contain_no_secret_material(self):
@@ -1046,6 +1088,37 @@ class PolicyGenerationTests(unittest.TestCase):
             "AWS_SESSION_TOKEN",
         ):
             self.assertNotIn(forbidden, serialized)
+
+    def test_deployer_cannot_directly_execute_account_deletion(self):
+        policies = generate_policies()
+        forbidden_actions = {
+            "cognito-idp:AdminDeleteUser",
+            "cognito-idp:AdminUserGlobalSignOut",
+            "dynamodb:DeleteItem",
+            "dynamodb:BatchWriteItem",
+            "lambda:InvokeFunction",
+            "states:StartExecution",
+            "states:StopExecution",
+        }
+        all_actions = {
+            action
+            for document in policies.values()
+            for statement in document["Statement"]
+            for action in statement["Action"]
+        }
+        self.assertTrue(forbidden_actions.isdisjoint(all_actions))
+
+        for document in policies.values():
+            for statement in document["Statement"]:
+                resources = statement["Resource"]
+                if isinstance(resources, str):
+                    resources = [resources]
+                if any(
+                    "journalm8-prod-raw-" in resource
+                    or "journalm8-prod-exports-" in resource
+                    for resource in resources
+                ):
+                    self.assertNotIn("s3:DeleteObjectVersion", statement["Action"])
 
 
 class ReconciliationTests(unittest.TestCase):

@@ -30,6 +30,7 @@ ACTIVE_LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
 IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 FAILED_AUDIT_TTL_SECONDS = 30 * 24 * 60 * 60
 BILLING_RECOVERY_SK = "BILLING_RECOVERY"
+SUBJECT_RECOVERY_SK = "SUBJECT_RECOVERY"
 # The table already uses this attribute as its configured DynamoDB TTL key.
 TTL_ATTRIBUTE = "accountExportTtlEpoch"
 
@@ -125,6 +126,45 @@ def get_deletion_request(
     )
 
 
+def get_deletion_audit(
+    request_id: str,
+    *,
+    table_resource: Any = None,
+) -> dict[str, Any] | None:
+    """Read an audit by opaque ID for the trusted deletion worker only."""
+    if not isinstance(request_id, str):
+        return None
+    return _get_item(
+        audit_pk(request_id),
+        AUDIT_SK,
+        table_resource=table_resource,
+    )
+
+
+def get_deletion_subject(
+    request_id: str,
+    *,
+    table_resource: Any = None,
+) -> str | None:
+    """Resolve the short-lived internal subject recovery record."""
+    item = _get_item(
+        audit_pk(request_id),
+        SUBJECT_RECOVERY_SK,
+        table_resource=table_resource,
+    )
+    subject = item.get("cognitoSubject") if item else None
+    digest = item.get("subjectDigest") if item else None
+    if (
+        item is None
+        or item.get("requestId") != request_id
+        or not isinstance(subject, str)
+        or not isinstance(digest, str)
+        or not hmac.compare_digest(subject_digest(subject), digest)
+    ):
+        return None
+    return subject
+
+
 def has_active_deletion(
     subject: str,
     *,
@@ -211,6 +251,14 @@ def create_or_replay_deletion(
         "requestId": request_id,
         TTL_ATTRIBUTE: epoch + IDEMPOTENCY_TTL_SECONDS,
     }
+    subject_recovery = {
+        "PK": audit_pk(request_id),
+        "SK": SUBJECT_RECOVERY_SK,
+        "requestId": request_id,
+        "subjectDigest": digest,
+        "cognitoSubject": subject.strip(),
+        TTL_ATTRIBUTE: epoch + ACTIVE_LOCK_TTL_SECONDS,
+    }
     writer = (
         transact_writer
         if transact_writer is not None
@@ -248,6 +296,11 @@ def create_or_replay_deletion(
                 "ExpressionAttributeValues": serialize_attribute_map({
                     ":now": epoch,
                 }),
+            }},
+            {"Put": {
+                "TableName": resource.name,
+                "Item": serialize_attribute_map(subject_recovery),
+                "ConditionExpression": "attribute_not_exists(PK)",
             }},
         ])
     except ClientError as exc:
@@ -393,6 +446,18 @@ def fail_deletion_request(
                     ":request_id": request_id,
                 }),
             }},
+            {"Update": {
+                "TableName": resource.name,
+                "Key": serialize_attribute_map({
+                    "PK": audit_pk(request_id), "SK": SUBJECT_RECOVERY_SK,
+                }),
+                "UpdateExpression": "REMOVE #ttl",
+                "ConditionExpression": "subjectDigest = :subject",
+                "ExpressionAttributeNames": {"#ttl": TTL_ATTRIBUTE},
+                "ExpressionAttributeValues": serialize_attribute_map({
+                    ":subject": digest,
+                }),
+            }},
         ]
     else:
         coordination_changes = [
@@ -418,6 +483,18 @@ def fail_deletion_request(
                 ),
                 "ExpressionAttributeValues": serialize_attribute_map({
                     ":request_id": request_id,
+                }),
+            }},
+            {"Delete": {
+                "TableName": resource.name,
+                "Key": serialize_attribute_map({
+                    "PK": audit_pk(request_id), "SK": SUBJECT_RECOVERY_SK,
+                }),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) OR subjectDigest = :subject"
+                ),
+                "ExpressionAttributeValues": serialize_attribute_map({
+                    ":subject": digest,
                 }),
             }},
         ]
@@ -496,6 +573,18 @@ def start_deletion_request(
                     "ExpressionAttributeNames": {"#ttl": TTL_ATTRIBUTE},
                     "ExpressionAttributeValues": serialize_attribute_map({
                         ":request_id": request_id,
+                    }),
+                }},
+                {"Update": {
+                    "TableName": resource.name,
+                    "Key": serialize_attribute_map({
+                        "PK": audit_pk(request_id), "SK": SUBJECT_RECOVERY_SK,
+                    }),
+                    "UpdateExpression": "REMOVE #ttl",
+                    "ConditionExpression": "subjectDigest = :subject",
+                    "ExpressionAttributeNames": {"#ttl": TTL_ATTRIBUTE},
+                    "ExpressionAttributeValues": serialize_attribute_map({
+                        ":subject": digest,
                     }),
                 }},
             ])
@@ -637,6 +726,18 @@ def begin_destructive_deletion(
                     ":request_id": request_id,
                 }),
             }},
+            {"Update": {
+                "TableName": resource.name,
+                "Key": serialize_attribute_map({
+                    "PK": audit_pk(request_id), "SK": SUBJECT_RECOVERY_SK,
+                }),
+                "UpdateExpression": "REMOVE #ttl",
+                "ConditionExpression": "subjectDigest = :subject",
+                "ExpressionAttributeNames": {"#ttl": TTL_ATTRIBUTE},
+                "ExpressionAttributeValues": serialize_attribute_map({
+                    ":subject": digest,
+                }),
+            }},
         ])
     except ClientError as exc:
         _log_store_failure(exc, "TransactWriteItems")
@@ -752,6 +853,18 @@ def complete_deletion_request(
                 ),
                 "ExpressionAttributeValues": serialize_attribute_map({
                     ":request_id": request_id,
+                }),
+            }},
+            {"Delete": {
+                "TableName": resource.name,
+                "Key": serialize_attribute_map({
+                    "PK": audit_pk(request_id), "SK": SUBJECT_RECOVERY_SK,
+                }),
+                "ConditionExpression": (
+                    "attribute_not_exists(PK) OR subjectDigest = :subject"
+                ),
+                "ExpressionAttributeValues": serialize_attribute_map({
+                    ":subject": digest,
                 }),
             }},
         ])

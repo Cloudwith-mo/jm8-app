@@ -67,9 +67,9 @@ test("export controls are accessible, responsive, and reduced-motion safe", () =
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test("privacy copy distinguishes available export from planned deletion", () => {
+test("privacy copy documents available export and deletion controls", () => {
   assert.match(privacy, /In-app account export is available/);
-  assert.match(privacy, /account deletion is planned for Phase 3C3/);
-  assert.match(privacy, /deletion requests are currently handled by email/);
+  assert.match(privacy, /permanent account deletion is\s+available/);
+  assert.match(privacy, /requires recent\s+sign-in/);
   assert.doesNotMatch(privacy, /Automated in-app account export and deletion are planned/);
 });

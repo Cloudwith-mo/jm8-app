@@ -19,12 +19,14 @@ type AuthLandingPageProps = {
   isReady: boolean;
   onSignIn: () => void;
   onCreateAccount: () => void;
+  acknowledgement?: string;
 };
 
 export default function AuthLandingPage({
   isReady,
   onSignIn,
   onCreateAccount,
+  acknowledgement,
 }: AuthLandingPageProps) {
   if (!isReady) {
     return (
@@ -96,6 +98,13 @@ export default function AuthLandingPage({
             Your entries stay private and are available only through your
             secure JM8 account.
           </p>
+
+          {acknowledgement ? (
+            <p className="jm8-auth-security-note" role="status">
+              <ShieldCheck size={15} aria-hidden="true" />
+              {acknowledgement}
+            </p>
+          ) : null}
 
           <div className="jm8-auth-actions">
             <Button

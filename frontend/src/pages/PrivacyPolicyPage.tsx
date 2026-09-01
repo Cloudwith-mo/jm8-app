@@ -154,9 +154,9 @@ export default function PrivacyPolicyPage() {
           a request.
         </p>
         <p>
-          In-app account export is available from the account panel. Automated
-          in-app account deletion is planned for Phase 3C3 but is not yet
-          available; deletion requests are currently handled by email.
+          In-app account export is available, and permanent account deletion is
+          available from the account panel. Account deletion requires recent
+          sign-in and an explicit confirmation phrase before processing begins.
         </p>
       </section>
 

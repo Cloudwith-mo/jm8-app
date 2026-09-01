@@ -27,6 +27,7 @@ import {
 import UsageMeter from "../components/usage/UsageMeter";
 import AccountPlanCard from "../components/account/AccountPlanCard";
 import AccountDataExport from "../components/account/AccountDataExport";
+import AccountDeletionDangerZone from "../components/account/AccountDeletionDangerZone";
 import type { JournalEntry } from "../types/journal";
 import type {
   UsageSnapshot,
@@ -43,12 +44,17 @@ import {
 } from "../navigation/appRoute";
 import {
   AUTH_SESSION_EXPIRED_EVENT,
+  clearAccountDeletionReturnIntent,
+  consumeAccountDeletionAcknowledgement,
+  consumeAccountDeletionReturnIntent,
   expireAuthSession,
   getAuthSessionExpiresAt,
   getCurrentUser,
   handleCognitoCallback,
   loginWithCognito,
   logoutFromCognito,
+  rememberAccountDeletionAcknowledgement,
+  rememberAccountDeletionReturnIntent,
   signupWithCognito,
   type AuthUser,
 } from "../auth/cognito";
@@ -189,6 +195,12 @@ export default function ArchivePage() {
   const [isEntryLoading, setIsEntryLoading] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isAccountPanelOpen, setIsAccountPanelOpen] = useState(false);
+  const [focusAccountDeletion, setFocusAccountDeletion] = useState(false);
+  const [deletionAcknowledgement, setDeletionAcknowledgement] = useState(
+    () => consumeAccountDeletionAcknowledgement()
+      ? "Your account deletion request has been processed. You have been signed out."
+      : "",
+  );
   const [activeSection, setActiveSection] =
     useState<ArchiveSection>(() => getSectionRoute());
   const [selectedThemeRouteId, setSelectedThemeRouteId] =
@@ -923,9 +935,14 @@ export default function ArchivePage() {
         setAuthUser(currentUser);
 
         if (callbackUser) {
+          if (consumeAccountDeletionReturnIntent()) {
+            setIsAccountPanelOpen(true);
+            setFocusAccountDeletion(true);
+          }
           updateStatus("Signed in with Cognito.", "success", "Login successful");
         }
       } catch (error) {
+        clearAccountDeletionReturnIntent();
         updateStatus(getErrorMessage(error, "Cognito login failed."), "error", "Login failed");
       } finally {
         setIsAuthReady(true);
@@ -1024,10 +1041,30 @@ export default function ArchivePage() {
     logoutFromCognito();
   }
 
+  function handleAccountDeletionReauthentication() {
+    rememberAccountDeletionReturnIntent();
+    void loginWithCognito();
+  }
+
+  function handleAccountDeletionProcessed() {
+    const acknowledgement = (
+      "Your account deletion request has been processed. You have been signed out."
+    );
+    rememberAccountDeletionAcknowledgement();
+    setDeletionAcknowledgement(acknowledgement);
+    clearProtectedClientState();
+    try {
+      logoutFromCognito();
+    } catch {
+      expireAuthSession();
+    }
+  }
+
   if (!isAuthReady || !authUser) {
     return (
       <AuthLandingPage
         isReady={isAuthReady}
+        acknowledgement={deletionAcknowledgement}
         onSignIn={() => {
           void loginWithCognito();
         }}
@@ -1042,6 +1079,7 @@ export default function ArchivePage() {
     return (
       <details
         className="phase2-account-surface"
+        open={isAccountPanelOpen}
         onToggle={(event) => setIsAccountPanelOpen(event.currentTarget.open)}
       >
         <summary aria-label="Open account, plan, and usage">
@@ -1058,6 +1096,13 @@ export default function ArchivePage() {
           />
           <UsageMeter usage={usage} isLoading={isUsageLoading} errorMessage={usageError} onRetry={() => void refreshUsage()} />
           <AccountDataExport isPanelOpen={isAccountPanelOpen} />
+          <AccountDeletionDangerZone
+            isPanelOpen={isAccountPanelOpen}
+            focusOnOpen={focusAccountDeletion}
+            onFocusHandled={() => setFocusAccountDeletion(false)}
+            onReauthenticate={handleAccountDeletionReauthentication}
+            onDeletionProcessed={handleAccountDeletionProcessed}
+          />
           <nav className="phase2-account-policy-links" aria-label="Account policies">
             <a href="/privacy">Privacy Policy</a>
             <a href="/terms">Terms</a>

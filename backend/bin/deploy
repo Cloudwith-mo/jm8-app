@@ -10,6 +10,8 @@ set -euo pipefail
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
 : "${EXPORT_BUCKET:?EXPORT_BUCKET is required. Run: source .env}"
+: "${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required. Run: source .env}"
+: "${COGNITO_USER_POOL_NAME:?COGNITO_USER_POOL_NAME is required. Run: source .env}"
 : "${BEDROCK_ANALYSIS_MODEL_ID:?BEDROCK_ANALYSIS_MODEL_ID is required.}"
 : "${ANALYSIS_SCHEMA_VERSION:?ANALYSIS_SCHEMA_VERSION is required.}"
 : "${ANALYSIS_PROMPT_VERSION:?ANALYSIS_PROMPT_VERSION is required.}"
@@ -114,7 +116,12 @@ if [ -z "$ACCOUNT_EXPORT_WORKFLOW_ARN" ] || [ "$ACCOUNT_EXPORT_WORKFLOW_ARN" = "
   exit 1
 fi
 
-echo "Resolving optional account deletion workflow: $ACCOUNT_DELETION_WORKFLOW_NAME"
+export OCR_WORKFLOW_ARN
+export HISTORICAL_REANALYSIS_WORKFLOW_ARN
+export ACCOUNT_EXPORT_WORKFLOW_ARN
+./bin/deploy-account-deletion
+
+echo "Resolving account deletion workflow: $ACCOUNT_DELETION_WORKFLOW_NAME"
 ACCOUNT_DELETION_WORKFLOW_ARN="$(
   aws stepfunctions list-state-machines \
     --profile "$AWS_PROFILE" \
@@ -122,8 +129,9 @@ ACCOUNT_DELETION_WORKFLOW_ARN="$(
     --query "stateMachines[?name=='${ACCOUNT_DELETION_WORKFLOW_NAME}'].stateMachineArn | [0]" \
     --output text
 )"
-if [ "$ACCOUNT_DELETION_WORKFLOW_ARN" = "None" ]; then
-  ACCOUNT_DELETION_WORKFLOW_ARN=""
+if [ -z "$ACCOUNT_DELETION_WORKFLOW_ARN" ] || [ "$ACCOUNT_DELETION_WORKFLOW_ARN" = "None" ]; then
+  echo "Account deletion workflow was not found after reconciliation."
+  exit 1
 fi
 
 TABLE_ARN="$(
@@ -254,9 +262,8 @@ aws iam put-role-policy \
 
 echo "API role can coordinate and download completed account exports."
 
-if [ -n "$ACCOUNT_DELETION_WORKFLOW_ARN" ]; then
-  python3 - "$ACCOUNT_DELETION_WORKFLOW_ARN" \
-    > .build/api-account-deletion-policy.json <<'PY_ACCOUNT_DELETION'
+python3 - "$ACCOUNT_DELETION_WORKFLOW_ARN" \
+  > .build/api-account-deletion-policy.json <<'PY_ACCOUNT_DELETION'
 import json
 import sys
 print(json.dumps({"Version":"2012-10-17","Statement":[{
@@ -265,22 +272,11 @@ print(json.dumps({"Version":"2012-10-17","Statement":[{
     "Resource":sys.argv[1],
 }]}))
 PY_ACCOUNT_DELETION
-  aws iam put-role-policy \
-    --role-name "$ROLE_NAME" \
-    --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
-    --policy-document file://.build/api-account-deletion-policy.json \
-    --profile "$AWS_PROFILE"
-else
-  if aws iam get-role-policy \
-    --role-name "$ROLE_NAME" \
-    --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
-    --profile "$AWS_PROFILE" >/dev/null 2>&1; then
-    aws iam delete-role-policy \
-      --role-name "$ROLE_NAME" \
-      --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
-      --profile "$AWS_PROFILE"
-  fi
-fi
+aws iam put-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-name "$API_ACCOUNT_DELETION_POLICY_NAME" \
+  --policy-document file://.build/api-account-deletion-policy.json \
+  --profile "$AWS_PROFILE"
 
 echo "Verifying Stripe secret reference."
 
@@ -357,12 +353,14 @@ echo "API role can retrieve the Stripe secret."
 
 export APP_NAME
 export STAGE
+export EXPECTED_AWS_ACCOUNT_ID
 export TABLE_NAME
 export RAW_BUCKET
 export OCR_WORKFLOW_ARN
 export HISTORICAL_REANALYSIS_WORKFLOW_ARN
 export ACCOUNT_EXPORT_WORKFLOW_ARN
 export ACCOUNT_DELETION_WORKFLOW_ARN
+export ACCOUNT_DELETION_RECENT_AUTH_SECONDS="${ACCOUNT_DELETION_RECENT_AUTH_SECONDS:-300}"
 export EXPORT_BUCKET
 export BEDROCK_ANALYSIS_MODEL_ID
 export ANALYSIS_SCHEMA_VERSION
@@ -388,11 +386,14 @@ import os
 environment_keys = [
     "APP_NAME",
     "STAGE",
+    "EXPECTED_AWS_ACCOUNT_ID",
     "TABLE_NAME",
     "RAW_BUCKET",
     "OCR_WORKFLOW_ARN",
     "HISTORICAL_REANALYSIS_WORKFLOW_ARN",
     "ACCOUNT_EXPORT_WORKFLOW_ARN",
+    "ACCOUNT_DELETION_WORKFLOW_ARN",
+    "ACCOUNT_DELETION_RECENT_AUTH_SECONDS",
     "EXPORT_BUCKET",
     "BEDROCK_ANALYSIS_MODEL_ID",
     "ANALYSIS_SCHEMA_VERSION",
@@ -424,12 +425,6 @@ for key in environment_keys:
         )
 
     variables[key] = value
-
-optional_workflow_arn = str(
-    os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN") or ""
-).strip()
-if optional_workflow_arn:
-    variables["ACCOUNT_DELETION_WORKFLOW_ARN"] = optional_workflow_arn
 
 if "STRIPE_SECRET_KEY" in variables:
     raise SystemExit(

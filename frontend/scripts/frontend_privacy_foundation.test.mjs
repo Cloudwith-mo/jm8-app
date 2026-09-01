@@ -112,7 +112,7 @@ test("privacy policy contains the required collection and processing disclosures
     "up to 30 days",
     "request access to, correction of, export of, or deletion",
     "In-app account export is available",
-    "account deletion is planned for Phase 3C3",
+    "permanent account deletion is available",
     "cannot guarantee absolute security",
     "published with a new effective date",
   ]) {
@@ -195,7 +195,7 @@ test("user data contract maps export, deletion, and residual retention", () => {
     "up to 30 days",
     "Account export contents",
     "Data intentionally excluded from export",
-    "Proposed deletion order",
+    "Phase 3C3 account deletion coordination",
     "Stripe may retain transaction",
   ]) {
     assert.match(dataContract, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));

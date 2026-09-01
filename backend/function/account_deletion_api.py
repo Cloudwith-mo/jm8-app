@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Callable
 
@@ -94,13 +95,35 @@ def _execution_arn(value: object) -> str:
     return value
 
 
+def configured_account_deletion_workflow_arn() -> str:
+    """Return only the exact stage-scoped account-deletion workflow ARN."""
+    workflow_arn = os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN", "").strip()
+    app_name = os.environ.get("APP_NAME", "").strip()
+    stage = os.environ.get("STAGE", "").strip()
+    region = os.environ.get("AWS_REGION", "").strip()
+    account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
+    if (
+        not app_name
+        or not stage
+        or not re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-\d", region)
+        or not re.fullmatch(r"[0-9]{12}", account_id)
+    ):
+        return ""
+    expected_name = re.escape(f"{app_name}-{stage}-account-deletion-workflow")
+    pattern = (
+        rf"arn:aws:states:{re.escape(region)}:{account_id}:stateMachine:"
+        + expected_name
+    )
+    return workflow_arn if re.fullmatch(pattern, workflow_arn) else ""
+
+
 def start_account_deletion_workflow(
     *,
     request_id: str,
     subject: str,
     client: Any = None,
 ) -> dict[str, str]:
-    workflow_arn = os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN", "").strip()
+    workflow_arn = configured_account_deletion_workflow_arn()
     if not workflow_arn:
         raise AccountDeletionApiError(
             503,
@@ -114,7 +137,7 @@ def start_account_deletion_workflow(
             stateMachineArn=workflow_arn,
             name=request_id,
             input=json.dumps(
-                {"requestId": request_id, "userId": subject},
+                {"requestId": request_id},
                 separators=(",", ":"),
             ),
         )
@@ -170,7 +193,7 @@ def create_account_deletion_request(
         ) from None
 
     starter = workflow_starter
-    if starter is None and os.environ.get("ACCOUNT_DELETION_WORKFLOW_ARN", "").strip():
+    if starter is None and configured_account_deletion_workflow_arn():
         starter = start_account_deletion_workflow
     if starter is None:
         raise AccountDeletionApiError(

@@ -43,6 +43,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_production_isolation_controls,
     validate_production_demo_controls,
     validate_production_resource_references,
+    validate_account_deletion_targets,
 )
 
 
@@ -60,6 +61,7 @@ SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "deploy-frontend",
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
     BACKEND_ROOT / "bin" / "deploy-account-export",
+    BACKEND_ROOT / "bin" / "deploy-account-deletion",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
@@ -79,6 +81,7 @@ NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "deploy-frontend",
     BACKEND_ROOT / "bin" / "deploy-historical-reanalysis-workflow",
     BACKEND_ROOT / "bin" / "deploy-account-export",
+    BACKEND_ROOT / "bin" / "deploy-account-deletion",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
@@ -133,6 +136,10 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "COGNITO_DOMAIN",
         "COGNITO_ISSUER",
         "COGNITO_USER_POOL_NAME",
+        "COGNITO_USER_POOL_ID",
+        "OCR_WORKFLOW_ARN",
+        "HISTORICAL_REANALYSIS_WORKFLOW_ARN",
+        "ACCOUNT_EXPORT_WORKFLOW_ARN",
         "CALLBACK_URL",
         "LOGOUT_URL",
     }
@@ -548,6 +555,8 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "STRIPE_CHECKOUT_SUCCESS_URL": "https://app.journalm8.com/settings?checkout=success",
             "STRIPE_CHECKOUT_CANCEL_URL": "https://app.journalm8.com/settings?checkout=cancelled",
             "STRIPE_PORTAL_RETURN_URL": "https://app.journalm8.com/settings",
+            "COGNITO_USER_POOL_NAME": "journalm8-prod-users",
+            "COGNITO_USER_POOL_ID": "us-east-1_Production",
         }
 
     def _stripe_bootstrap_environment(self, operation: str) -> dict[str, str]:
@@ -1276,6 +1285,57 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
 
 
 class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
+
+    def test_account_deletion_targets_are_exactly_stage_scoped(self):
+        exact = {
+            "COGNITO_USER_POOL_NAME": "journalm8-staging-users",
+            "COGNITO_USER_POOL_ID": "us-east-1_Staging",
+            "COGNITO_ISSUER": (
+                "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Staging"
+            ),
+            "STRIPE_SECRET_ARN": (
+                "arn:aws:secretsmanager:us-east-1:114743615542:"
+                "secret:journalm8/staging/stripe-ABC123"
+            ),
+            "OCR_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:"
+                "stateMachine:journalm8-staging-ocr-workflow"
+            ),
+            "HISTORICAL_REANALYSIS_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:"
+                "stateMachine:journalm8-staging-historical-reanalysis-workflow"
+            ),
+            "ACCOUNT_EXPORT_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:"
+                "stateMachine:journalm8-staging-account-export-workflow"
+            ),
+        }
+        validate_account_deletion_targets(
+            "journalm8", "staging", "us-east-1", "114743615542",
+            exact, require_workflows=True,
+        )
+        for key, replacement in (
+            ("COGNITO_USER_POOL_NAME", "journalm8-dev-users"),
+            ("COGNITO_USER_POOL_ID", "us-west-2_Staging"),
+            ("STRIPE_SECRET_ARN", exact["STRIPE_SECRET_ARN"].replace("staging", "prod")),
+            ("OCR_WORKFLOW_ARN", exact["OCR_WORKFLOW_ARN"].replace("staging", "dev")),
+            ("ACCOUNT_EXPORT_WORKFLOW_ARN", exact["ACCOUNT_EXPORT_WORKFLOW_ARN"].replace("114743615542", "999999999999")),
+        ):
+            with self.subTest(key=key):
+                contaminated = dict(exact)
+                contaminated[key] = replacement
+                with self.assertRaises(EnvironmentContractError):
+                    validate_account_deletion_targets(
+                        "journalm8", "staging", "us-east-1", "114743615542",
+                        contaminated, require_workflows=True,
+                    )
+
+    def test_create_auth_persists_safe_pool_name_for_deletion_targeting(self):
+        source = (BACKEND_ROOT / "bin" / "create-auth").read_text()
+        self.assertIn(
+            "printf 'export COGNITO_USER_POOL_NAME=%q\\n' \"$USER_POOL_NAME\"",
+            source,
+        )
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_deploy_operation_specific_validation_requires_arn(self, mock_sts):
