@@ -1,10 +1,12 @@
 import json
 import io
 import os
+import re
 import shlex
 import sys
 import time
 import unittest
+from collections import Counter
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +28,60 @@ import app  # noqa: E402
 
 
 REQUEST_ID = "del_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+AWS_GLOBAL_OPTIONS = {"--output", "--profile", "--query", "--region"}
+LONG_OPTION_PATTERN = re.compile(r"^--[a-z][a-z0-9-]*$")
+AWS_COMMAND_PATTERN = re.compile(
+    r"\baws\s+([a-z0-9-]+)\s+([a-z0-9-]+)\b"
+)
+
+
+def all_aws_command_tokens(source: str) -> list[tuple[int, list[str]]]:
+    """Tokenize every literal AWS CLI invocation without executing shell code."""
+    commands = []
+    logical_source = source.replace("\\\n", " ")
+    for line_number, line in enumerate(logical_source.splitlines(), start=1):
+        match = AWS_COMMAND_PATTERN.search(line)
+        if match is None:
+            continue
+        fragment = line[match.start():].strip()
+        if fragment.endswith(')"'):
+            fragment = fragment[:-2]
+        tokens = shlex.split(fragment)
+        command = []
+        for token in tokens:
+            if (
+                token in {"&&", "||", "then", "true"}
+                or re.match(r"^(?:[012]?>>?|&>)", token)
+            ):
+                break
+            if token.endswith(";"):
+                command.append(token[:-1])
+                break
+            command.append(token)
+        commands.append((line_number, command))
+    return commands
+
+
+def cli_option_for_member(member: str) -> str:
+    first_pass = re.sub(r"(.)([A-Z][a-z]+)", r"\1-\2", member)
+    second_pass = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", first_pass)
+    return "--" + second_pass.replace("_", "-").lower()
+
+
+def assert_safe_aws_tokens(test: unittest.TestCase, source: str) -> None:
+    commands = all_aws_command_tokens(source)
+    test.assertGreater(len(commands), 0)
+    for line_number, tokens in commands:
+        with test.subTest(line=line_number, command=tokens[:3]):
+            test.assertGreaterEqual(len(tokens), 3)
+            test.assertEqual(tokens[0], "aws")
+            for index, token in enumerate(tokens[3:], start=3):
+                if token.startswith("--"):
+                    test.assertRegex(token, LONG_OPTION_PATTERN)
+                    test.assertLess(index + 1, len(tokens))
+                    test.assertFalse(tokens[index + 1].startswith("--"))
+                else:
+                    test.assertNotIn("--", token)
 
 
 def shell_command_tokens(source: str, service: str, operation: str) -> list[list[str]]:
@@ -199,12 +255,227 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         ):
             self.assertIn(required, deploy)
         for forbidden in (
+            '--profile"$AWS_PROFILE"',
+            '--secret-id"$STRIPE_SECRET_ARN"',
+            '"$role_name"--tags',
+            '--role-name"$STEP_ROLE_NAME"',
+            '--resource-arn"$WORKFLOW_ARN"',
+            "DurablePartialFailures--statistic",
+            "--evaluation-periods1",
+            '--dashboard-name"${APP_NAME}-${STAGE}-account-deletion"',
+            '[ "$COGNITO_USER_POOL_NAME" !="${APP_NAME}-${STAGE}-users" ]',
             '"$AWS_PROFILE"--region',
             "--querystateMachineArn",
             "--runtimepython",
             '--region"$AWS_REGION"',
         ):
             self.assertNotIn(forbidden, deploy)
+
+    def test_every_deletion_aws_command_has_safe_token_boundaries(self):
+        deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
+        commands = all_aws_command_tokens(deploy)
+        self.assertEqual(len(commands), 42)
+        self.assertEqual(
+            Counter((tokens[1], tokens[2]) for _, tokens in commands),
+            Counter({
+                ("sts", "get-caller-identity"): 1,
+                ("cognito-idp", "describe-user-pool"): 1,
+                ("secretsmanager", "describe-secret"): 1,
+                ("iam", "get-role"): 3,
+                ("iam", "create-role"): 1,
+                ("iam", "update-assume-role-policy"): 1,
+                ("iam", "tag-role"): 1,
+                ("iam", "put-role-policy"): 2,
+                ("iam", "attach-role-policy"): 1,
+                ("lambda", "get-function"): 2,
+                ("lambda", "update-function-code"): 1,
+                ("lambda", "wait"): 3,
+                ("lambda", "update-function-configuration"): 1,
+                ("lambda", "create-function"): 1,
+                ("lambda", "put-function-concurrency"): 1,
+                ("logs", "create-log-group"): 3,
+                ("logs", "put-retention-policy"): 3,
+                ("logs", "put-metric-filter"): 5,
+                ("stepfunctions", "list-state-machines"): 1,
+                ("stepfunctions", "create-state-machine"): 1,
+                ("stepfunctions", "update-state-machine"): 1,
+                ("stepfunctions", "tag-resource"): 1,
+                ("cloudwatch", "put-metric-alarm"): 5,
+                ("cloudwatch", "put-dashboard"): 1,
+            }),
+        )
+        assert_safe_aws_tokens(self, deploy)
+
+        for line_number, tokens in commands:
+            with self.subTest(line=line_number, command=tokens[:3]):
+                self.assertEqual(tokens.count("--profile"), 1)
+                profile_index = tokens.index("--profile")
+                self.assertEqual(tokens[profile_index + 1], "$AWS_PROFILE")
+                if tokens[1] == "iam":
+                    self.assertNotIn("--region", tokens)
+                else:
+                    self.assertEqual(tokens.count("--region"), 1)
+                    region_index = tokens.index("--region")
+                    self.assertEqual(tokens[region_index + 1], "$AWS_REGION")
+                self.assertEqual(
+                    "--query" in tokens,
+                    "--output" in tokens,
+                )
+                if "--output" in tokens:
+                    output_index = tokens.index("--output")
+                    self.assertEqual(tokens[output_index + 1], "text")
+
+    def test_every_deletion_test_expression_has_separate_tokens(self):
+        deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
+        expressions = re.findall(r"(?<!\[)\[\s.*?\s\](?!\])", deploy)
+        self.assertEqual(len(expressions), 6)
+        for expression in expressions:
+            with self.subTest(expression=expression):
+                tokens = shlex.split(expression)
+                self.assertEqual(tokens[0], "[")
+                self.assertEqual(tokens[-1], "]")
+                if len(tokens) == 4:
+                    self.assertIn(tokens[1], {"-n", "-z"})
+                else:
+                    self.assertEqual(len(tokens), 5)
+                    self.assertIn(tokens[2], {"=", "!="})
+
+    def test_phase_deployment_scripts_have_no_joined_shell_tokens(self):
+        joined_source_patterns = (
+            re.compile(r"--[a-z][a-z0-9-]*(?=[\"$])"),
+            re.compile(r"(?:\"\$[A-Za-z_][A-Za-z0-9_]*\"|\$\{[^}]+\})--[a-z]"),
+            re.compile(r"[A-Za-z0-9_}]--[a-z]"),
+            re.compile(r"--[a-z][a-z0-9-]*[0-9]+\b"),
+        )
+        for name in (
+            "create-auth",
+            "deploy",
+            "deploy-account-deletion",
+            "deploy-observability",
+        ):
+            source = (ROOT / "bin" / name).read_text()
+            with self.subTest(script=name):
+                for pattern in joined_source_patterns:
+                    self.assertIsNone(pattern.search(source))
+
+    def test_deletion_aws_options_exist_in_botocore_service_models(self):
+        deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
+        clients = {}
+        custom_cli_options = {
+            ("lambda", "create-function"): {"--zip-file"},
+        }
+        for line_number, tokens in all_aws_command_tokens(deploy):
+            service, operation = tokens[1:3]
+            if service not in clients:
+                clients[service] = boto3.client(
+                    service,
+                    region_name="us-east-1",
+                    aws_access_key_id="testing",
+                    aws_secret_access_key="testing",
+                )
+            client = clients[service]
+            if operation == "wait":
+                waiter_name = tokens[3].replace("-", "_")
+                with self.subTest(line=line_number, waiter=waiter_name):
+                    self.assertIn(waiter_name, client.waiter_names)
+                    self.assertEqual(
+                        {
+                            token for token in tokens[4:]
+                            if token.startswith("--")
+                        } - AWS_GLOBAL_OPTIONS,
+                        {"--function-name"},
+                    )
+                continue
+
+            operation_name = "".join(
+                part.title() for part in operation.split("-")
+            )
+            model = client.meta.service_model.operation_model(operation_name)
+            members = model.input_shape.members if model.input_shape else {}
+            modeled_options = {
+                cli_option_for_member(member) for member in members
+            }
+            modeled_options.update(AWS_GLOBAL_OPTIONS)
+            modeled_options.update(
+                custom_cli_options.get((service, operation), set())
+            )
+            actual_options = {
+                token for token in tokens[3:] if token.startswith("--")
+            }
+            with self.subTest(
+                line=line_number,
+                service=service,
+                operation=operation,
+            ):
+                self.assertEqual(actual_options - modeled_options, set())
+
+    def test_sensitive_and_observability_command_values_are_separate(self):
+        deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
+        commands = [tokens for _, tokens in all_aws_command_tokens(deploy)]
+
+        def commands_for(service: str, operation: str) -> list[list[str]]:
+            return [
+                tokens for tokens in commands
+                if tokens[1:3] == [service, operation]
+            ]
+
+        cognito = commands_for("cognito-idp", "describe-user-pool")[0]
+        self.assertEqual(
+            cognito[cognito.index("--user-pool-id") + 1],
+            "$COGNITO_USER_POOL_ID",
+        )
+        secret = commands_for("secretsmanager", "describe-secret")[0]
+        self.assertEqual(
+            secret[secret.index("--secret-id") + 1],
+            "$STRIPE_SECRET_ARN",
+        )
+
+        step_policy = commands_for("iam", "put-role-policy")[1]
+        self.assertEqual(
+            step_policy[step_policy.index("--role-name") + 1],
+            "$STEP_ROLE_NAME",
+        )
+        tag_workflow = commands_for("stepfunctions", "tag-resource")[0]
+        self.assertEqual(
+            tag_workflow[tag_workflow.index("--resource-arn") + 1],
+            "$WORKFLOW_ARN",
+        )
+
+        metric_filters = commands_for("logs", "put-metric-filter")
+        self.assertEqual(len(metric_filters), 5)
+        self.assertTrue(all(
+            "--metric-transformations" in command
+            for command in metric_filters
+        ))
+        alarms = commands_for("cloudwatch", "put-metric-alarm")
+        self.assertEqual(len(alarms), 5)
+        self.assertEqual(
+            {
+                command[command.index("--metric-name") + 1]
+                for command in alarms
+            },
+            {
+                "Errors",
+                "ExecutionsFailed",
+                "ExecutionsTimedOut",
+                "DeletionFailures",
+                "DurablePartialFailures",
+            },
+        )
+        for command in alarms:
+            self.assertEqual(command[command.index("--statistic") + 1], "Sum")
+            self.assertEqual(
+                command[command.index("--evaluation-periods") + 1], "1"
+            )
+            self.assertEqual(
+                command[command.index("--tags") + 1], "${ALARM_TAGS[@]}"
+            )
+
+        dashboard = commands_for("cloudwatch", "put-dashboard")[0]
+        self.assertEqual(
+            dashboard[dashboard.index("--dashboard-name") + 1],
+            "${APP_NAME}-${STAGE}-account-deletion",
+        )
 
     def test_actual_create_and_update_command_tokens_match_aws_operations(self):
         deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
