@@ -32,6 +32,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_aws_configuration,
     validate_stage_account_mapping,
     validate_resource_names,
+    validate_shared_api_names,
     validate_export_bucket_name,
     validate_non_dev_urls,
     validate_stripe_credentials,
@@ -132,6 +133,7 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "STRIPE_CHECKOUT_CANCEL_URL",
         "STRIPE_PORTAL_RETURN_URL",
         "API_NAME",
+        "LAMBDA_FUNCTION_NAME",
         "API_ENDPOINT",
         "COGNITO_DOMAIN",
         "COGNITO_ISSUER",
@@ -237,6 +239,37 @@ class TestEnvironmentContractValidation(EnvironmentIsolationTestCase):
 
 
 class TestResourceNamingAndURLs(EnvironmentIsolationTestCase):
+
+    def test_shared_api_and_lambda_names_are_exactly_stage_scoped(self):
+        for stage in ("dev", "staging", "prod"):
+            expected = f"journalm8-{stage}-api"
+            with self.subTest(stage=stage):
+                validate_shared_api_names(
+                    "journalm8",
+                    stage,
+                    {
+                        "API_NAME": expected,
+                        "LAMBDA_FUNCTION_NAME": expected,
+                    },
+                )
+
+        for stage, key, value in (
+            ("staging", "API_NAME", "journalm8-prod-api"),
+            ("prod", "API_NAME", "journalm8-staging-api"),
+            (
+                "staging",
+                "LAMBDA_FUNCTION_NAME",
+                "journalm8-staging-account-deletion-worker",
+            ),
+            ("staging", "LAMBDA_FUNCTION_NAME", "arbitrary-lambda"),
+        ):
+            with self.subTest(stage=stage, key=key, value=value):
+                with self.assertRaises(EnvironmentContractError):
+                    validate_shared_api_names(
+                        "journalm8",
+                        stage,
+                        {key: value},
+                    )
 
     def test_table_name_must_match_pattern(self):
         """TABLE_NAME must match ${APP_NAME}-${STAGE}-main."""
@@ -602,12 +635,58 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "API_NAME": "journalm8-staging-api",
+            "LAMBDA_FUNCTION_NAME": "journalm8-staging-api",
             "DEPLOY_CONFIRMATION": "staging",
         })
 
         config = validate_environment_contract()
         self.assertEqual(config["stage"], "staging")
         self.assertEqual(config["account_id"], "114743615542")
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_general_contract_rejects_cross_stage_and_worker_api_names(
+        self,
+        mock_sts,
+    ):
+        mock_sts.return_value = "114743615542"
+        staging = {
+            "APP_NAME": "journalm8",
+            "STAGE": "staging",
+            "AWS_REGION": "us-east-1",
+            "AWS_PROFILE": "jm8-dev",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "TABLE_NAME": "journalm8-staging-main",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "API_NAME": "journalm8-staging-api",
+            "LAMBDA_FUNCTION_NAME": "journalm8-staging-api",
+            "DEPLOY_CONFIRMATION": "staging",
+        }
+        production = self._production_environment()
+        production["LAMBDA_FUNCTION_NAME"] = "journalm8-prod-api"
+        cases = (
+            ({**staging, "API_NAME": "journalm8-prod-api"}, "API_NAME"),
+            ({**production, "API_NAME": "journalm8-staging-api"}, "API_NAME"),
+            ({
+                **staging,
+                "LAMBDA_FUNCTION_NAME": (
+                    "journalm8-staging-account-deletion-worker"
+                ),
+            }, "LAMBDA_FUNCTION_NAME"),
+            ({
+                **staging,
+                "LAMBDA_FUNCTION_NAME": "arbitrary-lambda",
+                "JM8_DISABLE_ENVIRONMENT_VALIDATION": "1",
+            }, "LAMBDA_FUNCTION_NAME"),
+        )
+        for environment, expected_field in cases:
+            with self.subTest(
+                stage=environment["STAGE"],
+                expected_field=expected_field,
+            ), patch.dict(os.environ, environment, clear=True):
+                with self.assertRaises(EnvironmentContractError) as raised:
+                    validate_environment_contract()
+                self.assertIn(expected_field, str(raised.exception))
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_approved_same_account_production_environment(self, mock_sts):

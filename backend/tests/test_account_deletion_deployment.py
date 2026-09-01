@@ -3,7 +3,10 @@ import io
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from collections import Counter
@@ -113,6 +116,153 @@ def render_embedded_json(source: str, marker: str, arguments: list[str]) -> dict
     finally:
         sys.argv = previous_argv
     return json.loads(output.getvalue())
+
+
+def run_mocked_staging_deletion_deploy(
+    environment_overrides: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run the actual guarded deploy/package boundary with a local AWS shim."""
+    with tempfile.TemporaryDirectory() as directory:
+        backend = Path(directory) / "backend"
+        bin_dir = backend / "bin"
+        function_dir = backend / "function"
+        workflow_dir = backend / "workflows"
+        mock_bin = Path(directory) / "mock-bin"
+        for path in (bin_dir, function_dir, workflow_dir, mock_bin):
+            path.mkdir(parents=True, exist_ok=True)
+
+        for name in (
+            "build",
+            "deploy-account-deletion",
+            "jm8_deployment_guard.sh",
+            "jm8_environment_contract.py",
+            "jm8_resource_tag_contract.py",
+            "jm8_resource_tags.sh",
+            "package",
+        ):
+            shutil.copy2(ROOT / "bin" / name, bin_dir / name)
+        shutil.copy2(
+            ROOT / "workflows" / "account-deletion.asl.json",
+            workflow_dir / "account-deletion.asl.json",
+        )
+        (function_dir / "requirements.txt").write_text("", encoding="utf-8")
+        (function_dir / "placeholder.py").write_text(
+            "VALUE = 'packaged'\n",
+            encoding="utf-8",
+        )
+
+        aws_log = Path(directory) / "aws.log"
+        aws_shim = mock_bin / "aws"
+        aws_shim.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$MOCK_AWS_LOG"
+
+value_after() {
+  local option="$1"
+  shift
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "$option" ]; then
+      printf '%s' "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
+service="$1"
+operation="$2"
+case "${service}:${operation}" in
+  sts:get-caller-identity)
+    printf '%s\\n' '114743615542'
+    ;;
+  cognito-idp:describe-user-pool)
+    printf '%s\\n' 'journalm8-staging-users'
+    ;;
+  iam:get-role)
+    role_name="$(value_after --role-name "$@")"
+    if [[ " $* " == *" --query Role.Arn "* ]]; then
+      printf 'arn:aws:iam::114743615542:role/%s\\n' "$role_name"
+    else
+      printf '{}\\n'
+    fi
+    ;;
+  lambda:get-function)
+    function_name="$(value_after --function-name "$@")"
+    function_arn="arn:aws:lambda:us-east-1:114743615542:function:${function_name}"
+    if [[ " $* " == *" --query Configuration.FunctionArn "* ]]; then
+      printf '%s\\n' "$function_arn"
+    elif [[ " $* " == *" --output json "* ]]; then
+      printf '{"Configuration":{"FunctionName":"%s","FunctionArn":"%s"}}\\n' \
+        "$function_name" "$function_arn"
+    else
+      printf '{}\\n'
+    fi
+    ;;
+  lambda:list-tags)
+    printf '%s\\n' '{"Tags":{"App":"journalm8","Stage":"staging","ManagedBy":"aws-cli"}}'
+    ;;
+  stepfunctions:list-state-machines)
+    printf '%s\\n' 'None'
+    ;;
+  stepfunctions:create-state-machine)
+    printf '%s\\n' 'arn:aws:states:us-east-1:114743615542:stateMachine:journalm8-staging-account-deletion-workflow'
+    ;;
+  *)
+    printf '{}\\n'
+    ;;
+esac
+""",
+            encoding="utf-8",
+        )
+        aws_shim.chmod(0o755)
+
+        environment = {
+            "ACCOUNT_EXPORT_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:stateMachine:"
+                "journalm8-staging-account-export-workflow"
+            ),
+            "API_NAME": "journalm8-staging-api",
+            "APP_NAME": "journalm8",
+            "AWS_PROFILE": "jm8-dev",
+            "AWS_REGION": "us-east-1",
+            "COGNITO_USER_POOL_ID": "us-east-1_Staging",
+            "COGNITO_USER_POOL_NAME": "journalm8-staging-users",
+            "DEPLOY_CONFIRMATION": "staging",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "EXPORT_BUCKET": "journalm8-staging-exports-114743615542",
+            "HISTORICAL_REANALYSIS_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:stateMachine:"
+                "journalm8-staging-historical-reanalysis-workflow"
+            ),
+            "LAMBDA_FUNCTION_NAME": "journalm8-staging-api",
+            "MOCK_AWS_LOG": str(aws_log),
+            "OCR_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:stateMachine:"
+                "journalm8-staging-ocr-workflow"
+            ),
+            "PATH": f"{mock_bin}:{os.environ['PATH']}",
+            "RAW_BUCKET": "journalm8-staging-raw-114743615542",
+            "STAGE": "staging",
+            "STRIPE_SECRET_ARN": (
+                "arn:aws:secretsmanager:us-east-1:114743615542:"
+                "secret:journalm8/staging/stripe-ABC123"
+            ),
+            "TABLE_NAME": "journalm8-staging-main",
+        }
+        if environment_overrides:
+            environment.update(environment_overrides)
+        result = subprocess.run(
+            [str(bin_dir / "deploy-account-deletion")],
+            cwd=backend,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        calls = aws_log.read_text(encoding="utf-8") if aws_log.exists() else ""
+        return result, calls
 
 
 def event(method, path, claims=None, body=None):
@@ -240,6 +390,63 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         self.assertIn("ACCOUNT_DELETION_WORKFLOW_ARN", main_deploy)
         self.assertIn("ACCOUNT_DELETION_RECENT_AUTH_SECONDS", main_deploy)
         self.assertIn("states:StartExecution", main_deploy)
+
+    def test_staging_package_contract_keeps_api_and_worker_names_distinct(self):
+        result, aws_calls = run_mocked_staging_deletion_deploy()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Package complete: dist/function.zip", result.stdout)
+        self.assertIn(
+            "Account deletion deployment source reconciled:",
+            result.stdout,
+        )
+        worker_name = "journalm8-staging-account-deletion-worker"
+        self.assertIn(
+            f"lambda update-function-code --function-name {worker_name}",
+            aws_calls,
+        )
+        self.assertIn(
+            "lambda update-function-configuration "
+            f"--function-name {worker_name}",
+            aws_calls,
+        )
+        self.assertIn(
+            f"lambda put-function-concurrency --function-name {worker_name}",
+            aws_calls,
+        )
+        self.assertIn(
+            "stepfunctions create-state-machine --name "
+            "journalm8-staging-account-deletion-workflow",
+            aws_calls,
+        )
+        self.assertNotRegex(
+            aws_calls,
+            r"lambda (?:create-function|update-function-code|"
+            r"update-function-configuration) .*journalm8-staging-api",
+        )
+        self.assertNotIn("start-execution", aws_calls)
+
+    def test_deletion_worker_tag_contract_remains_exact(self):
+        helper = (ROOT / "bin" / "jm8_resource_tags.sh").read_text()
+        self.assertIn(
+            '"${APP_NAME}-${STAGE}-account-deletion-worker"',
+            helper,
+        )
+        self.assertNotIn(
+            '"${APP_NAME}-${STAGE}-account-deletion-*"',
+            helper,
+        )
+
+    def test_deploy_guard_cannot_be_disabled_for_an_arbitrary_lambda(self):
+        result, aws_calls = run_mocked_staging_deletion_deploy({
+            "JM8_DISABLE_ENVIRONMENT_VALIDATION": "1",
+            "LAMBDA_FUNCTION_NAME": "arbitrary-lambda",
+        })
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LAMBDA_FUNCTION_NAME", result.stderr)
+        self.assertNotIn("Package complete", result.stdout)
+        self.assertNotIn("lambda ", aws_calls)
 
     def test_deletion_create_and_update_cli_tokens_are_not_concatenated(self):
         deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
@@ -488,6 +695,10 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         self.assertEqual(len(update_code), 1)
         self.assertEqual(len(update_config), 1)
         for tokens in (create[0], update_code[0], update_config[0]):
+            self.assertEqual(
+                tokens[tokens.index("--function-name") + 1],
+                "$WORKER_NAME",
+            )
             self.assertEqual(tokens[tokens.index("--profile") + 1], "$AWS_PROFILE")
             self.assertEqual(tokens[tokens.index("--region") + 1], "$AWS_REGION")
         for option, expected in (

@@ -16,7 +16,7 @@ Environment Contract:
 - TABLE_NAME must match ${APP_NAME}-${STAGE}-main
 - RAW_BUCKET must match ${APP_NAME}-${STAGE}-raw-${ACCOUNT_ID}
 - prod FRONTEND_BUCKET must match ${APP_NAME}-prod-frontend-${ACCOUNT_ID}
-- prod API_NAME must equal journalm8-prod-api when configured
+- API_NAME and LAMBDA_FUNCTION_NAME must identify the exact stage API when configured
 - prod STRIPE_SECRET_ARN must identify only journalm8/prod/stripe in the
   expected region and account
 - Non-dev URLs cannot contain localhost or 127.0.0.1
@@ -69,6 +69,7 @@ PRODUCTION_SCOPED_REFERENCE_KEYS = {
     "EXPORT_BUCKET",
     "FRONTEND_BUCKET",
     "API_NAME",
+    "LAMBDA_FUNCTION_NAME",
     "API_ENDPOINT",
     "FRONTEND_ORIGIN",
     "ALLOWED_ORIGINS",
@@ -323,6 +324,21 @@ def validate_resource_names(
         raise EnvironmentContractError(
             f"RAW_BUCKET must be '{expected_bucket}', got '{raw_bucket}'"
         )
+
+
+def validate_shared_api_names(
+    app_name: str,
+    stage: str,
+    environment: Mapping[str, str],
+) -> None:
+    """Keep shared API identity separate from specialized worker targets."""
+    expected_name = f"{app_name}-{stage}-api"
+    for key in ("API_NAME", "LAMBDA_FUNCTION_NAME"):
+        value = str(environment.get(key) or "").strip()
+        if value and value != expected_name:
+            raise EnvironmentContractError(
+                f"{key} must be '{expected_name}' for STAGE={stage}"
+            )
 
 
 def validate_frontend_bucket_name(
@@ -789,6 +805,7 @@ def validate_environment_contract() -> dict:
     # Resource naming
     validate_production_resource_references(stage, os.environ)
     validate_resource_names(app_name, stage, table_name, raw_bucket, actual_account_id)
+    validate_shared_api_names(app_name, stage, os.environ)
     if stage == "prod":
         validate_frontend_bucket_name(
             app_name,
