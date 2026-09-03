@@ -12,6 +12,7 @@ Validates that:
 
 from __future__ import annotations
 
+import json
 import os
 from fnmatch import fnmatch
 import subprocess
@@ -38,6 +39,9 @@ from jm8_environment_contract import (  # noqa: E402
     validate_stripe_credentials,
     validate_confirmation_gate,
     validate_allowed_origins,
+    validate_https_frontend_origin,
+    validate_stage_frontend_origin_contract,
+    resolve_stage_frontend_origin,
     validate_environment_contract,
     validate_operation_specific,
     production_api_exists,
@@ -560,6 +564,120 @@ class TestAWSAccountValidation(EnvironmentIsolationTestCase):
         mock_sts.return_value = "114743615542"
         result = validate_aws_configuration("us-east-1", "jm8-dev", "114743615542")
         self.assertEqual(result, "114743615542")
+
+
+class TestStageFrontendOriginContract(unittest.TestCase):
+    def _stack_response(
+        self,
+        *,
+        stage: str = "staging",
+        origin: str = "https://stage.example.cloudfront.net",
+        status: str = "UPDATE_COMPLETE",
+    ) -> MagicMock:
+        name = f"journalm8-{stage}-frontend-hosting"
+        return MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "Stacks": [{
+                    "StackName": name,
+                    "StackId": (
+                        "arn:aws:cloudformation:us-east-1:114743615542:"
+                        f"stack/{name}/stack-id"
+                    ),
+                    "StackStatus": status,
+                    "Outputs": [{
+                        "OutputKey": "FrontendOrigin",
+                        "OutputValue": origin,
+                    }],
+                }],
+            }),
+            stderr="",
+        )
+
+    @patch("jm8_environment_contract.subprocess.run")
+    def test_resolves_exact_stage_stack_with_read_only_command(self, mock_run):
+        mock_run.return_value = self._stack_response()
+
+        origin = resolve_stage_frontend_origin(
+            "journalm8",
+            "staging",
+            "jm8-dev",
+            "us-east-1",
+            "114743615542",
+        )
+
+        self.assertEqual(origin, "https://stage.example.cloudfront.net")
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            [
+                "aws", "cloudformation", "describe-stacks",
+                "--stack-name", "journalm8-staging-frontend-hosting",
+                "--profile", "jm8-dev",
+                "--region", "us-east-1",
+                "--output", "json",
+            ],
+        )
+
+    @patch("jm8_environment_contract.subprocess.run")
+    def test_stack_resolution_fails_closed_for_missing_ambiguous_or_unstable(
+        self,
+        mock_run,
+    ):
+        exact_stack = json.loads(self._stack_response().stdout)["Stacks"][0]
+        responses = (
+            MagicMock(returncode=1, stdout="", stderr="not found"),
+            MagicMock(returncode=0, stdout='{"Stacks": []}', stderr=""),
+            MagicMock(
+                returncode=0,
+                stdout=json.dumps({"Stacks": [exact_stack, exact_stack]}),
+                stderr="",
+            ),
+            self._stack_response(status="UPDATE_IN_PROGRESS"),
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                mock_run.return_value = response
+                with self.assertRaises(EnvironmentContractError):
+                    resolve_stage_frontend_origin(
+                        "journalm8", "staging", "jm8-dev", "us-east-1",
+                        "114743615542",
+                    )
+
+    def test_frontend_origin_rejects_non_origin_url_components(self):
+        invalid = (
+            "http://example.cloudfront.net",
+            "https://user@example.cloudfront.net",
+            "https://example.cloudfront.net/",
+            "https://example.cloudfront.net/path",
+            "https://example.cloudfront.net?query=value",
+            "https://example.cloudfront.net#fragment",
+            "https://example.cloudfront.net:444",
+            "https://*.cloudfront.net",
+        )
+        for origin in invalid:
+            with self.subTest(origin=origin), self.assertRaises(
+                EnvironmentContractError
+            ):
+                validate_https_frontend_origin(origin)
+
+    def test_non_dev_allowed_origins_is_exact_singleton(self):
+        expected = "https://stage.example.cloudfront.net"
+        validate_stage_frontend_origin_contract(
+            "staging", expected, expected, expected
+        )
+        for frontend_origin, allowed_origins in (
+            ("https://other.example.cloudfront.net", expected),
+            (expected, "https://other.example.cloudfront.net"),
+            (expected, f"{expected},https://other.example.cloudfront.net"),
+            (expected, "*"),
+        ):
+            with self.subTest(
+                frontend_origin=frontend_origin,
+                allowed_origins=allowed_origins,
+            ), self.assertRaises(EnvironmentContractError):
+                validate_stage_frontend_origin_contract(
+                    "staging", frontend_origin, allowed_origins, expected
+                )
 
 
 class TestCompleteContractValidation(EnvironmentIsolationTestCase):
@@ -1140,8 +1258,14 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         with self.assertRaises(EnvironmentContractError):
             validate_environment_contract()
 
+    @patch(
+        "jm8_environment_contract.resolve_stage_frontend_origin",
+        return_value="https://abc123.cloudfront.net",
+    )
     @patch("jm8_environment_contract.get_actual_aws_account_id")
-    def test_deploy_frontend_requires_origin_contract(self, mock_sts):
+    def test_deploy_frontend_requires_origin_contract(
+        self, mock_sts, mock_frontend_origin
+    ):
         mock_sts.return_value = "114743615542"
         os.environ.update({
             "APP_NAME": "journalm8",
@@ -1154,15 +1278,22 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "FRONTEND_BUCKET": "journalm8-staging-frontend-114743615542",
             "CLOUDFRONT_DISTRIBUTION_ID": "ABC123",
             "FRONTEND_ORIGIN": "https://abc123.cloudfront.net",
-            "ALLOWED_ORIGINS": "https://abc123.cloudfront.net,https://example.com",
+            "ALLOWED_ORIGINS": "https://abc123.cloudfront.net",
             "JM8_OPERATION": "deploy-frontend",
             "DEPLOY_CONFIRMATION": "staging",
         })
 
         validate_environment_contract()
+        mock_frontend_origin.assert_called_once()
 
+    @patch(
+        "jm8_environment_contract.resolve_stage_frontend_origin",
+        return_value="https://prod123abc.cloudfront.net",
+    )
     @patch("jm8_environment_contract.get_actual_aws_account_id")
-    def test_production_deploy_frontend_accepts_cloudfront_hostname(self, mock_sts):
+    def test_production_deploy_frontend_accepts_cloudfront_hostname(
+        self, mock_sts, mock_frontend_origin
+    ):
         mock_sts.return_value = "114743615542"
         os.environ.update(self._production_environment())
         os.environ.update({
@@ -1173,6 +1304,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         })
 
         validate_environment_contract()
+        mock_frontend_origin.assert_called_once()
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_frontend_operations_reject_dev_stage(self, mock_sts):
@@ -1216,6 +1348,7 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
     def test_create_api_requires_allowed_origins(self):
         script_text = self._read("bin/create-api")
         self._assert_requires_var(script_text, "ALLOWED_ORIGINS")
+        self._assert_requires_var(script_text, "FRONTEND_ORIGIN")
         self.assertNotIn('"AllowOrigins": ["*"]', script_text)
 
     def test_create_resources_requires_allowed_origins(self):

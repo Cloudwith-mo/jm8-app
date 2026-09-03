@@ -10,6 +10,9 @@ set -euo pipefail
 : "${ACCOUNT_ID:?ACCOUNT_ID is required. Run: source .env}"
 : "${API_NAME:?API_NAME is required. Run: source .env}"
 : "${ALLOWED_ORIGINS:?ALLOWED_ORIGINS is required. Run: source .env}"
+if [[ "$STAGE" == "staging" || "$STAGE" == "prod" ]]; then
+  : "${FRONTEND_ORIGIN:?FRONTEND_ORIGIN is required. Run: source .env}"
+fi
 
 # Validate contract before proceeding with any AWS operations
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

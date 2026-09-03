@@ -51,6 +51,10 @@ PRODUCTION_AWS_PROFILE = CANONICAL_AWS_PROFILE_BY_STAGE["prod"]
 PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
 STRIPE_BOOTSTRAP_MODE = "pre-webhook"
 PRODUCTION_API_NAME = "journalm8-prod-api"
+FRONTEND_STACK_COMPLETE_STATUSES = {
+    "CREATE_COMPLETE",
+    "UPDATE_COMPLETE",
+}
 PRODUCTION_FORBIDDEN_DEMO_VARIABLES = {
     "AUTH_BYPASS",
     "DEMO_MODE",
@@ -527,6 +531,163 @@ def production_api_exists(profile: str, region: str) -> bool:
     return any(item["Name"] == PRODUCTION_API_NAME for item in items)
 
 
+def validate_https_frontend_origin(origin: str) -> str:
+    """Validate the strict HTTPS-origin syntax used by frontend stack outputs."""
+    if not origin or origin != origin.strip() or any(
+        character.isspace() for character in origin
+    ):
+        raise EnvironmentContractError(
+            "FrontendOrigin must be a non-empty HTTPS origin"
+        )
+
+    parsed = urlsplit(origin)
+    if parsed.scheme != "https" or not parsed.netloc or not parsed.hostname:
+        raise EnvironmentContractError(
+            "FrontendOrigin must be a valid HTTPS origin"
+        )
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise EnvironmentContractError(
+            "FrontendOrigin must not contain credentials"
+        )
+    if parsed.path or parsed.query or parsed.fragment:
+        raise EnvironmentContractError(
+            "FrontendOrigin must not contain a path, query, or fragment"
+        )
+    if "*" in parsed.hostname:
+        raise EnvironmentContractError(
+            "FrontendOrigin must not contain a wildcard host"
+        )
+    hostname = parsed.hostname
+    if len(hostname) > 253 or any(
+        not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in hostname.split(".")
+    ):
+        raise EnvironmentContractError(
+            "FrontendOrigin must contain a valid DNS hostname"
+        )
+
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise EnvironmentContractError(
+            "FrontendOrigin contains an invalid port"
+        ) from error
+    if port not in {None, 443}:
+        raise EnvironmentContractError(
+            "FrontendOrigin must not contain a non-default port"
+        )
+
+    return origin
+
+
+def resolve_stage_frontend_origin(
+    app_name: str,
+    stage: str,
+    profile: str,
+    region: str,
+    account_id: str,
+) -> str:
+    """Resolve the exact stage frontend stack and return its validated origin."""
+    stack_name = f"{app_name}-{stage}-frontend-hosting"
+    try:
+        result = subprocess.run(
+            [
+                "aws", "cloudformation", "describe-stacks",
+                "--stack-name", stack_name,
+                "--profile", profile,
+                "--region", region,
+                "--output", "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise EnvironmentContractError(
+            "Unable to resolve the stage frontend-hosting stack"
+        ) from error
+
+    if result.returncode != 0:
+        raise EnvironmentContractError(
+            "Unable to resolve the stage frontend-hosting stack"
+        )
+
+    try:
+        document = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise EnvironmentContractError(
+            "Frontend-hosting stack response is malformed"
+        ) from error
+
+    stacks = document.get("Stacks") if isinstance(document, dict) else None
+    if not isinstance(stacks, list) or len(stacks) != 1:
+        raise EnvironmentContractError(
+            "Exactly one stage frontend-hosting stack must be resolved"
+        )
+
+    stack = stacks[0]
+    if not isinstance(stack, dict) or stack.get("StackName") != stack_name:
+        raise EnvironmentContractError(
+            "Frontend-hosting stack identity does not match the stage"
+        )
+    expected_stack_id_prefix = (
+        f"arn:aws:cloudformation:{region}:{account_id}:stack/{stack_name}/"
+    )
+    stack_id = stack.get("StackId")
+    if not isinstance(stack_id, str) or not stack_id.startswith(
+        expected_stack_id_prefix
+    ):
+        raise EnvironmentContractError(
+            "Frontend-hosting stack account or region does not match the stage"
+        )
+    if stack.get("StackStatus") not in FRONTEND_STACK_COMPLETE_STATUSES:
+        raise EnvironmentContractError(
+            "Frontend-hosting stack is not in a stable completed state"
+        )
+
+    outputs = stack.get("Outputs")
+    if not isinstance(outputs, list):
+        raise EnvironmentContractError(
+            "Frontend-hosting stack outputs are missing"
+        )
+    origin_outputs = [
+        output.get("OutputValue")
+        for output in outputs
+        if isinstance(output, dict)
+        and output.get("OutputKey") == "FrontendOrigin"
+    ]
+    if len(origin_outputs) != 1 or not isinstance(origin_outputs[0], str):
+        raise EnvironmentContractError(
+            "Frontend-hosting stack must contain exactly one FrontendOrigin output"
+        )
+    return validate_https_frontend_origin(origin_outputs[0])
+
+
+def validate_stage_frontend_origin_contract(
+    stage: str,
+    frontend_origin: str,
+    allowed_origins_csv: str,
+    expected_origin: str,
+) -> None:
+    """Bind non-development CORS to the exact frontend stack output."""
+    if stage not in {"staging", "prod"}:
+        return
+
+    validate_https_frontend_origin(expected_origin)
+    validate_https_frontend_origin(frontend_origin)
+    if frontend_origin != expected_origin:
+        raise EnvironmentContractError(
+            "FRONTEND_ORIGIN does not match the stage frontend-hosting stack"
+        )
+
+    raw_origins = [item.strip() for item in allowed_origins_csv.split(",")]
+    normalized_origins = validate_allowed_origins(stage, allowed_origins_csv)
+    if raw_origins != [expected_origin] or normalized_origins != [expected_origin]:
+        raise EnvironmentContractError(
+            "ALLOWED_ORIGINS must contain only the stage frontend origin"
+        )
+
+
 def validate_stripe_bootstrap_context(
     operation: str,
     stage: str,
@@ -969,6 +1130,22 @@ def validate_operation_specific(
         allowed_origins_csv = os.environ.get("ALLOWED_ORIGINS", "").strip()
         validate_allowed_origins(stage, allowed_origins_csv)
 
+        if op == "create-api" and stage in {"staging", "prod"}:
+            expected_origin = resolve_stage_frontend_origin(
+                os.environ.get("APP_NAME", "").strip(),
+                stage,
+                os.environ.get("AWS_PROFILE", "").strip(),
+                os.environ.get("AWS_REGION", "").strip(),
+                actual_account_id
+                or os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip(),
+            )
+            validate_stage_frontend_origin_contract(
+                stage,
+                os.environ.get("FRONTEND_ORIGIN", "").strip(),
+                allowed_origins_csv,
+                expected_origin,
+            )
+
     if op == "create-frontend-hosting":
         if stage not in {"staging", "prod"}:
             raise EnvironmentContractError(
@@ -1030,27 +1207,22 @@ def validate_operation_specific(
             raw_bucket,
         )
 
-        parsed = urlsplit(frontend_origin)
-        if parsed.scheme != "https":
-            raise EnvironmentContractError(
-                "FRONTEND_ORIGIN must use https for staging/prod"
-            )
-        if not parsed.netloc:
-            raise EnvironmentContractError("FRONTEND_ORIGIN must contain a valid hostname")
-        if parsed.path not in {"", "/"}:
-            raise EnvironmentContractError("FRONTEND_ORIGIN must contain no path, query, or fragment")
-        if parsed.query or parsed.fragment:
-            raise EnvironmentContractError("FRONTEND_ORIGIN must contain no path, query, or fragment")
-
         allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
         if not allowed_origins:
             raise EnvironmentContractError("deploy-frontend requires ALLOWED_ORIGINS")
-        normalized = validate_allowed_origins(stage, allowed_origins)
-        count = sum(1 for value in normalized if value == frontend_origin)
-        if count != 1:
-            raise EnvironmentContractError(
-                "FRONTEND_ORIGIN must appear exactly once in ALLOWED_ORIGINS"
-            )
+        expected_origin = resolve_stage_frontend_origin(
+            app_name,
+            stage,
+            os.environ.get("AWS_PROFILE", "").strip(),
+            os.environ.get("AWS_REGION", "").strip(),
+            actual_account_id or expected_account_id,
+        )
+        validate_stage_frontend_origin_contract(
+            stage,
+            frontend_origin,
+            allowed_origins,
+            expected_origin,
+        )
 
         if os.environ.get("STRIPE_SECRET_KEY", "").strip():
             # Intentionally ignored for this frontend-only deployment path.
