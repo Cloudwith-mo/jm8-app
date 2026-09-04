@@ -168,11 +168,75 @@ import sys
 print(json.dumps({"level":"ERROR","includeExecutionData":False,"destinations":[{"cloudWatchLogsLogGroup":{"logGroupArn":sys.argv[1]}}]}))
 PY_LOGGING
 
+run_stepfunctions_write_with_logging_propagation_retry() {
+  local operation="$1"
+  shift
+
+  local max_attempts=5
+  local retry_waits=(2 4 8 16)
+  local expected_operation
+  local expected_error
+  local actual_error
+  local attempt=1
+  local command_status
+  local wait_seconds
+  local output_file
+  local error_file
+
+  case "$operation" in
+    create-state-machine)
+      expected_operation="CreateStateMachine"
+      ;;
+    update-state-machine)
+      expected_operation="UpdateStateMachine"
+      ;;
+    *)
+      echo "Unsupported Step Functions write operation." >&2
+      return 1
+      ;;
+  esac
+  expected_error="An error occurred (AccessDeniedException) when calling the ${expected_operation} operation: The state machine IAM Role is not authorized to access the Log Destination."
+
+  output_file="$(mktemp "${BUILD_DIR}/stepfunctions-output.XXXXXX")"
+  error_file="$(mktemp "${BUILD_DIR}/stepfunctions-error.XXXXXX")"
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if "$@" > "$output_file" 2> "$error_file"; then
+      cat "$output_file"
+      rm -f "$output_file" "$error_file"
+      return 0
+    else
+      command_status=$?
+    fi
+
+    actual_error="$(<"$error_file")"
+    if [ "$actual_error" != "$expected_error" ]; then
+      rm -f "$output_file" "$error_file"
+      echo "Step Functions ${operation} failed without a retryable logging propagation signal." >&2
+      return "$command_status"
+    fi
+
+    if [ "$attempt" -eq "$max_attempts" ]; then
+      rm -f "$output_file" "$error_file"
+      echo "Step Functions ${operation} failed after ${max_attempts} bounded logging propagation attempts." >&2
+      return "$command_status"
+    fi
+
+    wait_seconds="${retry_waits[$((attempt - 1))]}"
+    echo "Step Functions logging authorization is propagating; retrying after ${wait_seconds} seconds." >&2
+    sleep "$wait_seconds"
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$output_file" "$error_file"
+  return 1
+}
+
 WORKFLOW_ARN="$(aws stepfunctions list-state-machines --profile "$AWS_PROFILE" --region "$AWS_REGION" --query "stateMachines[?name=='${WORKFLOW_NAME}'].stateMachineArn | [0]" --output text)"
 if [ -z "$WORKFLOW_ARN" ] || [ "$WORKFLOW_ARN" = "None" ]; then
-  WORKFLOW_ARN="$(aws stepfunctions create-state-machine --name "$WORKFLOW_NAME" --definition "file://${BUILD_DIR}/account-deletion.asl.json" --role-arn "$STEP_ROLE_ARN" --type STANDARD --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --query stateMachineArn --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
+  WORKFLOW_ARN="$(run_stepfunctions_write_with_logging_propagation_retry "create-state-machine" aws stepfunctions create-state-machine --name "$WORKFLOW_NAME" --definition "file://${BUILD_DIR}/account-deletion.asl.json" --role-arn "$STEP_ROLE_ARN" --type STANDARD --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --query stateMachineArn --output text --profile "$AWS_PROFILE" --region "$AWS_REGION")"
 else
-  aws stepfunctions update-state-machine --state-machine-arn "$WORKFLOW_ARN" --definition "file://${BUILD_DIR}/account-deletion.asl.json" --role-arn "$STEP_ROLE_ARN" --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  run_stepfunctions_write_with_logging_propagation_retry "update-state-machine" aws stepfunctions update-state-machine --state-machine-arn "$WORKFLOW_ARN" --definition "file://${BUILD_DIR}/account-deletion.asl.json" --role-arn "$STEP_ROLE_ARN" --logging-configuration "file://${BUILD_DIR}/workflow-logging.json" --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
 fi
 aws stepfunctions tag-resource --resource-arn "$WORKFLOW_ARN" --tags key=App,value="$APP_NAME" key=Stage,value="$STAGE" key=ManagedBy,value=aws-cli --profile "$AWS_PROFILE" --region "$AWS_REGION"
 

@@ -120,6 +120,9 @@ def render_embedded_json(source: str, marker: str, arguments: list[str]) -> dict
 
 def run_mocked_staging_deletion_deploy(
     environment_overrides: dict[str, str] | None = None,
+    *,
+    stepfunctions_scenario: str = "success",
+    state_machine_present: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run the actual guarded deploy/package boundary with a local AWS shim."""
     with tempfile.TemporaryDirectory() as directory:
@@ -203,11 +206,47 @@ case "${service}:${operation}" in
   lambda:list-tags)
     printf '%s\\n' '{"Tags":{"App":"journalm8","Stage":"staging","ManagedBy":"aws-cli"}}'
     ;;
-  stepfunctions:list-state-machines)
-    printf '%s\\n' 'None'
+  logs:create-log-group)
+    printf '%s\\n' 'ResourceAlreadyExistsException' >&2
+    exit 254
     ;;
-  stepfunctions:create-state-machine)
-    printf '%s\\n' 'arn:aws:states:us-east-1:114743615542:stateMachine:journalm8-staging-account-deletion-workflow'
+  stepfunctions:list-state-machines)
+    if [ "$MOCK_STATE_MACHINE_PRESENT" = "true" ]; then
+      printf '%s\\n' 'arn:aws:states:us-east-1:114743615542:stateMachine:journalm8-staging-account-deletion-workflow'
+    else
+      printf '%s\\n' 'None'
+    fi
+    ;;
+  stepfunctions:create-state-machine|stepfunctions:update-state-machine)
+    attempts="$(($(cat "$MOCK_STEPFUNCTIONS_ATTEMPTS") + 1))"
+    printf '%s\\n' "$attempts" > "$MOCK_STEPFUNCTIONS_ATTEMPTS"
+    if [ "$operation" = "create-state-machine" ]; then
+      operation_name='CreateStateMachine'
+    else
+      operation_name='UpdateStateMachine'
+    fi
+    exact_error="An error occurred (AccessDeniedException) when calling the ${operation_name} operation: The state machine IAM Role is not authorized to access the Log Destination."
+    case "$MOCK_STEPFUNCTIONS_SCENARIO" in
+      exact-then-success)
+        if [ "$attempts" -eq 1 ]; then
+          printf '%s\\n' "$exact_error" >&2
+          exit 42
+        fi
+        ;;
+      exact-persistent)
+        printf '%s\\n' "$exact_error" >&2
+        exit 42
+        ;;
+      unrelated-access-denied)
+        printf 'An error occurred (AccessDeniedException): %s\\n' "$MOCK_PRIVATE_VALUE" >&2
+        exit 43
+        ;;
+    esac
+    if [ "$operation" = "create-state-machine" ]; then
+      printf '%s\\n' 'arn:aws:states:us-east-1:114743615542:stateMachine:journalm8-staging-account-deletion-workflow'
+    else
+      printf '{}\\n'
+    fi
     ;;
   *)
     printf '{}\\n'
@@ -217,6 +256,18 @@ esac
             encoding="utf-8",
         )
         aws_shim.chmod(0o755)
+        sleep_shim = mock_bin / "sleep"
+        sleep_shim.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep %s\\n' "$1" >> "$MOCK_AWS_LOG"
+""",
+            encoding="utf-8",
+        )
+        sleep_shim.chmod(0o755)
+
+        attempts_file = Path(directory) / "stepfunctions-attempts"
+        attempts_file.write_text("0\n", encoding="utf-8")
 
         environment = {
             "ACCOUNT_EXPORT_WORKFLOW_ARN": (
@@ -238,6 +289,12 @@ esac
             ),
             "LAMBDA_FUNCTION_NAME": "journalm8-staging-api",
             "MOCK_AWS_LOG": str(aws_log),
+            "MOCK_PRIVATE_VALUE": "private-workflow-definition-and-user-data",
+            "MOCK_STATE_MACHINE_PRESENT": (
+                "true" if state_machine_present else "false"
+            ),
+            "MOCK_STEPFUNCTIONS_ATTEMPTS": str(attempts_file),
+            "MOCK_STEPFUNCTIONS_SCENARIO": stepfunctions_scenario,
             "OCR_WORKFLOW_ARN": (
                 "arn:aws:states:us-east-1:114743615542:stateMachine:"
                 "journalm8-staging-ocr-workflow"
@@ -426,6 +483,133 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         )
         self.assertNotIn("start-execution", aws_calls)
 
+    def test_exact_logging_authorization_failure_retries_create_and_update(self):
+        for operation, state_machine_present in (
+            ("create-state-machine", False),
+            ("update-state-machine", True),
+        ):
+            with self.subTest(operation=operation):
+                result, aws_calls = run_mocked_staging_deletion_deploy(
+                    stepfunctions_scenario="exact-then-success",
+                    state_machine_present=state_machine_present,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    aws_calls.count(f"stepfunctions {operation}"),
+                    2,
+                )
+                self.assertEqual(
+                    [line for line in aws_calls.splitlines()
+                     if line.startswith("sleep ")],
+                    ["sleep 2"],
+                )
+                self.assertIn(
+                    "logging authorization is propagating",
+                    result.stderr,
+                )
+                self.assertNotIn(
+                    "not authorized to access the Log Destination",
+                    result.stdout + result.stderr,
+                )
+                self.assertNotIn(
+                    "private-workflow-definition-and-user-data",
+                    result.stdout + result.stderr,
+                )
+                self.assertNotIn("start-execution", aws_calls)
+
+    def test_logging_authorization_retry_is_bounded_and_fails_closed(self):
+        result, aws_calls = run_mocked_staging_deletion_deploy(
+            stepfunctions_scenario="exact-persistent",
+        )
+
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(
+            aws_calls.count("stepfunctions create-state-machine"),
+            5,
+        )
+        waits = [
+            int(line.removeprefix("sleep "))
+            for line in aws_calls.splitlines()
+            if line.startswith("sleep ")
+        ]
+        self.assertEqual(waits, [2, 4, 8, 16])
+        self.assertEqual(sum(waits), 30)
+        self.assertIn(
+            "failed after 5 bounded logging propagation attempts",
+            result.stderr,
+        )
+        self.assertNotIn(
+            "not authorized to access the Log Destination",
+            result.stdout + result.stderr,
+        )
+        self.assertNotIn("stepfunctions tag-resource", aws_calls)
+        self.assertNotIn("start-execution", aws_calls)
+        self.assertNotIn("apigateway", aws_calls)
+        self.assertNotRegex(
+            aws_calls,
+            r"lambda (?:create-function|update-function-code|"
+            r"update-function-configuration) .*journalm8-staging-api",
+        )
+
+    def test_unrelated_access_denied_fails_immediately_without_raw_error(self):
+        result, aws_calls = run_mocked_staging_deletion_deploy(
+            stepfunctions_scenario="unrelated-access-denied",
+        )
+
+        self.assertEqual(result.returncode, 43)
+        self.assertEqual(
+            aws_calls.count("stepfunctions create-state-machine"),
+            1,
+        )
+        self.assertNotIn("sleep ", aws_calls)
+        self.assertIn("without a retryable logging propagation signal", result.stderr)
+        for private_value in (
+            "AccessDeniedException",
+            "private-workflow-definition-and-user-data",
+            "account-deletion.asl.json",
+            "worker-environment.json",
+        ):
+            self.assertNotIn(private_value, result.stdout + result.stderr)
+        self.assertNotIn("stepfunctions tag-resource", aws_calls)
+        self.assertNotIn("start-execution", aws_calls)
+        self.assertNotIn("apigateway", aws_calls)
+
+    def test_partial_resources_are_reused_without_execution_or_shared_api_wiring(self):
+        result, aws_calls = run_mocked_staging_deletion_deploy(
+            stepfunctions_scenario="exact-then-success",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("iam create-role", aws_calls)
+        self.assertNotIn("lambda create-function", aws_calls)
+        self.assertEqual(aws_calls.count("iam get-role --role-name"), 4)
+        self.assertIn(
+            "lambda update-function-code --function-name "
+            "journalm8-staging-account-deletion-worker",
+            aws_calls,
+        )
+        self.assertIn(
+            "logs create-log-group --log-group-name "
+            "/aws/vendedlogs/states/"
+            "journalm8-staging-account-deletion-workflow",
+            aws_calls,
+        )
+        self.assertEqual(
+            aws_calls.count("stepfunctions create-state-machine"),
+            2,
+        )
+        self.assertNotIn("delete-state-machine", aws_calls)
+        self.assertNotIn("delete-function", aws_calls)
+        self.assertNotIn("delete-role", aws_calls)
+        self.assertNotIn("start-execution", aws_calls)
+        self.assertNotIn("apigateway", aws_calls)
+        self.assertNotRegex(
+            aws_calls,
+            r"lambda (?:create-function|update-function-code|"
+            r"update-function-configuration) .*journalm8-staging-api",
+        )
+
     def test_deletion_worker_tag_contract_remains_exact(self):
         helper = (ROOT / "bin" / "jm8_resource_tags.sh").read_text()
         self.assertIn(
@@ -535,7 +719,7 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
     def test_every_deletion_test_expression_has_separate_tokens(self):
         deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
         expressions = re.findall(r"(?<!\[)\[\s.*?\s\](?!\])", deploy)
-        self.assertEqual(len(expressions), 6)
+        self.assertEqual(len(expressions), 9)
         for expression in expressions:
             with self.subTest(expression=expression):
                 tokens = shlex.split(expression)
@@ -545,7 +729,7 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
                     self.assertIn(tokens[1], {"-n", "-z"})
                 else:
                     self.assertEqual(len(tokens), 5)
-                    self.assertIn(tokens[2], {"=", "!="})
+                    self.assertIn(tokens[2], {"=", "!=", "-eq", "-le"})
 
     def test_phase_deployment_scripts_have_no_joined_shell_tokens(self):
         joined_source_patterns = (
