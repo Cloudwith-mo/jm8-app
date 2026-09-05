@@ -8,6 +8,7 @@ set -euo pipefail
 : "${STAGE:?STAGE is required. Run: source .env}"
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required. Run: source .env}"
 : "${RAW_BUCKET:?RAW_BUCKET is required. Run: source .env}"
 : "${EXPORT_BUCKET:?EXPORT_BUCKET is required. Run: source .env}"
 : "${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required. Run: source .env}"
@@ -525,3 +526,7 @@ aws lambda get-function \
   --output table \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION"
+
+# Reconcile the semantic-memory worker and its event-source mapping in the
+# intentionally disabled state. Activation requires a future explicit gate.
+./bin/deploy-semantic-memory

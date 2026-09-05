@@ -34,6 +34,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_stage_account_mapping,
     validate_resource_names,
     validate_entry_chunks_table_name,
+    validate_main_table_stream_description,
     validate_shared_api_names,
     validate_export_bucket_name,
     validate_non_dev_urls,
@@ -70,6 +71,7 @@ SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "deploy-account-deletion",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
+    BACKEND_ROOT / "bin" / "deploy-semantic-memory",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
     BACKEND_ROOT / "bin" / "provision-stripe-secret",
     BACKEND_ROOT / "bin" / "setup-stripe-catalog",
@@ -90,6 +92,7 @@ NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "deploy-account-deletion",
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
+    BACKEND_ROOT / "bin" / "deploy-semantic-memory",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
 ]
 
@@ -1666,6 +1669,96 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
             validate_operation_specific("create-resources", "dev")
 
         self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
+
+    def test_semantic_memory_deploy_requires_entry_chunks_table_contract(self):
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "TABLE_NAME": "journalm8-dev-main",
+        })
+        os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("deploy-semantic-memory", "dev")
+
+        self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
+
+    def test_main_table_stream_contract_requires_exact_stream_and_identity(self):
+        table_arn = (
+            "arn:aws:dynamodb:us-east-1:114743615542:"
+            "table/journalm8-dev-main"
+        )
+        table = {
+            "TableName": "journalm8-dev-main",
+            "TableArn": table_arn,
+            "TableStatus": "ACTIVE",
+            "KeySchema": [
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            "AttributeDefinitions": [
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+                {"AttributeName": "GSI1PK", "AttributeType": "S"},
+                {"AttributeName": "GSI1SK", "AttributeType": "S"},
+            ],
+            "GlobalSecondaryIndexes": [{
+                "IndexName": "GSI1",
+                "KeySchema": [
+                    {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                    {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }],
+            "BillingModeSummary": {"BillingMode": "PAY_PER_REQUEST"},
+        }
+        self.assertEqual(
+            validate_main_table_stream_description(
+                {"Table": table},
+                app_name="journalm8",
+                stage="dev",
+                account_id="114743615542",
+                region="us-east-1",
+                table_name="journalm8-dev-main",
+                require_stream=False,
+            ),
+            "ENABLE",
+        )
+        enabled = {
+            **table,
+            "StreamSpecification": {
+                "StreamEnabled": True,
+                "StreamViewType": "NEW_AND_OLD_IMAGES",
+            },
+            "LatestStreamArn": f"{table_arn}/stream/version",
+        }
+        self.assertEqual(
+            validate_main_table_stream_description(
+                {"Table": enabled},
+                app_name="journalm8",
+                stage="dev",
+                account_id="114743615542",
+                region="us-east-1",
+                table_name="journalm8-dev-main",
+                require_stream=True,
+            ),
+            "REUSE",
+        )
+        with self.assertRaises(EnvironmentContractError):
+            validate_main_table_stream_description(
+                {"Table": {
+                    **enabled,
+                    "StreamSpecification": {
+                        "StreamEnabled": True,
+                        "StreamViewType": "KEYS_ONLY",
+                    },
+                }},
+                app_name="journalm8",
+                stage="dev",
+                account_id="114743615542",
+                region="us-east-1",
+                table_name="journalm8-dev-main",
+                require_stream=True,
+            )
 
     def test_create_auth_rejects_non_dev_localhost_callback(self):
         os.environ["AWS_PROFILE"] = "jm8-dev"

@@ -260,6 +260,51 @@ ensure_entry_chunks_table() {
   echo "Semantic-memory table contract verified."
 }
 
+ensure_main_table_stream() {
+  local stream_action
+
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    > .build/main-table-stream-before.json
+
+  stream_action="$(python3 "$SCRIPT_DIR/jm8_environment_contract.py" \
+    main-table-stream .build/main-table-stream-before.json \
+    "$APP_NAME" "$STAGE" "$ACCOUNT_ID" "$AWS_REGION" \
+    "$TABLE_NAME" before)"
+
+  if [ "$stream_action" = "ENABLE" ]; then
+    aws dynamodb update-table \
+      --table-name "$TABLE_NAME" \
+      --stream-specification \
+        StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+    aws dynamodb wait table-exists \
+      --table-name "$TABLE_NAME" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION"
+  elif [ "$stream_action" != "REUSE" ]; then
+    echo "Main table stream verification returned an invalid result." >&2
+    return 1
+  fi
+
+  aws dynamodb describe-table \
+    --table-name "$TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    > .build/main-table-stream-after.json
+  python3 "$SCRIPT_DIR/jm8_environment_contract.py" \
+    main-table-stream .build/main-table-stream-after.json \
+    "$APP_NAME" "$STAGE" "$ACCOUNT_ID" "$AWS_REGION" \
+    "$TABLE_NAME" after \
+    >/dev/null
+
+  echo "Main table NEW_AND_OLD_IMAGES stream contract verified."
+}
+
 echo "Creating DynamoDB table if missing: $TABLE_NAME"
 
 set +e
@@ -310,6 +355,7 @@ else
   echo "DynamoDB table already exists."
 fi
 
+ensure_main_table_stream
 ensure_entry_chunks_table
 
 echo "Creating S3 bucket if missing: $RAW_BUCKET"

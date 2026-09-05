@@ -53,7 +53,11 @@ PRODUCTION_AWS_PROFILE = CANONICAL_AWS_PROFILE_BY_STAGE["prod"]
 PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
 STRIPE_BOOTSTRAP_MODE = "pre-webhook"
 PRODUCTION_API_NAME = "journalm8-prod-api"
-ENTRY_CHUNKS_REQUIRED_OPERATIONS = {"create-resources", "deploy"}
+ENTRY_CHUNKS_REQUIRED_OPERATIONS = {
+    "create-resources",
+    "deploy",
+    "deploy-semantic-memory",
+}
 FRONTEND_STACK_COMPLETE_STATUSES = {
     "CREATE_COMPLETE",
     "UPDATE_COMPLETE",
@@ -484,6 +488,100 @@ def validate_entry_chunks_table_pitr(document: Mapping[str, Any]) -> None:
         raise EnvironmentContractError(
             "Entry chunks table point-in-time recovery is not enabled"
         )
+
+
+def validate_main_table_stream_description(
+    document: Mapping[str, Any],
+    *,
+    app_name: str,
+    stage: str,
+    account_id: str,
+    region: str,
+    table_name: str,
+    require_stream: bool,
+) -> str:
+    """Validate the exact main table and its semantic-memory stream contract."""
+    expected_name = f"{app_name}-{stage}-main"
+    expected_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/{expected_name}"
+    table = document.get("Table") if isinstance(document, Mapping) else None
+    if not isinstance(table, Mapping):
+        raise EnvironmentContractError("Main table description is malformed")
+
+    key_schema = table.get("KeySchema")
+    attributes = table.get("AttributeDefinitions")
+    indexes = table.get("GlobalSecondaryIndexes")
+    billing = table.get("BillingModeSummary")
+    if (
+        not isinstance(key_schema, list)
+        or not isinstance(attributes, list)
+        or not isinstance(indexes, list)
+        or not isinstance(billing, Mapping)
+    ):
+        raise EnvironmentContractError("Main table contract is malformed")
+    actual_keys = {
+        item.get("AttributeName"): item.get("KeyType")
+        for item in key_schema
+        if isinstance(item, Mapping)
+    }
+    actual_attributes = {
+        item.get("AttributeName"): item.get("AttributeType")
+        for item in attributes
+        if isinstance(item, Mapping)
+    }
+    index = indexes[0] if len(indexes) == 1 else None
+    index_key_schema = index.get("KeySchema") if isinstance(index, Mapping) else None
+    index_projection = index.get("Projection") if isinstance(index, Mapping) else None
+    actual_index_keys = (
+        {
+            item.get("AttributeName"): item.get("KeyType")
+            for item in index_key_schema
+            if isinstance(item, Mapping)
+        }
+        if isinstance(index_key_schema, list)
+        else {}
+    )
+    if (
+        table_name != expected_name
+        or table.get("TableName") != expected_name
+        or table.get("TableArn") != expected_arn
+        or table.get("TableStatus") != "ACTIVE"
+        or actual_keys != {"PK": "HASH", "SK": "RANGE"}
+        or len(key_schema) != 2
+        or actual_attributes
+        != {"PK": "S", "SK": "S", "GSI1PK": "S", "GSI1SK": "S"}
+        or len(attributes) != 4
+        or len(indexes) != 1
+        or not isinstance(index, Mapping)
+        or index.get("IndexName") != "GSI1"
+        or actual_index_keys != {"GSI1PK": "HASH", "GSI1SK": "RANGE"}
+        or len(index_key_schema) != 2
+        or not isinstance(index_projection, Mapping)
+        or index_projection.get("ProjectionType") != "ALL"
+        or billing.get("BillingMode") != "PAY_PER_REQUEST"
+    ):
+        raise EnvironmentContractError("Main table does not match the required contract")
+
+    stream = table.get("StreamSpecification")
+    stream_enabled = (
+        stream.get("StreamEnabled") if isinstance(stream, Mapping) else False
+    )
+    stream_view_type = (
+        stream.get("StreamViewType") if isinstance(stream, Mapping) else None
+    )
+    latest_stream_arn = table.get("LatestStreamArn")
+    if stream_enabled:
+        if (
+            stream_view_type != "NEW_AND_OLD_IMAGES"
+            or not isinstance(latest_stream_arn, str)
+            or not latest_stream_arn.startswith(f"{expected_arn}/stream/")
+        ):
+            raise EnvironmentContractError(
+                "Main table stream does not match the required contract"
+            )
+        return "REUSE"
+    if require_stream:
+        raise EnvironmentContractError("Main table stream is not enabled")
+    return "ENABLE"
 
 
 def validate_shared_api_names(
@@ -1495,6 +1593,25 @@ def main(argv: list[str]) -> None:
                     "Entry chunks table PITR arguments are invalid"
                 )
             validate_entry_chunks_table_pitr(_load_contract_json(argv[2]))
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "main-table-stream":
+        try:
+            if len(argv) != 9 or argv[8] not in {"before", "after"}:
+                raise EnvironmentContractError(
+                    "Main table stream arguments are invalid"
+                )
+            print(validate_main_table_stream_description(
+                _load_contract_json(argv[2]),
+                app_name=argv[3],
+                stage=argv[4],
+                account_id=argv[5],
+                region=argv[6],
+                table_name=argv[7],
+                require_stream=argv[8] == "after",
+            ))
             sys.exit(0)
         except EnvironmentContractError as exc:
             print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)

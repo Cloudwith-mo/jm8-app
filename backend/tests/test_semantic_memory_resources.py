@@ -139,7 +139,9 @@ class SemanticMemoryResourceTests(unittest.TestCase):
             encoding="utf-8"
         )
         start = cls.create_resources.index("ensure_entry_chunks_table() {")
-        end = cls.create_resources.index("\n}\n\necho", start) + 3
+        end = cls.create_resources.index(
+            "\n}\n\nensure_main_table_stream", start
+        ) + 3
         cls.function_source = cls.create_resources[start:end]
 
     @staticmethod

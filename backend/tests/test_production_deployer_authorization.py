@@ -579,6 +579,7 @@ class PolicyGenerationTests(unittest.TestCase):
                 "logs:CreateLogGroup",
                 "logs:PutMetricFilter",
                 "logs:PutRetentionPolicy",
+                "logs:TagResource",
             },
         )
         for forbidden in (
@@ -954,6 +955,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "s3",
             "secretsmanager",
             "sns",
+            "sqs",
             "states",
         }
         actions = {
@@ -981,6 +983,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "deploy-frontend",
             "deploy-observability",
             "deploy-account-export",
+            "deploy-semantic-memory",
             "deploy-analysis-observability",
             "deploy-bedrock-budget",
             "deploy-production-budget",
@@ -1114,6 +1117,10 @@ class PolicyGenerationTests(unittest.TestCase):
                 (
                     f"arn:aws:iam::{ACCOUNT_ID}:role/"
                     "journalm8-prod-account-deletion-worker-role"
+                ),
+                (
+                    f"arn:aws:iam::{ACCOUNT_ID}:role/"
+                    "journalm8-prod-semantic-memory-worker-role"
                 ),
             },
         )

@@ -71,6 +71,10 @@ RESOURCE_STAR_ACTIONS = {
     "cognito-idp:CreateUserPool",
     "cognito-idp:DescribeUserPoolDomain",
     "cognito-idp:ListUserPools",
+    "lambda:CreateEventSourceMapping",
+    "lambda:GetEventSourceMapping",
+    "lambda:ListEventSourceMappings",
+    "lambda:UpdateEventSourceMapping",
     "states:ListStateMachines",
     *LOG_DELIVERY_CONTROL_PLANE_ACTIONS,
 }
@@ -124,6 +128,13 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         f"arn:aws:dynamodb:{region}:{ACCOUNT_ID}:"
         "table/journalm8-prod-entry-chunks"
     )
+    semantic_worker_arn = (
+        f"arn:aws:lambda:{region}:{ACCOUNT_ID}:function:"
+        "journalm8-prod-semantic-memory-worker"
+    )
+    semantic_dlq_arn = (
+        f"arn:aws:sqs:{region}:{ACCOUNT_ID}:journalm8-prod-semantic-memory-dlq"
+    )
     raw_bucket_arn = f"arn:aws:s3:::journalm8-prod-raw-{ACCOUNT_ID}"
     frontend_bucket_arn = f"arn:aws:s3:::journalm8-prod-frontend-{ACCOUNT_ID}"
     export_bucket_arn = f"arn:aws:s3:::journalm8-prod-exports-{ACCOUNT_ID}"
@@ -147,6 +158,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         "journalm8-prod-account-export-step-role",
         "journalm8-prod-account-deletion-worker-role",
         "journalm8-prod-account-deletion-step-role",
+        "journalm8-prod-semantic-memory-worker-role",
     )
     runtime_role_arns = tuple(
         f"arn:aws:iam::{ACCOUNT_ID}:role/{name}"
@@ -226,6 +238,18 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "s3:PutBucketVersioning",
             ),
             raw_bucket_arn,
+        ),
+        _statement(
+            "ManageProductionSemanticMemoryDlq",
+            (
+                "sqs:CreateQueue",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+                "sqs:ListQueueTags",
+                "sqs:SetQueueAttributes",
+                "sqs:TagQueue",
+            ),
+            semantic_dlq_arn,
         ),
         _statement(
             "ManageProductionExportBucket",
@@ -350,6 +374,33 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "lambda:UpdateFunctionConfiguration",
             ),
             lambda_arn,
+        ),
+        _statement(
+            "CreateSemanticMemoryEventSourceMapping",
+            ("lambda:CreateEventSourceMapping",),
+            "*",
+            {
+                "ArnEquals": {"lambda:FunctionArn": semantic_worker_arn},
+                "StringEquals": {"aws:RequestedRegion": region},
+            },
+        ),
+        _statement(
+            "ListSemanticMemoryEventSourceMappings",
+            ("lambda:ListEventSourceMappings",),
+            "*",
+            requested_region_condition,
+        ),
+        _statement(
+            "ManageSemanticMemoryEventSourceMapping",
+            (
+                "lambda:GetEventSourceMapping",
+                "lambda:UpdateEventSourceMapping",
+            ),
+            "*",
+            {
+                "ArnEquals": {"lambda:FunctionArn": semantic_worker_arn},
+                "StringEquals": {"aws:RequestedRegion": region},
+            },
         ),
         _statement(
             "ManageProductionStateMachines",
@@ -614,6 +665,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "logs:CreateLogGroup",
                 "logs:PutMetricFilter",
                 "logs:PutRetentionPolicy",
+                "logs:TagResource",
             ),
             log_group_arns,
         ),
