@@ -505,10 +505,43 @@ if [ -z "$MAPPING_UUID" ] || [ "$MAPPING_UUID" = "None" ] \
   echo "Semantic-memory event-source mapping identity is invalid." >&2
   exit 1
 fi
-aws lambda wait event-source-mapping-updated \
-  --uuid "$MAPPING_UUID" \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION"
+MAPPING_POLL_ATTEMPT=1
+MAPPING_POLL_LIMIT=20
+MAPPING_STATE=""
+
+while [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; do
+  MAPPING_STATE="$(
+    aws lambda get-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query State \
+      --output text
+  )"
+
+  case "$MAPPING_STATE" in
+    Disabled)
+      break
+      ;;
+    Creating|Updating|Disabling)
+      ;;
+    *)
+      echo "Semantic-memory event-source mapping entered an invalid state." >&2
+      exit 1
+      ;;
+  esac
+
+  MAPPING_POLL_ATTEMPT=$((MAPPING_POLL_ATTEMPT + 1))
+
+  if [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; then
+    sleep 3
+  fi
+done
+
+if [ "$MAPPING_STATE" != "Disabled" ]; then
+  echo "Semantic-memory event-source mapping did not become disabled." >&2
+  exit 1
+fi
 aws lambda get-event-source-mapping \
   --uuid "$MAPPING_UUID" \
   --profile "$AWS_PROFILE" \

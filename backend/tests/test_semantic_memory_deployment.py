@@ -124,10 +124,18 @@ elif args[:2] in (["lambda", "create-event-source-mapping"], ["lambda", "update-
     state_path.write_text(json.dumps(state), encoding="utf-8")
     if "--query" in args:
         print("mapping-1")
-elif args[:2] == ["lambda", "wait"]:
-    pass
 elif args[:2] == ["lambda", "get-event-source-mapping"]:
-    print(json.dumps(state["mapping"]))
+    if "--query" in args:
+        poll_index = state.get("poll_index", 0)
+        if state.get("poll_failure_at") == poll_index + 1:
+            raise SystemExit(42)
+        poll_states = state.get("poll_states", ["Disabled"])
+        mapping_state = poll_states[min(poll_index, len(poll_states) - 1)]
+        state["poll_index"] = poll_index + 1
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        print(mapping_state)
+    else:
+        print(json.dumps(state["mapping"]))
 else:
     raise SystemExit("unexpected fake Lambda operation")
 '''
@@ -165,6 +173,95 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         }
         state.update(changes)
         return state
+
+    @staticmethod
+    def _mapping_state(**changes: object) -> dict[str, object]:
+        mapping = {
+            "UUID": "mapping-1",
+            "EventSourceArn": (
+                "arn:aws:dynamodb:us-east-1:114743615542:"
+                "table/journalm8-dev-main/stream/version"
+            ),
+            "FunctionArn": (
+                "arn:aws:lambda:us-east-1:114743615542:"
+                "function:journalm8-dev-semantic-memory-worker"
+            ),
+            "State": "Disabled",
+            "StartingPosition": "LATEST",
+            "BatchSize": 25,
+            "MaximumBatchingWindowInSeconds": 1,
+            "ParallelizationFactor": 1,
+            "BisectBatchOnFunctionError": True,
+            "MaximumRetryAttempts": 5,
+            "MaximumRecordAgeInSeconds": 3600,
+            "FunctionResponseTypes": ["ReportBatchItemFailures"],
+            "DestinationConfig": {"OnFailure": {"Destination": (
+                "arn:aws:sqs:us-east-1:114743615542:"
+                "journalm8-dev-semantic-memory-dlq"
+            )}},
+        }
+        state: dict[str, object] = {"mapping": mapping}
+        state.update(changes)
+        return state
+
+    def _run_mapping_reconcile(
+        self,
+        state: dict[str, object],
+        *,
+        runs: int = 1,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim_dir = root / "bin"
+            shim_dir.mkdir()
+            aws_path = shim_dir / "aws"
+            aws_path.write_text(MAPPING_AWS_SHIM, encoding="utf-8")
+            aws_path.chmod(0o755)
+            state_path = root / "state.json"
+            log_path = root / "aws.log"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            build_dir = root / "build"
+            build_dir.mkdir()
+            dlq_arn = (
+                "arn:aws:sqs:us-east-1:114743615542:"
+                "journalm8-dev-semantic-memory-dlq"
+            )
+            (build_dir / "destination-config.json").write_text(json.dumps({
+                "OnFailure": {"Destination": dlq_arn}
+            }), encoding="utf-8")
+            runner = root / "run.sh"
+            runner.write_text(
+                "#!/usr/bin/env bash\nset -euo pipefail\nsleep() { :; }\n"
+                f"BUILD_DIR={str(build_dir)!r}\n"
+                "AWS_PROFILE=jm8-dev\nAWS_REGION=us-east-1\n"
+                "WORKER_FUNCTION_NAME=journalm8-dev-semantic-memory-worker\n"
+                "WORKER_ARN=arn:aws:lambda:us-east-1:114743615542:function:journalm8-dev-semantic-memory-worker\n"
+                "STREAM_ARN=arn:aws:dynamodb:us-east-1:114743615542:table/journalm8-dev-main/stream/version\n"
+                f"DLQ_ARN={dlq_arn!r}\n"
+                f"{self.mapping_function}\n"
+                + "ensure_disabled_event_source_mapping\n" * runs,
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment.update({
+                "PATH": f"{shim_dir}:{environment['PATH']}",
+                "FAKE_MAPPING_STATE": str(state_path),
+                "FAKE_MAPPING_LOG": str(log_path),
+            })
+            result = subprocess.run(
+                ["bash", str(runner)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            final_state = json.loads(state_path.read_text(encoding="utf-8"))
+            calls = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ]
+            return result, final_state, calls
 
     def _run_stream_reconcile(self, state: dict[str, object]):
         with tempfile.TemporaryDirectory() as directory:
@@ -343,60 +440,113 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         self.assertIn("update-event-source-mapping", self.deploy)
         self.assertIn("len(mappings) > 1", self.deploy)
         self.assertIn("len(mappings) != 1", self.deploy)
+        self.assertNotIn("event-source-mapping-updated", self.deploy)
+
+    def test_mapping_poll_succeeds_when_immediately_disabled(self):
+        result, _, calls = self._run_mapping_reconcile(self._mapping_state())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state_polls = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" in call
+        ]
+        full_gets = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" not in call
+        ]
+        self.assertEqual(len(state_polls), 1)
+        self.assertEqual(len(full_gets), 1)
+
+    def test_mapping_poll_accepts_only_transitional_states_before_disabled(self):
+        for transitional_state in ("Creating", "Updating", "Disabling"):
+            with self.subTest(state=transitional_state):
+                result, _, calls = self._run_mapping_reconcile(
+                    self._mapping_state(
+                        poll_states=[transitional_state, "Disabled"],
+                    )
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                state_polls = [
+                    call for call in calls
+                    if call[:2] == ["lambda", "get-event-source-mapping"]
+                    and "--query" in call
+                ]
+                self.assertEqual(len(state_polls), 2)
+
+    def test_mapping_poll_fails_closed_for_invalid_states(self):
+        for invalid_state in (
+            "Enabled",
+            "Enabling",
+            "Failed",
+            "Deleting",
+            "UnknownState",
+        ):
+            with self.subTest(state=invalid_state):
+                result, _, calls = self._run_mapping_reconcile(
+                    self._mapping_state(poll_states=[invalid_state])
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "event-source mapping entered an invalid state",
+                    result.stderr,
+                )
+                state_polls = [
+                    call for call in calls
+                    if call[:2] == ["lambda", "get-event-source-mapping"]
+                    and "--query" in call
+                ]
+                self.assertEqual(len(state_polls), 1)
+
+    def test_mapping_poll_exhaustion_is_bounded(self):
+        result, _, calls = self._run_mapping_reconcile(
+            self._mapping_state(poll_states=["Creating"])
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "event-source mapping did not become disabled",
+            result.stderr,
+        )
+        state_polls = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" in call
+        ]
+        self.assertEqual(len(state_polls), 20)
+
+    def test_mapping_poll_aws_failure_propagates(self):
+        result, _, calls = self._run_mapping_reconcile(
+            self._mapping_state(poll_failure_at=1)
+        )
+
+        self.assertEqual(result.returncode, 42)
+        state_polls = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" in call
+        ]
+        self.assertEqual(len(state_polls), 1)
+
+    def test_existing_disabled_partial_resources_are_reused(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state()
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        operations = [call[1] for call in calls]
+        self.assertNotIn("create-event-source-mapping", operations)
+        self.assertEqual(operations.count("update-event-source-mapping"), 1)
+        self.assertEqual(state["mapping"]["State"], "Disabled")
 
     def test_rerun_reuses_mapping_and_still_forces_it_disabled(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            shim_dir = root / "bin"
-            shim_dir.mkdir()
-            aws_path = shim_dir / "aws"
-            aws_path.write_text(MAPPING_AWS_SHIM, encoding="utf-8")
-            aws_path.chmod(0o755)
-            state_path = root / "state.json"
-            log_path = root / "aws.log"
-            state_path.write_text(json.dumps({"mapping": None}), encoding="utf-8")
-            build_dir = root / "build"
-            build_dir.mkdir()
-            dlq_arn = (
-                "arn:aws:sqs:us-east-1:114743615542:"
-                "journalm8-dev-semantic-memory-dlq"
-            )
-            (build_dir / "destination-config.json").write_text(json.dumps({
-                "OnFailure": {"Destination": dlq_arn}
-            }), encoding="utf-8")
-            runner = root / "run.sh"
-            runner.write_text(
-                "#!/usr/bin/env bash\nset -euo pipefail\n"
-                f"BUILD_DIR={str(build_dir)!r}\n"
-                "AWS_PROFILE=jm8-dev\nAWS_REGION=us-east-1\n"
-                "WORKER_FUNCTION_NAME=journalm8-dev-semantic-memory-worker\n"
-                "WORKER_ARN=arn:aws:lambda:us-east-1:114743615542:function:journalm8-dev-semantic-memory-worker\n"
-                "STREAM_ARN=arn:aws:dynamodb:us-east-1:114743615542:table/journalm8-dev-main/stream/version\n"
-                f"DLQ_ARN={dlq_arn!r}\n"
-                f"{self.mapping_function}\n"
-                "ensure_disabled_event_source_mapping\n"
-                "ensure_disabled_event_source_mapping\n",
-                encoding="utf-8",
-            )
-            environment = dict(os.environ)
-            environment.update({
-                "PATH": f"{shim_dir}:{environment['PATH']}",
-                "FAKE_MAPPING_STATE": str(state_path),
-                "FAKE_MAPPING_LOG": str(log_path),
-            })
-            result = subprocess.run(
-                ["bash", str(runner)],
-                cwd=root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            calls = [
-                json.loads(line)
-                for line in log_path.read_text(encoding="utf-8").splitlines()
-            ]
+        result, state, calls = self._run_mapping_reconcile(
+            {"mapping": None},
+            runs=2,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         operations = [call[1] for call in calls]
