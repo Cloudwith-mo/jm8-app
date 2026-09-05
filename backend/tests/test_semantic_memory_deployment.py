@@ -451,3 +451,24 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_map_tag_arguments_are_single_shell_arguments():
+    from pathlib import Path
+
+    deploy = (
+        Path(__file__).resolve().parents[1]
+        / "bin"
+        / "deploy-semantic-memory"
+    ).read_text(encoding="utf-8")
+
+    malformed = (
+        '--tags App="$APP_NAME" '
+        'Stage="$STAGE" ManagedBy=aws-cli'
+    )
+    corrected = (
+        '--tags "App=${APP_NAME},'
+        'Stage=${STAGE},ManagedBy=aws-cli"'
+    )
+
+    assert malformed not in deploy
+    assert deploy.count(corrected) == 2

@@ -209,7 +209,7 @@ fi
 if ! grep -Fxq "$LOG_GROUP_NAME" "$BUILD_DIR/log-group.txt"; then
   aws logs create-log-group \
     --log-group-name "$LOG_GROUP_NAME" \
-    --tags App="$APP_NAME" Stage="$STAGE" ManagedBy=aws-cli \
+    --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION"
 fi
@@ -386,7 +386,7 @@ fi
 WORKER_ARN="arn:${AWS_PARTITION}:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${WORKER_FUNCTION_NAME}"
 aws lambda tag-resource \
   --resource "$WORKER_ARN" \
-  --tags App="$APP_NAME" Stage="$STAGE" ManagedBy=aws-cli \
+  --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
   --profile "$AWS_PROFILE" \
   --region "$AWS_REGION"
 aws lambda put-function-concurrency \
