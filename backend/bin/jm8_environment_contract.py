@@ -14,6 +14,8 @@ Environment Contract:
 - dev/staging/prod currently require account 114743615542
 - prod requires AWS_PROFILE=jm8-prod and explicit same-account isolation acknowledgment
 - TABLE_NAME must match ${APP_NAME}-${STAGE}-main
+- ENTRY_CHUNKS_TABLE_NAME must match ${APP_NAME}-${STAGE}-entry-chunks for
+  semantic-memory provisioning and deployment operations
 - RAW_BUCKET must match ${APP_NAME}-${STAGE}-raw-${ACCOUNT_ID}
 - prod FRONTEND_BUCKET must match ${APP_NAME}-prod-frontend-${ACCOUNT_ID}
 - API_NAME and LAMBDA_FUNCTION_NAME must identify the exact stage API when configured
@@ -37,7 +39,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
 
@@ -51,6 +53,7 @@ PRODUCTION_AWS_PROFILE = CANONICAL_AWS_PROFILE_BY_STAGE["prod"]
 PRODUCTION_ISOLATION_MODE = "stage-scoped-same-account"
 STRIPE_BOOTSTRAP_MODE = "pre-webhook"
 PRODUCTION_API_NAME = "journalm8-prod-api"
+ENTRY_CHUNKS_REQUIRED_OPERATIONS = {"create-resources", "deploy"}
 FRONTEND_STACK_COMPLETE_STATUSES = {
     "CREATE_COMPLETE",
     "UPDATE_COMPLETE",
@@ -69,6 +72,7 @@ PRODUCTION_FORBIDDEN_DEMO_VARIABLES = {
 
 PRODUCTION_SCOPED_REFERENCE_KEYS = {
     "TABLE_NAME",
+    "ENTRY_CHUNKS_TABLE_NAME",
     "RAW_BUCKET",
     "EXPORT_BUCKET",
     "FRONTEND_BUCKET",
@@ -327,6 +331,158 @@ def validate_resource_names(
     if raw_bucket != expected_bucket:
         raise EnvironmentContractError(
             f"RAW_BUCKET must be '{expected_bucket}', got '{raw_bucket}'"
+        )
+
+
+def validate_entry_chunks_table_name(
+    app_name: str,
+    stage: str,
+    entry_chunks_table_name: str,
+    table_name: str,
+) -> None:
+    """Validate the dedicated stage-scoped semantic-memory table name."""
+    if not entry_chunks_table_name:
+        raise EnvironmentContractError("ENTRY_CHUNKS_TABLE_NAME is required")
+    expected_name = f"{app_name}-{stage}-entry-chunks"
+    if entry_chunks_table_name != expected_name:
+        raise EnvironmentContractError(
+            f"ENTRY_CHUNKS_TABLE_NAME must be '{expected_name}'"
+        )
+    if entry_chunks_table_name == table_name:
+        raise EnvironmentContractError(
+            "ENTRY_CHUNKS_TABLE_NAME must differ from TABLE_NAME"
+        )
+
+
+def validate_entry_chunks_table_description(
+    document: Mapping[str, Any],
+    *,
+    app_name: str,
+    stage: str,
+    account_id: str,
+    region: str,
+    table_name: str,
+    require_deletion_protection: bool = False,
+) -> str:
+    """Validate exact identity, schema, billing, and state for the chunk table."""
+    validate_entry_chunks_table_name(
+        app_name,
+        stage,
+        table_name,
+        f"{app_name}-{stage}-main",
+    )
+    table = document.get("Table") if isinstance(document, Mapping) else None
+    if not isinstance(table, Mapping):
+        raise EnvironmentContractError(
+            "Entry chunks table description is malformed"
+        )
+
+    expected_arn = (
+        f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}"
+    )
+    expected_key_schema = {"PK": "HASH", "SK": "RANGE"}
+    expected_attributes = {"PK": "S", "SK": "S"}
+    key_schema = table.get("KeySchema")
+    attributes = table.get("AttributeDefinitions")
+    if not isinstance(key_schema, list) or not isinstance(attributes, list):
+        raise EnvironmentContractError("Entry chunks table schema is malformed")
+    actual_key_schema = {
+        item.get("AttributeName"): item.get("KeyType")
+        for item in key_schema
+        if isinstance(item, Mapping)
+    }
+    actual_attributes = {
+        item.get("AttributeName"): item.get("AttributeType")
+        for item in attributes
+        if isinstance(item, Mapping)
+    }
+    billing = table.get("BillingModeSummary")
+    billing_mode = billing.get("BillingMode") if isinstance(billing, Mapping) else None
+    stream = table.get("StreamSpecification")
+    stream_enabled = (
+        stream.get("StreamEnabled") if isinstance(stream, Mapping) else False
+    )
+
+    if (
+        table.get("TableName") != table_name
+        or table.get("TableArn") != expected_arn
+        or table.get("TableStatus") != "ACTIVE"
+        or actual_key_schema != expected_key_schema
+        or len(key_schema) != 2
+        or actual_attributes != expected_attributes
+        or len(attributes) != 2
+        or billing_mode != "PAY_PER_REQUEST"
+        or bool(table.get("GlobalSecondaryIndexes"))
+        or bool(table.get("LocalSecondaryIndexes"))
+        or bool(table.get("VectorIndexes"))
+        or stream_enabled is not False
+    ):
+        raise EnvironmentContractError(
+            "Entry chunks table does not match the required contract"
+        )
+    if require_deletion_protection and table.get("DeletionProtectionEnabled") is not True:
+        raise EnvironmentContractError(
+            "Entry chunks table deletion protection is not enabled"
+        )
+    return expected_arn
+
+
+def validate_entry_chunks_table_tags(
+    document: Mapping[str, Any],
+    *,
+    app_name: str,
+    stage: str,
+    before_reconcile: bool,
+) -> None:
+    """Reject cross-stage ownership and verify canonical DynamoDB tags."""
+    tags = document.get("Tags") if isinstance(document, Mapping) else None
+    if not isinstance(tags, list):
+        raise EnvironmentContractError("Entry chunks table tags are malformed")
+    tag_map = {
+        item.get("Key"): item.get("Value")
+        for item in tags
+        if isinstance(item, Mapping)
+        and isinstance(item.get("Key"), str)
+        and isinstance(item.get("Value"), str)
+    }
+    if len(tag_map) != len(tags):
+        raise EnvironmentContractError("Entry chunks table tags are malformed")
+    expected = {
+        "App": app_name,
+        "Stage": stage,
+        "ManagedBy": "aws-cli",
+    }
+    if before_reconcile:
+        for key in ("App", "Stage"):
+            if key in tag_map and tag_map[key] != expected[key]:
+                raise EnvironmentContractError(
+                    "Entry chunks table belongs to a different tag contract"
+                )
+        return
+    if any(tag_map.get(key) != value for key, value in expected.items()):
+        raise EnvironmentContractError(
+            "Entry chunks table required tags were not applied"
+        )
+
+
+def validate_entry_chunks_table_pitr(document: Mapping[str, Any]) -> None:
+    """Require point-in-time recovery to be fully enabled."""
+    backups = (
+        document.get("ContinuousBackupsDescription")
+        if isinstance(document, Mapping)
+        else None
+    )
+    recovery = (
+        backups.get("PointInTimeRecoveryDescription")
+        if isinstance(backups, Mapping)
+        else None
+    )
+    if (
+        not isinstance(recovery, Mapping)
+        or recovery.get("PointInTimeRecoveryStatus") != "ENABLED"
+    ):
+        raise EnvironmentContractError(
+            "Entry chunks table point-in-time recovery is not enabled"
         )
 
 
@@ -933,6 +1089,9 @@ def validate_environment_contract() -> dict:
     aws_profile = os.environ.get("AWS_PROFILE", "").strip()
     expected_account_id = os.environ.get("EXPECTED_AWS_ACCOUNT_ID", "").strip()
     table_name = os.environ.get("TABLE_NAME", "").strip()
+    entry_chunks_table_name = os.environ.get(
+        "ENTRY_CHUNKS_TABLE_NAME", ""
+    ).strip()
     raw_bucket = os.environ.get("RAW_BUCKET", "").strip()
     frontend_bucket = os.environ.get("FRONTEND_BUCKET", "").strip()
     production_isolation_mode = os.environ.get(
@@ -966,6 +1125,13 @@ def validate_environment_contract() -> dict:
     # Resource naming
     validate_production_resource_references(stage, os.environ)
     validate_resource_names(app_name, stage, table_name, raw_bucket, actual_account_id)
+    if entry_chunks_table_name:
+        validate_entry_chunks_table_name(
+            app_name,
+            stage,
+            entry_chunks_table_name,
+            table_name,
+        )
     validate_shared_api_names(app_name, stage, os.environ)
     if stage == "prod":
         validate_frontend_bucket_name(
@@ -1011,6 +1177,7 @@ def validate_environment_contract() -> dict:
         "aws_profile": aws_profile,
         "account_id": actual_account_id,
         "table_name": table_name,
+        "entry_chunks_table_name": entry_chunks_table_name,
         "raw_bucket": raw_bucket,
         "frontend_bucket": frontend_bucket,
         "production_isolation_mode": production_isolation_mode,
@@ -1228,6 +1395,29 @@ def validate_operation_specific(
             # Intentionally ignored for this frontend-only deployment path.
             pass
 
+    if op in ENTRY_CHUNKS_REQUIRED_OPERATIONS:
+        validate_entry_chunks_table_name(
+            os.environ.get("APP_NAME", "").strip(),
+            stage,
+            os.environ.get("ENTRY_CHUNKS_TABLE_NAME", "").strip(),
+            os.environ.get("TABLE_NAME", "").strip(),
+        )
+
+
+def _load_contract_json(path: str) -> Mapping[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise EnvironmentContractError(
+            "Entry chunks table verification input is malformed"
+        ) from error
+    if not isinstance(document, Mapping):
+        raise EnvironmentContractError(
+            "Entry chunks table verification input is malformed"
+        )
+    return document
+
 
 def main(argv: list[str]) -> None:
     """
@@ -1259,6 +1449,52 @@ def main(argv: list[str]) -> None:
                 os.environ.get("ALLOWED_ORIGINS", "").strip(),
             )
             print(json.dumps(origins))
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "entry-chunks-description":
+        try:
+            if len(argv) != 9 or argv[8] not in {"before", "after"}:
+                raise EnvironmentContractError(
+                    "Entry chunks table description arguments are invalid"
+                )
+            print(validate_entry_chunks_table_description(
+                _load_contract_json(argv[2]),
+                app_name=argv[3],
+                stage=argv[4],
+                account_id=argv[5],
+                region=argv[6],
+                table_name=argv[7],
+                require_deletion_protection=argv[8] == "after",
+            ))
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "entry-chunks-tags":
+        try:
+            if len(argv) != 6 or argv[5] not in {"before", "after"}:
+                raise EnvironmentContractError(
+                    "Entry chunks table tag arguments are invalid"
+                )
+            validate_entry_chunks_table_tags(
+                _load_contract_json(argv[2]),
+                app_name=argv[3],
+                stage=argv[4],
+                before_reconcile=argv[5] == "before",
+            )
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "entry-chunks-pitr":
+        try:
+            if len(argv) != 3:
+                raise EnvironmentContractError(
+                    "Entry chunks table PITR arguments are invalid"
+                )
+            validate_entry_chunks_table_pitr(_load_contract_json(argv[2]))
             sys.exit(0)
         except EnvironmentContractError as exc:
             print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)

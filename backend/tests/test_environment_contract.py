@@ -33,6 +33,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_aws_configuration,
     validate_stage_account_mapping,
     validate_resource_names,
+    validate_entry_chunks_table_name,
     validate_shared_api_names,
     validate_export_bucket_name,
     validate_non_dev_urls,
@@ -104,6 +105,7 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "EXPECTED_AWS_ACCOUNT_ID",
         "PRODUCTION_ISOLATION_MODE",
         "TABLE_NAME",
+        "ENTRY_CHUNKS_TABLE_NAME",
         "RAW_BUCKET",
         "EXPORT_BUCKET",
         "DEPLOY_CONFIRMATION",
@@ -243,6 +245,34 @@ class TestEnvironmentContractValidation(EnvironmentIsolationTestCase):
 
 
 class TestResourceNamingAndURLs(EnvironmentIsolationTestCase):
+
+    def test_entry_chunks_table_name_is_exact_for_every_stage(self):
+        for stage in ("dev", "staging", "prod"):
+            with self.subTest(stage=stage):
+                validate_entry_chunks_table_name(
+                    "journalm8",
+                    stage,
+                    f"journalm8-{stage}-entry-chunks",
+                    f"journalm8-{stage}-main",
+                )
+
+    def test_entry_chunks_table_rejects_missing_cross_stage_and_main_reuse(self):
+        for stage, entry_chunks_table_name, table_name in (
+            ("dev", "", "journalm8-dev-main"),
+            ("dev", "journalm8-staging-entry-chunks", "journalm8-dev-main"),
+            ("prod", "journalm8-dev-entry-chunks", "journalm8-prod-main"),
+            ("dev", "journalm8-dev-main", "journalm8-dev-main"),
+        ):
+            with self.subTest(
+                stage=stage,
+                entry_chunks_table_name=entry_chunks_table_name,
+            ), self.assertRaises(EnvironmentContractError):
+                validate_entry_chunks_table_name(
+                    "journalm8",
+                    stage,
+                    entry_chunks_table_name,
+                    table_name,
+                )
 
     def test_shared_api_and_lambda_names_are_exactly_stage_scoped(self):
         for stage in ("dev", "staging", "prod"):
@@ -692,6 +722,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "PRODUCTION_ISOLATION_MODE": "stage-scoped-same-account",
             "TABLE_NAME": "journalm8-prod-main",
+            "ENTRY_CHUNKS_TABLE_NAME": "journalm8-prod-entry-chunks",
             "RAW_BUCKET": "journalm8-prod-raw-114743615542",
             "EXPORT_BUCKET": "journalm8-prod-exports-114743615542",
             "FRONTEND_BUCKET": "journalm8-prod-frontend-114743615542",
@@ -734,6 +765,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-dev-main",
+            "ENTRY_CHUNKS_TABLE_NAME": "journalm8-dev-entry-chunks",
             "RAW_BUCKET": "journalm8-dev-raw-114743615542",
         })
         os.environ.pop("DEPLOY_CONFIRMATION", None)
@@ -741,6 +773,10 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         config = validate_environment_contract()
         self.assertEqual(config["stage"], "dev")
         self.assertEqual(config["account_id"], "114743615542")
+        self.assertEqual(
+            config["entry_chunks_table_name"],
+            "journalm8-dev-entry-chunks",
+        )
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_valid_staging_environment(self, mock_sts):
@@ -752,6 +788,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "AWS_PROFILE": "jm8-dev",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
             "TABLE_NAME": "journalm8-staging-main",
+            "ENTRY_CHUNKS_TABLE_NAME": "journalm8-staging-entry-chunks",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
             "API_NAME": "journalm8-staging-api",
             "LAMBDA_FUNCTION_NAME": "journalm8-staging-api",
@@ -761,6 +798,10 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         config = validate_environment_contract()
         self.assertEqual(config["stage"], "staging")
         self.assertEqual(config["account_id"], "114743615542")
+        self.assertEqual(
+            config["entry_chunks_table_name"],
+            "journalm8-staging-entry-chunks",
+        )
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_general_contract_rejects_cross_stage_and_worker_api_names(
@@ -821,6 +862,19 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "stage-scoped-same-account",
         )
         mock_sts.assert_called_once_with("jm8-prod", "us-east-1")
+
+    @patch("jm8_environment_contract.get_actual_aws_account_id")
+    def test_deploy_requires_entry_chunks_table_name(self, mock_sts):
+        mock_sts.return_value = "114743615542"
+        environment = self._production_environment()
+        environment["JM8_OPERATION"] = "deploy"
+        environment.pop("ENTRY_CHUNKS_TABLE_NAME")
+        os.environ.update(environment)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_environment_contract()
+
+        self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
 
     @patch("jm8_environment_contract.get_actual_aws_account_id")
     def test_production_rejects_demo_variables_before_sts(self, mock_sts):
@@ -1085,6 +1139,7 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
         mock_sts.return_value = "114743615542"
         invalid_references = {
             "TABLE_NAME": "journalm8-dev-main",
+            "ENTRY_CHUNKS_TABLE_NAME": "journalm8-staging-entry-chunks",
             "RAW_BUCKET": "journalm8-staging-raw-114743615542",
             "FRONTEND_BUCKET": "journalm8-dev-frontend-114743615542",
             "API_ENDPOINT": "https://journalm8-staging-api.example.com",
@@ -1354,6 +1409,7 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
     def test_create_resources_requires_allowed_origins(self):
         script_text = self._read("bin/create-resources")
         self._assert_requires_var(script_text, "ALLOWED_ORIGINS")
+        self._assert_requires_var(script_text, "ENTRY_CHUNKS_TABLE_NAME")
         self.assertIn('allowed-origins-json', script_text)
 
     def test_non_stripe_mutating_scripts_do_not_require_raw_stripe_key(self):
@@ -1598,6 +1654,19 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
             validate_operation_specific("create-resources", "dev")
         self.assertIn("ALLOWED_ORIGINS", str(ctx.exception))
 
+    def test_create_resources_requires_entry_chunks_table_contract(self):
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "TABLE_NAME": "journalm8-dev-main",
+            "ALLOWED_ORIGINS": "http://localhost:5173",
+        })
+        os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("create-resources", "dev")
+
+        self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
+
     def test_create_auth_rejects_non_dev_localhost_callback(self):
         os.environ["AWS_PROFILE"] = "jm8-dev"
         os.environ["CALLBACK_URL"] = "http://localhost:5173/callback"
@@ -1655,6 +1724,7 @@ class TestTemplatesAndIgnoreRules(EnvironmentIsolationTestCase):
             "export PRODUCTION_ISOLATION_MODE=stage-scoped-same-account",
             "export DEPLOY_CONFIRMATION=prod",
             "export TABLE_NAME=journalm8-prod-main",
+            "export ENTRY_CHUNKS_TABLE_NAME=journalm8-prod-entry-chunks",
             "export RAW_BUCKET=journalm8-prod-raw-114743615542",
             "export FRONTEND_BUCKET=journalm8-prod-frontend-114743615542",
             "export API_NAME=journalm8-prod-api",

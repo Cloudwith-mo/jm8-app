@@ -120,6 +120,10 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         raise ProductionDeployerError("AWS region is malformed.")
 
     table_arn = f"arn:aws:dynamodb:{region}:{ACCOUNT_ID}:table/journalm8-prod-main"
+    entry_chunks_table_arn = (
+        f"arn:aws:dynamodb:{region}:{ACCOUNT_ID}:"
+        "table/journalm8-prod-entry-chunks"
+    )
     raw_bucket_arn = f"arn:aws:s3:::journalm8-prod-raw-{ACCOUNT_ID}"
     frontend_bucket_arn = f"arn:aws:s3:::journalm8-prod-frontend-{ACCOUNT_ID}"
     export_bucket_arn = f"arn:aws:s3:::journalm8-prod-exports-{ACCOUNT_ID}"
@@ -186,6 +190,19 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "dynamodb:UpdateTimeToLive",
             ),
             (table_arn, f"{table_arn}/index/*"),
+        ),
+        _statement(
+            "ManageProductionEntryChunksTable",
+            (
+                "dynamodb:CreateTable",
+                "dynamodb:DescribeContinuousBackups",
+                "dynamodb:DescribeTable",
+                "dynamodb:ListTagsOfResource",
+                "dynamodb:TagResource",
+                "dynamodb:UpdateContinuousBackups",
+                "dynamodb:UpdateTable",
+            ),
+            entry_chunks_table_arn,
         ),
         _statement(
             "ManageProductionRawBucket",

@@ -323,11 +323,83 @@ class PolicyGenerationTests(unittest.TestCase):
         self.assertNotIn("journalm8-staging", serialized)
         for expected in (
             "journalm8-prod-main",
+            "journalm8-prod-entry-chunks",
             "journalm8-prod-raw-114743615542",
             "journalm8-prod-frontend-114743615542",
             "journalm8/prod/stripe-",
         ):
             self.assertIn(expected, serialized)
+
+    def test_entry_chunks_control_plane_is_exact_and_least_privilege(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-foundation"
+        ]["Statement"]
+        statement = next(
+            item
+            for item in statements
+            if item["Sid"] == "ManageProductionEntryChunksTable"
+        )
+        self.assertEqual(
+            statement["Resource"],
+            (
+                f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+                "table/journalm8-prod-entry-chunks"
+            ),
+        )
+        self.assertEqual(
+            set(statement["Action"]),
+            {
+                "dynamodb:CreateTable",
+                "dynamodb:DescribeContinuousBackups",
+                "dynamodb:DescribeTable",
+                "dynamodb:ListTagsOfResource",
+                "dynamodb:TagResource",
+                "dynamodb:UpdateContinuousBackups",
+                "dynamodb:UpdateTable",
+            },
+        )
+        self.assertNotIn("dynamodb:DeleteTable", statement["Action"])
+
+    def test_entry_chunks_runtime_policy_has_only_required_data_actions(self):
+        source = (BIN_DIR / "create-resources").read_text(encoding="utf-8")
+        policy_source = source.split(
+            "cat > .build/lambda-app-policy.json <<POLICY\n",
+            1,
+        )[1].split("\nPOLICY", 1)[0]
+        replacements = {
+            "${AWS_REGION}": "us-east-1",
+            "${ACCOUNT_ID}": ACCOUNT_ID,
+            "${TABLE_NAME}": "journalm8-prod-main",
+            "${ENTRY_CHUNKS_TABLE_NAME}": "journalm8-prod-entry-chunks",
+            "${RAW_BUCKET}": f"journalm8-prod-raw-{ACCOUNT_ID}",
+        }
+        for placeholder, value in replacements.items():
+            policy_source = policy_source.replace(placeholder, value)
+        policy = json.loads(policy_source)
+        statement = next(
+            item
+            for item in policy["Statement"]
+            if item["Sid"] == "DynamoDBSemanticMemoryAccess"
+        )
+
+        self.assertEqual(
+            set(statement["Action"]),
+            {
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:Query",
+                "dynamodb:BatchWriteItem",
+            },
+        )
+        self.assertEqual(
+            statement["Resource"],
+            (
+                f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+                "table/journalm8-prod-entry-chunks"
+            ),
+        )
+        self.assertNotIn("*", statement["Resource"])
+        self.assertNotIn("dynamodb:Scan", statement["Action"])
 
     def test_describe_user_pool_client_is_production_pool_scoped(self):
         statements = generate_policies()[
