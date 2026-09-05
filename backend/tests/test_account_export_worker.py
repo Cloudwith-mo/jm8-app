@@ -82,6 +82,12 @@ class AccountExportWorkerTests(unittest.TestCase):
             "period": "2026-01", "askCount": 2, "reservationId": "excluded",
         }, {
             "PK": "USER#user-a", "SK": "ACCOUNT_EXPORT_ACTIVE", "entityType": "ACCOUNT_EXPORT_ACTIVE",
+        }, {
+            "PK": "USER#user-a", "SK": "ENTRY#token#GEN#digest#CHUNK#00000000#chunk_id",
+            "entityType": "SEMANTIC_CHUNK", "text": "derived chunk must not export",
+        }, {
+            "PK": "DELETED_SUBJECT#digest", "SK": "SEMANTIC_MEMORY_GUARD",
+            "entityType": "SEMANTIC_MEMORY_DELETION_GUARD",
         }]
         get_object.return_value = {"ContentLength": 5, "Body": io.BytesIO(b"image")}
         update.side_effect = lambda user_id, export_id, status, **values: {"status": status, **values}
@@ -101,8 +107,19 @@ class AccountExportWorkerTests(unittest.TestCase):
             all_json = "\n".join(archive.read(name).decode("utf-8") for name in names if name.endswith(".json"))
             self.assertEqual(entries[0]["text"], "journal text")
             self.assertEqual(entries[0]["imageArchivePath"], "images/page.jpg")
-            for forbidden in ("GSI1PK", "ACCOUNT_EXPORT_ACTIVE", "reservationId", "s3RawKey", "stripeCustomerId"):
+            for forbidden in (
+                "GSI1PK", "ACCOUNT_EXPORT_ACTIVE", "reservationId", "s3RawKey",
+                "stripeCustomerId", "derived chunk must not export",
+                "SEMANTIC_CHUNK", "SEMANTIC_MEMORY_DELETION_GUARD",
+            ):
                 self.assertNotIn(forbidden, all_json)
+
+    def test_export_source_documents_semantic_memory_exclusion_contract(self):
+        source = Path(worker.__file__).read_text(encoding="utf-8")
+        self.assertIn("derived retrieval index", source)
+        self.assertIn("reconstructed from the", source)
+        self.assertIn("Deletion guards are operational", source)
+        self.assertIn("neither is included in account exports", source)
 
     @patch.object(worker.s3, "get_object")
     def test_missing_image_becomes_warning(self, get_object):

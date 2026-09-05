@@ -17,6 +17,8 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 os.environ.setdefault("TABLE_NAME", "journalm8-test-main")
+_ORIGINAL_ENTRY_CHUNKS_TABLE_NAME = os.environ.get("ENTRY_CHUNKS_TABLE_NAME")
+os.environ.setdefault("ENTRY_CHUNKS_TABLE_NAME", "journalm8-test-entry-chunks")
 os.environ.setdefault("RAW_BUCKET", "journalm8-test-raw")
 os.environ.setdefault("EXPORT_BUCKET", "journalm8-test-export")
 
@@ -26,6 +28,11 @@ import account_deletion_quiescence as quiescence  # noqa: E402
 import account_deletion_s3 as deletion_s3  # noqa: E402
 import account_deletion_stripe as deletion_stripe  # noqa: E402
 import account_deletion_worker as worker  # noqa: E402
+
+if _ORIGINAL_ENTRY_CHUNKS_TABLE_NAME is None:
+    os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
+else:
+    os.environ["ENTRY_CHUNKS_TABLE_NAME"] = _ORIGINAL_ENTRY_CHUNKS_TABLE_NAME
 
 
 REQUEST_ID = "del_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -297,7 +304,8 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
         expected = (
             "START", "QUIESCE", "CANCEL_SUBSCRIPTION", "DELETE_RAW_OBJECTS",
             "DELETE_EXPORT_OBJECTS", "DELETE_APPLICATION_DATA",
-            "DELETE_COGNITO_IDENTITY", "VERIFY", "COMPLETE", "FAIL",
+            "DELETE_SEMANTIC_MEMORY", "DELETE_COGNITO_IDENTITY", "VERIFY",
+            "COMPLETE", "FAIL",
         )
         self.assertEqual(worker.ACTIONS, expected)
         definition = json.loads((ROOT / "workflows" / "account-deletion.asl.json").read_text())
@@ -366,10 +374,19 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
             "status": "IN_PROGRESS",
             "destructiveStartedAt": "2026-08-30T12:00:00Z",
         }
-        with self.assertRaises(worker.AccountDeletionRetryableError):
-            worker.run_action({
-                "action": "VERIFY", "requestId": REQUEST_ID, "userId": SUBJECT,
-            }, worker.Dependencies())
+        with patch.object(
+            worker, "semantic_deletion_guard_exists", return_value=True
+        ), patch.object(worker, "delete_user_memory"), patch.object(
+            worker, "_semantic_partition_is_empty", return_value=True
+        ), self.assertRaises(worker.AccountDeletionRetryableError):
+            worker.run_action(
+                {
+                    "action": "VERIFY",
+                    "requestId": REQUEST_ID,
+                    "userId": SUBJECT,
+                },
+                worker.Dependencies(),
+            )
         checkpoint.assert_not_called()
 
     @patch.object(worker, "delete_user_partition")
@@ -413,6 +430,192 @@ class AccountDeletionWorkerContractTests(unittest.TestCase):
         self.assertEqual(table.delete_item.call_count, 2)
         deleted_key = table.delete_item.call_args.kwargs["Key"]
         self.assertEqual(deleted_key["SK"], "USER")
+
+    @patch.object(worker, "semantic_deletion_guard_exists", return_value=True)
+    @patch.object(worker, "delete_user_memory")
+    @patch.object(worker, "put_semantic_deletion_guard")
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
+    def test_semantic_deletion_guards_before_exact_partition_delete(
+        self, get_audit, get_subject, put_guard, delete_memory, guard_exists,
+    ):
+        get_audit.return_value = {
+            "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        semantic_table = MagicMock()
+        semantic_table.name = "journalm8-test-entry-chunks"
+        operations: list[str] = []
+        put_guard.side_effect = lambda *_args: operations.append("guard")
+        delete_memory.side_effect = lambda *_args: operations.append("delete")
+        guard_exists.side_effect = lambda *_args: operations.append("verify") or True
+        deps = worker.Dependencies(
+            entry_chunks_table=semantic_table,
+            entry_chunks_table_name="journalm8-test-entry-chunks",
+        )
+
+        result = worker.run_action({
+            "action": "DELETE_SEMANTIC_MEMORY",
+            "requestId": REQUEST_ID,
+        }, deps)
+
+        self.assertEqual(result["status"], "IN_PROGRESS")
+        self.assertEqual(operations, ["guard", "delete", "verify"])
+        put_guard.assert_called_once_with(semantic_table, SUBJECT)
+        delete_memory.assert_called_once_with(semantic_table, SUBJECT)
+
+    @patch.object(worker, "semantic_deletion_guard_exists", return_value=True)
+    @patch.object(worker, "delete_user_memory")
+    @patch.object(worker, "put_semantic_deletion_guard")
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
+    def test_semantic_deletion_retries_safely_after_post_guard_failure(
+        self, get_audit, get_subject, put_guard, delete_memory, guard_exists,
+    ):
+        get_audit.return_value = {
+            "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        delete_memory.side_effect = [
+            worker.SemanticMemoryStoreError("privacy-safe failure"),
+            0,
+        ]
+        semantic_table = MagicMock()
+        semantic_table.name = "journalm8-test-entry-chunks"
+        deps = worker.Dependencies(
+            entry_chunks_table=semantic_table,
+            entry_chunks_table_name="journalm8-test-entry-chunks",
+        )
+        event = {"action": "DELETE_SEMANTIC_MEMORY", "requestId": REQUEST_ID}
+
+        with self.assertRaises(worker.AccountDeletionRetryableError):
+            worker.run_action(event, deps)
+        result = worker.run_action(event, deps)
+
+        self.assertEqual(result["status"], "IN_PROGRESS")
+        self.assertEqual(put_guard.call_count, 2)
+        self.assertEqual(delete_memory.call_count, 2)
+        guard_exists.assert_called_once_with(semantic_table, SUBJECT)
+
+    @patch.object(worker, "mark_deletion_checkpoint")
+    @patch.object(worker, "identity_is_absent", return_value=True)
+    @patch.object(worker, "_reverse_lookup_absent", return_value=True)
+    @patch.object(worker, "partition_is_empty", return_value=True)
+    @patch.object(worker, "prefix_is_empty", return_value=True)
+    @patch.object(worker, "get_billing_recovery", return_value=None)
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
+    def test_verify_requires_empty_semantic_partition_and_valid_guard(
+        self, get_audit, get_subject, recovery, prefix_empty, main_empty,
+        reverse_absent, identity_absent, checkpoint,
+    ):
+        get_audit.return_value = {
+            "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        semantic_table = MagicMock()
+        semantic_table.name = "journalm8-test-entry-chunks"
+        deps = worker.Dependencies(
+            entry_chunks_table=semantic_table,
+            entry_chunks_table_name="journalm8-test-entry-chunks",
+        )
+        event = {"action": "VERIFY", "requestId": REQUEST_ID}
+
+        operations: list[str] = []
+        residue = [{"PK": f"USER#{SUBJECT}"}]
+
+        def repair(_table: object, user_id: str) -> int:
+            operations.append("repair")
+            self.assertEqual(user_id, SUBJECT)
+            residue.clear()
+            return 1
+
+        def query(**_kwargs: object) -> dict[str, object]:
+            operations.append("verify-empty")
+            return {"Items": list(residue)}
+
+        semantic_table.query.side_effect = query
+        with patch.object(
+            worker, "semantic_deletion_guard_exists", return_value=True
+        ), patch.object(
+            worker, "delete_user_memory", side_effect=repair
+        ) as delete_memory:
+            result = worker.run_action(event, deps)
+        self.assertEqual(result["status"], "IN_PROGRESS")
+        self.assertEqual(operations, ["repair", "verify-empty"])
+        delete_memory.assert_called_once_with(semantic_table, SUBJECT)
+        checkpoint.assert_called_once()
+        query = semantic_table.query.call_args.kwargs
+        self.assertEqual(query["ExpressionAttributeValues"], {":pk": f"USER#{SUBJECT}"})
+        self.assertTrue(query["ConsistentRead"])
+        self.assertNotIn("Scan", repr(semantic_table.method_calls))
+
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
+    def test_verify_missing_or_invalid_guard_performs_no_repair(
+        self, get_audit, get_subject,
+    ):
+        get_audit.return_value = {
+            "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        semantic_table = MagicMock()
+        semantic_table.name = "journalm8-test-entry-chunks"
+        deps = worker.Dependencies(
+            entry_chunks_table=semantic_table,
+            entry_chunks_table_name="journalm8-test-entry-chunks",
+        )
+        event = {"action": "VERIFY", "requestId": REQUEST_ID}
+        failures = (
+            False,
+            worker.SemanticMemoryDeletionGuardError(
+                "semantic memory deletion guard verification failed"
+            ),
+        )
+        for guard_result in failures:
+            with self.subTest(guard_result=guard_result), patch.object(
+                worker,
+                "semantic_deletion_guard_exists",
+                return_value=guard_result if guard_result is False else None,
+                side_effect=guard_result if isinstance(guard_result, Exception) else None,
+            ), patch.object(worker, "delete_user_memory") as repair:
+                with self.assertRaises(worker.AccountDeletionRetryableError):
+                    worker.run_action(event, deps)
+                repair.assert_not_called()
+                semantic_table.query.assert_not_called()
+
+    @patch.object(worker, "delete_identity")
+    @patch.object(worker, "_semantic_partition_is_empty", return_value=False)
+    @patch.object(worker, "_reverse_lookup_absent", return_value=True)
+    @patch.object(worker, "partition_is_empty", return_value=True)
+    @patch.object(worker, "prefix_is_empty", return_value=True)
+    @patch.object(worker, "get_billing_recovery", return_value=None)
+    @patch.object(worker, "get_deletion_subject", return_value=SUBJECT)
+    @patch.object(worker, "get_deletion_audit")
+    def test_cognito_deletion_is_blocked_while_semantic_memory_is_nonempty(
+        self, get_audit, get_subject, recovery, prefix_empty, main_empty,
+        reverse_absent, semantic_empty, delete_identity,
+    ):
+        get_audit.return_value = {
+            "requestId": REQUEST_ID,
+            "subjectDigest": worker.subject_digest(SUBJECT),
+            "status": "IN_PROGRESS",
+            "destructiveStartedAt": "2026-08-30T12:00:00Z",
+        }
+        with self.assertRaises(worker.AccountDeletionRetryableError):
+            worker.run_action({
+                "action": "DELETE_COGNITO_IDENTITY",
+                "requestId": REQUEST_ID,
+            }, worker.Dependencies())
+        delete_identity.assert_not_called()
 
     def test_deletion_sources_and_workflow_exclude_sensitive_literals(self):
         sources = "\n".join(

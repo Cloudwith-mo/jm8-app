@@ -225,6 +225,9 @@ def run_export(user_id: str, export_id: str) -> dict[str, Any]:
         images_dir = root / "images"
         images_dir.mkdir(mode=0o700)
         records = _query_user_records(user_id)
+        # Semantic chunks are a derived retrieval index reconstructed from the
+        # exported canonical ENTRY records. Deletion guards are operational
+        # evidence in a separate table; neither is included in account exports.
         entry_pairs = [(_item, _entry_payload(_item)) for _item in records if _item.get("entityType") == "ENTRY"]
         history_by_entry: dict[str, list[dict[str, Any]]] = {}
         for item in records:

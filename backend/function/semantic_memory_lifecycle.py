@@ -12,12 +12,14 @@ from typing import NotRequired, TypedDict
 
 from boto3.dynamodb.types import TypeDeserializer
 
+from semantic_memory_deletion_guard import semantic_deletion_guard_exists
 from semantic_memory_store import delete_entry_memory, replace_entry_memory
 
 
 ACTIVE = "ACTIVE"
 DELETED = "DELETED"
 IGNORED = "IGNORED"
+DELETION_GUARDED = "DELETION_GUARDED"
 
 _SUPPORTED_EVENT_NAMES = frozenset({"INSERT", "MODIFY", "REMOVE"})
 _ATTRIBUTE_VALUE_TYPES = frozenset(
@@ -84,6 +86,9 @@ def apply_entry_stream_record(
     if event_name == "REMOVE":
         delete_entry_memory(entry_chunks_table, user_id, entry_id)
         status = DELETED
+    elif semantic_deletion_guard_exists(entry_chunks_table, user_id):
+        delete_entry_memory(entry_chunks_table, user_id, entry_id)
+        status = DELETION_GUARDED
     else:
         replacement = replace_entry_memory(entry_chunks_table, image)
         if not isinstance(replacement, Mapping):
@@ -95,6 +100,9 @@ def apply_entry_stream_record(
             raise SemanticMemoryLifecycleError(
                 "semantic memory replacement result is invalid"
             )
+        if semantic_deletion_guard_exists(entry_chunks_table, user_id):
+            delete_entry_memory(entry_chunks_table, user_id, entry_id)
+            status = DELETION_GUARDED
 
     result = {
         "eventName": event_name,
@@ -233,6 +241,7 @@ def _validate_attribute_value(value: object) -> None:
 __all__ = [
     "ACTIVE",
     "DELETED",
+    "DELETION_GUARDED",
     "IGNORED",
     "BatchItemFailure",
     "EntryStreamBatchResponse",

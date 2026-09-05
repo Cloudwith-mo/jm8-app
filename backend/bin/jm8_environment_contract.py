@@ -56,6 +56,7 @@ PRODUCTION_API_NAME = "journalm8-prod-api"
 ENTRY_CHUNKS_REQUIRED_OPERATIONS = {
     "create-resources",
     "deploy",
+    "deploy-account-deletion",
     "deploy-semantic-memory",
 }
 FRONTEND_STACK_COMPLETE_STATUSES = {

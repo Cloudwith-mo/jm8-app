@@ -282,6 +282,7 @@ printf 'sleep %s\\n' "$1" >> "$MOCK_AWS_LOG"
             "COGNITO_USER_POOL_NAME": "journalm8-staging-users",
             "DEPLOY_CONFIRMATION": "staging",
             "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "ENTRY_CHUNKS_TABLE_NAME": "journalm8-staging-entry-chunks",
             "EXPORT_BUCKET": "journalm8-staging-exports-114743615542",
             "HISTORICAL_REANALYSIS_WORKFLOW_ARN": (
                 "arn:aws:states:us-east-1:114743615542:stateMachine:"
@@ -447,6 +448,44 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
         self.assertIn("ACCOUNT_DELETION_WORKFLOW_ARN", main_deploy)
         self.assertIn("ACCOUNT_DELETION_RECENT_AUTH_SECONDS", main_deploy)
         self.assertIn("states:StartExecution", main_deploy)
+
+    def test_semantic_deletion_worker_configuration_is_exact(self):
+        deploy = (ROOT / "bin" / "deploy-account-deletion").read_text()
+        build = (ROOT / "bin" / "build").read_text()
+        self.assertIn(': "${ENTRY_CHUNKS_TABLE_NAME:?', deploy)
+        self.assertIn('"ENTRY_CHUNKS_TABLE_NAME": entry_chunks_table', deploy)
+        self.assertTrue(
+            (ROOT / "function" / "semantic_memory_deletion_guard.py").is_file()
+        )
+        self.assertIn("cp function/*.py", build)
+        environment = render_embedded_json(
+            deploy,
+            "PY_ENV",
+            [
+                "journalm8-prod-main",
+                "journalm8-prod-entry-chunks",
+                "raw-bucket",
+                "export-bucket",
+                "us-east-1_Production",
+                "secret-arn",
+                "ocr-arn",
+                "reanalysis-arn",
+                "export-arn",
+                "journalm8",
+                "prod",
+            ],
+        )
+        self.assertEqual(
+            environment["Variables"]["ENTRY_CHUNKS_TABLE_NAME"],
+            "journalm8-prod-entry-chunks",
+        )
+        for forbidden in (
+            "dynamodb:Scan",
+            "dynamodb:DeleteTable",
+            "states:StartExecution",
+            "semantic-memory-worker",
+        ):
+            self.assertNotIn(forbidden, deploy)
 
     def test_staging_package_contract_keeps_api_and_worker_names_distinct(self):
         result, aws_calls = run_mocked_staging_deletion_deploy()
@@ -969,6 +1008,7 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
                 region,
                 account,
                 "journalm8-prod-main",
+                "journalm8-prod-entry-chunks",
                 f"journalm8-prod-raw-{account}",
                 f"journalm8-prod-exports-{account}",
                 "us-east-1_Production",
@@ -987,6 +1027,20 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
             statements["ExactMainTable"]["Resource"],
             f"arn:aws:dynamodb:{region}:{account}:table/journalm8-prod-main",
         )
+        self.assertEqual(statements["ExactEntryChunksTable"], {
+            "Sid": "ExactEntryChunksTable",
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:Query",
+                "dynamodb:BatchWriteItem",
+            ],
+            "Resource": (
+                f"arn:aws:dynamodb:{region}:{account}:"
+                "table/journalm8-prod-entry-chunks"
+            ),
+        })
         self.assertEqual(
             statements["ExactCognitoPool"]["Resource"],
             f"arn:aws:cognito-idp:{region}:{account}:userpool/us-east-1_Production",
@@ -997,6 +1051,7 @@ class AccountDeletionDeploymentTests(unittest.TestCase):
             f"arn:aws:secretsmanager:{region}:{account}:secret:journalm8/prod/stripe-ABC123",
         )
         self.assertNotIn("*", statements["ExactMainTable"]["Resource"])
+        self.assertNotIn("*", statements["ExactEntryChunksTable"]["Resource"])
         for statement in worker_policy["Statement"]:
             self.assertNotEqual(statement["Resource"], "*")
             for action in statement["Action"]:

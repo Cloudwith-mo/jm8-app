@@ -39,7 +39,13 @@
       "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
       "Parameters": {"action": "DELETE_APPLICATION_DATA", "requestId.$": "$.requestId"},
       "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
-      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_APPLICATION_DATA"}], "Next": "DELETE_COGNITO_IDENTITY"
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_APPLICATION_DATA"}], "Next": "DELETE_SEMANTIC_MEMORY"
+    },
+    "DELETE_SEMANTIC_MEMORY": {
+      "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
+      "Parameters": {"action": "DELETE_SEMANTIC_MEMORY", "requestId.$": "$.requestId"},
+      "ResultPath": "$.phaseResult", "Retry": [{"ErrorEquals": ["AccountDeletionRetryableError", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"], "IntervalSeconds": 2, "BackoffRate": 2, "MaxAttempts": 4}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.failure", "Next": "FailureDELETE_SEMANTIC_MEMORY"}], "Next": "DELETE_COGNITO_IDENTITY"
     },
     "DELETE_COGNITO_IDENTITY": {
       "Type": "Task", "Resource": "${ACCOUNT_DELETION_WORKER_ARN}",
@@ -65,6 +71,7 @@
     "FailureDELETE_RAW_OBJECTS": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_RAW_OBJECTS", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},
     "FailureDELETE_EXPORT_OBJECTS": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_EXPORT_OBJECTS", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},
     "FailureDELETE_APPLICATION_DATA": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_APPLICATION_DATA", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},
+    "FailureDELETE_SEMANTIC_MEMORY": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_SEMANTIC_MEMORY", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},
     "FailureDELETE_COGNITO_IDENTITY": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "DELETE_COGNITO_IDENTITY", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},
     "FailureVERIFY": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "VERIFY", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},
     "FailureCOMPLETE": {"Type": "Pass", "Parameters": {"action": "FAIL", "failedPhase": "COMPLETE", "failureCode.$": "$.failure.Error", "retryable": true, "requestId.$": "$.requestId"}, "Next": "ClassifyFailure"},

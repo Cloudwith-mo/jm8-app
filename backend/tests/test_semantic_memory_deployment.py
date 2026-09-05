@@ -237,6 +237,7 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         self.assertEqual(modules, [
             "semantic_chunking.py",
             "semantic_memory_contract.py",
+            "semantic_memory_deletion_guard.py",
             "semantic_memory_store.py",
             "semantic_memory_lifecycle.py",
             "semantic_memory_worker.py",

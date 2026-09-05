@@ -7,6 +7,7 @@ set -euo pipefail
 : "${STAGE:?STAGE is required}"
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required}"
 : "${TABLE_NAME:?TABLE_NAME is required}"
+: "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required}"
 : "${RAW_BUCKET:?RAW_BUCKET is required}"
 : "${EXPORT_BUCKET:?EXPORT_BUCKET is required}"
 : "${COGNITO_USER_POOL_ID:?COGNITO_USER_POOL_ID is required}"
@@ -66,18 +67,20 @@ import json
 print(json.dumps({"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"states.amazonaws.com"},"Action":"sts:AssumeRole"}]}))
 PY_STATES_TRUST
 
-python3 - "$AWS_REGION" "$ACCOUNT_ID" "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" > "$BUILD_DIR/worker-policy.json" <<'PY_WORKER_POLICY'
+python3 - "$AWS_REGION" "$ACCOUNT_ID" "$TABLE_NAME" "$ENTRY_CHUNKS_TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" > "$BUILD_DIR/worker-policy.json" <<'PY_WORKER_POLICY'
 import json
 import sys
 
-region, account, table, raw, exports, pool, secret, *workflows = sys.argv[1:]
+region, account, table, entry_chunks_table, raw, exports, pool, secret, *workflows = sys.argv[1:]
 table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{table}"
+entry_chunks_table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{entry_chunks_table}"
 pool_arn = f"arn:aws:cognito-idp:{region}:{account}:userpool/{pool}"
 execution_arns = [arn.replace(":stateMachine:", ":execution:") + ":*" for arn in workflows]
 print(json.dumps({
     "Version": "2012-10-17",
     "Statement": [
         {"Sid":"ExactMainTable","Effect":"Allow","Action":["dynamodb:Query","dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem","dynamodb:DeleteItem","dynamodb:BatchWriteItem","dynamodb:TransactWriteItems"],"Resource":table_arn},
+        {"Sid":"ExactEntryChunksTable","Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:PutItem","dynamodb:Query","dynamodb:BatchWriteItem"],"Resource":entry_chunks_table_arn},
         {"Sid":"ListRawDeletionPrefixes","Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":f"arn:aws:s3:::{raw}","Condition":{"StringLike":{"s3:prefix":"users/*/uploads/*"}}},
         {"Sid":"ListExportDeletionPrefixes","Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":f"arn:aws:s3:::{exports}","Condition":{"StringLike":{"s3:prefix":"exports/*"}}},
         {"Sid":"DeleteRawPrefix","Effect":"Allow","Action":["s3:DeleteObject","s3:DeleteObjectVersion"],"Resource":f"arn:aws:s3:::{raw}/users/*/uploads/*"},
@@ -106,12 +109,13 @@ aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name "${APP_NAM
 aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole --profile "$AWS_PROFILE"
 WORKER_ROLE_ARN="$(aws iam get-role --role-name "$WORKER_ROLE_NAME" --profile "$AWS_PROFILE" --query Role.Arn --output text)"
 
-python3 - "$TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" "$APP_NAME" "$STAGE" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
+python3 - "$TABLE_NAME" "$ENTRY_CHUNKS_TABLE_NAME" "$RAW_BUCKET" "$EXPORT_BUCKET" "$COGNITO_USER_POOL_ID" "$STRIPE_SECRET_ARN" "$OCR_WORKFLOW_ARN" "$HISTORICAL_REANALYSIS_WORKFLOW_ARN" "$ACCOUNT_EXPORT_WORKFLOW_ARN" "$APP_NAME" "$STAGE" > "$BUILD_DIR/worker-environment.json" <<'PY_ENV'
 import json
 import sys
-table, raw, exports, pool, secret, ocr, reanalysis, export_workflow, app, stage = sys.argv[1:]
+table, entry_chunks_table, raw, exports, pool, secret, ocr, reanalysis, export_workflow, app, stage = sys.argv[1:]
 print(json.dumps({"Variables": {
     "TABLE_NAME": table,
+    "ENTRY_CHUNKS_TABLE_NAME": entry_chunks_table,
     "RAW_BUCKET": raw,
     "EXPORT_BUCKET": exports,
     "COGNITO_USER_POOL_ID": pool,

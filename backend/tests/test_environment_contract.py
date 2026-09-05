@@ -1682,6 +1682,41 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
 
         self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
 
+    def test_account_deletion_deploy_requires_entry_chunks_table_contract(self):
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "TABLE_NAME": "journalm8-dev-main",
+            "AWS_REGION": "us-east-1",
+            "EXPECTED_AWS_ACCOUNT_ID": "114743615542",
+            "RAW_BUCKET": "journalm8-dev-raw-114743615542",
+            "EXPORT_BUCKET": "journalm8-dev-exports-114743615542",
+            "FRONTEND_BUCKET": "journalm8-dev-frontend-114743615542",
+            "COGNITO_USER_POOL_NAME": "journalm8-dev-users",
+            "COGNITO_USER_POOL_ID": "us-east-1_Development",
+            "STRIPE_SECRET_ARN": (
+                "arn:aws:secretsmanager:us-east-1:114743615542:"
+                "secret:journalm8/dev/stripe-ABC123"
+            ),
+            "OCR_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:"
+                "stateMachine:journalm8-dev-ocr-workflow"
+            ),
+            "HISTORICAL_REANALYSIS_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:"
+                "stateMachine:journalm8-dev-historical-reanalysis-workflow"
+            ),
+            "ACCOUNT_EXPORT_WORKFLOW_ARN": (
+                "arn:aws:states:us-east-1:114743615542:"
+                "stateMachine:journalm8-dev-account-export-workflow"
+            ),
+        })
+        os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("deploy-account-deletion", "dev")
+
+        self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
+
     def test_main_table_stream_contract_requires_exact_stream_and_identity(self):
         table_arn = (
             "arn:aws:dynamodb:us-east-1:114743615542:"

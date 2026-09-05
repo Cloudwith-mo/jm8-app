@@ -19,6 +19,7 @@ import semantic_memory_lifecycle as lifecycle  # noqa: E402
 from semantic_memory_lifecycle import (  # noqa: E402
     ACTIVE,
     DELETED,
+    DELETION_GUARDED,
     IGNORED,
     SemanticMemoryLifecycleError,
     apply_entry_stream_record,
@@ -28,6 +29,9 @@ from semantic_memory_store import (  # noqa: E402
     SemanticMemoryConflictError,
     SemanticMemoryIntegrityError,
     SemanticMemoryStoreError,
+)
+from semantic_memory_deletion_guard import (  # noqa: E402
+    SemanticMemoryDeletionGuardError,
 )
 
 
@@ -93,6 +97,13 @@ def replacement_result(
 
 
 class SemanticMemoryLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.guard_lookup = patch.object(
+            lifecycle, "semantic_deletion_guard_exists", return_value=False
+        )
+        self.guard_lookup.start()
+        self.addCleanup(self.guard_lookup.stop)
+
     def test_typed_entry_insert_calls_replacement(self):
         table = object()
         entry = typed_entry()
@@ -194,6 +205,149 @@ class SemanticMemoryLifecycleTests(unittest.TestCase):
             "entryId": "entry-123",
             "status": DELETED,
         })
+        lifecycle.semantic_deletion_guard_exists.assert_not_called()
+
+    def test_guarded_insert_and_modify_delete_exact_entry_without_replacement(self):
+        lifecycle.semantic_deletion_guard_exists.return_value = True
+        for event_name in ("INSERT", "MODIFY"):
+            entry = typed_entry(entryId=f"guarded-{event_name.lower()}")
+            record = stream_record(
+                f"event-{event_name.lower()}",
+                event_name,
+                new_image=stream_image(entry),
+            )
+            with self.subTest(event_name=event_name), patch.object(
+                lifecycle, "replace_entry_memory"
+            ) as replace, patch.object(
+                lifecycle, "delete_entry_memory"
+            ) as delete:
+                result = apply_entry_stream_record(object(), record)
+                replace.assert_not_called()
+                delete.assert_called_once_with(
+                    unittest.mock.ANY, "user-456", entry["entryId"]
+                )
+                self.assertEqual(result["status"], DELETION_GUARDED)
+
+    def test_guard_lookup_failure_returns_stream_checkpoint_for_retry(self):
+        lifecycle.semantic_deletion_guard_exists.side_effect = (
+            SemanticMemoryDeletionGuardError("privacy-safe guard failure")
+        )
+        record = stream_record(
+            "diagnostic-event",
+            "INSERT",
+            new_image=stream_image(typed_entry()),
+            sequence_number="000000000000777",
+        )
+        with patch.object(lifecycle, "replace_entry_memory") as replace:
+            response = process_entry_stream_event(object(), {"Records": [record]})
+        replace.assert_not_called()
+        self.assertEqual(response, {
+            "batchItemFailures": [{"itemIdentifier": "000000000000777"}],
+        })
+
+    def test_post_replacement_guard_compensates_exact_entry(self):
+        operations: list[str] = []
+        guard_checks = 0
+
+        def guard(_table: object, user_id: str) -> bool:
+            nonlocal guard_checks
+            self.assertEqual(user_id, "user-456")
+            guard_checks += 1
+            operations.append(
+                "guard-absent" if guard_checks == 1 else "guard-present"
+            )
+            return guard_checks == 2
+
+        lifecycle.semantic_deletion_guard_exists.side_effect = guard
+        record = stream_record(
+            "diagnostic-post-guard",
+            "MODIFY",
+            new_image=stream_image(typed_entry()),
+            sequence_number="000000000000778",
+        )
+
+        def replace(_table: object, _entry: object) -> dict[str, object]:
+            operations.append("replace")
+            return replacement_result()
+
+        def delete(_table: object, user_id: str, entry_id: str) -> int:
+            operations.append("compensate")
+            self.assertEqual((user_id, entry_id), ("user-456", "entry-123"))
+            return 1
+
+        with patch.object(
+            lifecycle, "replace_entry_memory", side_effect=replace
+        ) as replacement, patch.object(
+            lifecycle, "delete_entry_memory", side_effect=delete
+        ) as deletion:
+            result = apply_entry_stream_record(object(), record)
+
+        replacement.assert_called_once()
+        deletion.assert_called_once()
+        self.assertEqual(operations, [
+            "guard-absent",
+            "replace",
+            "guard-present",
+            "compensate",
+        ])
+        self.assertEqual(lifecycle.semantic_deletion_guard_exists.call_count, 2)
+        self.assertEqual(result["status"], DELETION_GUARDED)
+
+    def test_post_replacement_guard_failure_returns_stream_checkpoint(self):
+        lifecycle.semantic_deletion_guard_exists.side_effect = [
+            False,
+            SemanticMemoryDeletionGuardError("privacy-safe guard failure"),
+        ]
+        record = stream_record(
+            "diagnostic-post-failure",
+            "INSERT",
+            new_image=stream_image(typed_entry()),
+            sequence_number="000000000000779",
+        )
+        with patch.object(
+            lifecycle,
+            "replace_entry_memory",
+            return_value=replacement_result(),
+        ), patch.object(lifecycle, "delete_entry_memory") as delete:
+            response = process_entry_stream_event(object(), {"Records": [record]})
+
+        delete.assert_not_called()
+        self.assertEqual(response, {
+            "batchItemFailures": [{"itemIdentifier": "000000000000779"}],
+        })
+        self.assertNotIn("diagnostic-post-failure", repr(response))
+
+    def test_compensating_delete_failure_returns_stream_checkpoint(self):
+        lifecycle.semantic_deletion_guard_exists.side_effect = [False, True]
+        record = stream_record(
+            "diagnostic-delete-failure",
+            "INSERT",
+            new_image=stream_image(typed_entry()),
+            sequence_number="000000000000780",
+        )
+        with patch.object(
+            lifecycle,
+            "replace_entry_memory",
+            return_value=replacement_result(),
+        ), patch.object(
+            lifecycle,
+            "delete_entry_memory",
+            side_effect=SemanticMemoryStoreError(
+                "privacy-safe compensating deletion failure"
+            ),
+        ):
+            response = process_entry_stream_event(object(), {"Records": [record]})
+
+        self.assertEqual(response, {
+            "batchItemFailures": [{"itemIdentifier": "000000000000780"}],
+        })
+        for private_value in (
+            "diagnostic-delete-failure",
+            "user-456",
+            "entry-123",
+            "private journal",
+        ):
+            self.assertNotIn(private_value, repr(response))
 
     def test_insert_and_modify_use_new_image_and_never_old_image(self):
         table = object()

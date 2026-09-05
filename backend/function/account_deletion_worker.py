@@ -50,6 +50,12 @@ from account_deletion_stripe import (
 )
 from billing_customer_store import stripe_customer_lookup_key
 from billing_customer_store import get_stripe_customer_mapping
+from semantic_memory_deletion_guard import (
+    SemanticMemoryDeletionGuardError,
+    put_semantic_deletion_guard,
+    semantic_deletion_guard_exists,
+)
+from semantic_memory_store import SemanticMemoryStoreError, delete_user_memory
 from storage import TABLE_NAME, dynamodb_client, table
 
 
@@ -60,18 +66,23 @@ ACTIONS = (
     "DELETE_RAW_OBJECTS",
     "DELETE_EXPORT_OBJECTS",
     "DELETE_APPLICATION_DATA",
+    "DELETE_SEMANTIC_MEMORY",
     "DELETE_COGNITO_IDENTITY",
     "VERIFY",
     "COMPLETE",
     "FAIL",
 )
-DESTRUCTIVE_ACTIONS = set(ACTIONS[2:9])
+DESTRUCTIVE_ACTIONS = set(ACTIONS[2:-2])
 RAW_BUCKET = os.environ.get("RAW_BUCKET", "")
 EXPORT_BUCKET = os.environ.get("EXPORT_BUCKET", "")
 COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
+ENTRY_CHUNKS_TABLE_NAME = os.environ["ENTRY_CHUNKS_TABLE_NAME"]
+if not ENTRY_CHUNKS_TABLE_NAME.strip():
+    raise RuntimeError("ENTRY_CHUNKS_TABLE_NAME is required")
 s3 = boto3.client("s3")
 stepfunctions = boto3.client("stepfunctions")
 cognito = boto3.client("cognito-idp")
+entry_chunks_table = boto3.resource("dynamodb").Table(ENTRY_CHUNKS_TABLE_NAME)
 
 
 class AccountDeletionRetryableError(RuntimeError):
@@ -95,6 +106,8 @@ class Dependencies:
     raw_bucket: str = RAW_BUCKET
     export_bucket: str = EXPORT_BUCKET
     user_pool_id: str = COGNITO_USER_POOL_ID
+    entry_chunks_table: Any = entry_chunks_table
+    entry_chunks_table_name: str = ENTRY_CHUNKS_TABLE_NAME
     workflow_arns: Mapping[str, str] | None = None
 
 
@@ -125,6 +138,42 @@ def _delete_reverse_lookup(deps: Dependencies, recovery: Any) -> None:
         livemode=recovery.get("livemode"),
     )
     deps.table_resource.delete_item(Key=key)
+
+
+def _validate_semantic_table_dependency(deps: Dependencies) -> None:
+    table_name = getattr(deps.entry_chunks_table, "name", None)
+    if table_name is None:
+        table_name = getattr(deps.entry_chunks_table, "table_name", None)
+    if (
+        not isinstance(deps.entry_chunks_table_name, str)
+        or not deps.entry_chunks_table_name.strip()
+        or table_name != deps.entry_chunks_table_name
+    ):
+        raise AccountDeletionInvariantError("SemanticMemoryDependencyInvalid")
+
+
+def _semantic_partition_is_empty(deps: Dependencies, subject: str) -> bool:
+    _validate_semantic_table_dependency(deps)
+    response = deps.entry_chunks_table.query(
+        KeyConditionExpression="PK = :pk",
+        ExpressionAttributeValues={":pk": f"USER#{subject}"},
+        ConsistentRead=True,
+        Limit=1,
+        ProjectionExpression="PK",
+    )
+    if not isinstance(response, Mapping):
+        raise AccountDeletionRetryableError("SemanticMemoryVerificationUnavailable")
+    items = response.get("Items")
+    if not isinstance(items, list):
+        raise AccountDeletionRetryableError("SemanticMemoryVerificationUnavailable")
+    return not items
+
+
+def _semantic_deletion_is_verified(deps: Dependencies, subject: str) -> bool:
+    return (
+        _semantic_partition_is_empty(deps, subject)
+        and semantic_deletion_guard_exists(deps.entry_chunks_table, subject)
+    )
 
 
 def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[str, Any]:
@@ -244,6 +293,20 @@ def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[
                 subject=subject,
             )
             _delete_reverse_lookup(dependencies, recovery)
+        elif action == "DELETE_SEMANTIC_MEMORY":
+            _validate_semantic_table_dependency(dependencies)
+            put_semantic_deletion_guard(
+                dependencies.entry_chunks_table,
+                subject,
+            )
+            delete_user_memory(dependencies.entry_chunks_table, subject)
+            if not semantic_deletion_guard_exists(
+                dependencies.entry_chunks_table,
+                subject,
+            ):
+                raise AccountDeletionRetryableError(
+                    "SemanticMemoryGuardVerificationIncomplete"
+                )
         elif action == "DELETE_COGNITO_IDENTITY":
             recovery = get_billing_recovery(
                 subject=subject,
@@ -263,6 +326,7 @@ def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[
                 )
                 and partition_is_empty(dependencies.table_resource, subject)
                 and _reverse_lookup_absent(dependencies, recovery)
+                and _semantic_deletion_is_verified(dependencies, subject)
             )
             if not prerequisites:
                 raise AccountDeletionRetryableError("DeletionPrerequisiteUnverified")
@@ -272,13 +336,27 @@ def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[
                 subject=subject,
             )
         elif action == "VERIFY":
+            _validate_semantic_table_dependency(dependencies)
+            if not semantic_deletion_guard_exists(
+                dependencies.entry_chunks_table,
+                subject,
+            ):
+                raise AccountDeletionRetryableError(
+                    "SemanticMemoryGuardVerificationIncomplete"
+                )
+            delete_user_memory(dependencies.entry_chunks_table, subject)
+            semantic_partition_empty = _semantic_partition_is_empty(
+                dependencies,
+                subject,
+            )
             recovery = get_billing_recovery(
                 subject=subject,
                 request_id=request_id,
                 table_resource=dependencies.table_resource,
             )
             verified = (
-                prefix_is_empty(
+                semantic_partition_empty
+                and prefix_is_empty(
                     dependencies.s3_client,
                     bucket=dependencies.raw_bucket,
                     prefix=user_prefix(subject, export=False),
@@ -342,6 +420,8 @@ def run_action(event: dict[str, Any], deps: Dependencies | None = None) -> dict[
         DeletionStripeError,
         DeletionCognitoError,
         DeletionQuiescenceError,
+        SemanticMemoryDeletionGuardError,
+        SemanticMemoryStoreError,
     ) as error:
         _raise_classified(error)
     except (ClientError, BotoCoreError):
