@@ -1,11 +1,13 @@
 import copy
 import hashlib
+import json
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import boto3
 from botocore.exceptions import ClientError
 
 
@@ -89,14 +91,23 @@ class FakeBatchClient:
         self.calls.append(requests)
         self.table.events.append(("batch_delete", copy.deepcopy(requests)))
 
+        native_keys = []
+        for request in requests:
+            raw_key = request["DeleteRequest"]["Key"]
+            if not isinstance(raw_key.get("PK"), str) or not isinstance(
+                raw_key.get("SK"), str
+            ):
+                raise AssertionError(
+                    "resource-bound batch client requires native keys"
+                )
+            native_keys.append((raw_key["PK"], raw_key["SK"]))
+
         if self.always_unprocessed or self.unprocessed_rounds > 0:
             if self.unprocessed_rounds > 0:
                 self.unprocessed_rounds -= 1
             return {"UnprocessedItems": {self.table.name: requests}}
 
-        for request in requests:
-            raw_key = request["DeleteRequest"]["Key"]
-            key = (raw_key["PK"]["S"], raw_key["SK"]["S"])
+        for key in native_keys:
             self.table.items.pop(key, None)
         return {"UnprocessedItems": {}}
 
@@ -506,6 +517,63 @@ class SemanticMemoryStoreTests(unittest.TestCase):
         self.assertTrue(old_chunk_keys.isdisjoint(table.items))
         self.assertEqual(manifest(table)["activeContentDigest"], new_result["contentDigest"])
 
+    def test_retry_after_cleanup_failure_removes_previous_generation(self):
+        table = FakeTable()
+        replace_entry_memory(table, reviewed_entry(rawText="Old private text."))
+        old_chunk_keys = {
+            key
+            for key, item in table.items.items()
+            if item["entityType"] == CHUNK_ENTITY_TYPE
+        }
+        updated_entry = reviewed_entry(rawText="Updated private text.")
+        updated_digest = build_entry_semantic_chunks(updated_entry)[0][
+            "contentDigest"
+        ]
+        table.client.fail = True
+
+        with self.assertRaises(SemanticMemoryStoreError) as raised:
+            replace_entry_memory(table, updated_entry)
+
+        self.assertEqual(
+            manifest(table)["activeContentDigest"],
+            updated_digest,
+        )
+        self.assertTrue(old_chunk_keys.issubset(table.items))
+        message = str(raised.exception)
+        for private_value in (
+            "Old private text.",
+            "Updated private text.",
+            "user-456",
+            "entry-123",
+            updated_digest,
+        ):
+            self.assertNotIn(private_value, message)
+
+        table.client.fail = False
+        result = replace_entry_memory(table, updated_entry)
+
+        self.assertEqual(result["contentDigest"], updated_digest)
+        self.assertTrue(old_chunk_keys.isdisjoint(table.items))
+        entry_items = [
+            item
+            for item in table.items.values()
+            if item.get("userId") == "user-456"
+            and item.get("entryId") == "entry-123"
+        ]
+        self.assertEqual(len(entry_items), 2)
+        self.assertEqual(
+            [
+                item["contentDigest"]
+                for item in entry_items
+                if item.get("entityType") == CHUNK_ENTITY_TYPE
+            ],
+            [updated_digest],
+        )
+        self.assertEqual(
+            manifest(table)["activeContentDigest"],
+            updated_digest,
+        )
+
     def test_stale_cleanup_occurs_only_after_manifest_publication(self):
         table = FakeTable()
         replace_entry_memory(table, reviewed_entry(rawText="Old generation."))
@@ -670,6 +738,85 @@ class SemanticMemoryStoreTests(unittest.TestCase):
         self.assertEqual(table.items, {})
         self.assertGreater(len(table.query_calls), 1)
 
+    def test_resource_bound_batch_client_receives_native_keys(self):
+        table = FakeTable()
+        item = {"PK": "USER#user-456", "SK": "ENTRY#opaque#MANIFEST"}
+        table.items[(item["PK"], item["SK"])] = copy.deepcopy(item)
+
+        delete_user_memory(table, "user-456")
+
+        sent_key = table.client.calls[0][0]["DeleteRequest"]["Key"]
+        self.assertEqual(sent_key, item)
+        self.assertIsInstance(sent_key["PK"], str)
+        self.assertIsInstance(sent_key["SK"], str)
+
+    def test_boto3_resource_client_serializes_native_keys_at_wire_boundary(self):
+        class RequestCaptured(Exception):
+            pass
+
+        resource = boto3.resource(
+            "dynamodb",
+            region_name="us-east-1",
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+        )
+        table = resource.Table("semantic-memory-test")
+        captured: dict[str, object] = {}
+
+        def capture_request(model, params, **kwargs):
+            captured.update(params)
+            raise RequestCaptured
+
+        table.meta.client.meta.events.register_first(
+            "before-call.dynamodb.BatchWriteItem",
+            capture_request,
+        )
+
+        with self.assertRaises(RequestCaptured):
+            table.meta.client.batch_write_item(
+                RequestItems={
+                    table.name: [{
+                        "DeleteRequest": {
+                            "Key": {
+                                "PK": "USER#user-456",
+                                "SK": "ENTRY#opaque#MANIFEST",
+                            }
+                        }
+                    }]
+                }
+            )
+
+        wire_request = json.loads(captured["body"])
+        wire_key = wire_request["RequestItems"][table.name][0][
+            "DeleteRequest"
+        ]["Key"]
+        self.assertEqual(
+            wire_key,
+            {
+                "PK": {"S": "USER#user-456"},
+                "SK": {"S": "ENTRY#opaque#MANIFEST"},
+            },
+        )
+
+    def test_resource_bound_batch_client_rejects_serialized_keys(self):
+        table = FakeTable()
+        request_items = {
+            table.name: [{
+                "DeleteRequest": {
+                    "Key": {
+                        "PK": {"S": "USER#user-456"},
+                        "SK": {"S": "ENTRY#opaque#MANIFEST"},
+                    }
+                }
+            }]
+        }
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "resource-bound batch client requires native keys",
+        ):
+            table.client.batch_write_item(RequestItems=request_items)
+
     def test_unprocessed_items_use_bounded_exponential_retries(self):
         table = FakeTable()
         item = {"PK": "USER#user-456", "SK": "ENTRY#opaque#MANIFEST"}
@@ -681,15 +828,33 @@ class SemanticMemoryStoreTests(unittest.TestCase):
 
         self.assertEqual(len(table.client.calls), 3)
         self.assertEqual([call.args[0] for call in sleeper.call_args_list], [0.01, 0.02])
+        self.assertEqual(table.client.calls[1:], table.client.calls[:1] * 2)
+        for call in table.client.calls:
+            key = call[0]["DeleteRequest"]["Key"]
+            self.assertEqual(key, item)
+            self.assertIsInstance(key["PK"], str)
+            self.assertIsInstance(key["SK"], str)
 
         failing = FakeTable()
-        failing.items[(item["PK"], item["SK"])] = copy.deepcopy(item)
+        private_item = {
+            "PK": "USER#user-secret",
+            "SK": "ENTRY#entry-secret#MANIFEST",
+        }
+        failing.items[(private_item["PK"], private_item["SK"])] = copy.deepcopy(
+            private_item
+        )
         failing.client.always_unprocessed = True
         with patch("semantic_memory_store.sleep"), self.assertRaises(
             SemanticMemoryStoreError
-        ):
-            delete_user_memory(failing, "user-456")
+        ) as raised:
+            delete_user_memory(failing, "user-secret")
         self.assertEqual(len(failing.client.calls), 5)
+        self.assertEqual(
+            str(raised.exception),
+            "semantic memory deletion retry failed",
+        )
+        self.assertNotIn("user-secret", str(raised.exception))
+        self.assertNotIn("entry-secret", str(raised.exception))
 
     def test_entry_deletion_is_isolated(self):
         table = FakeTable()

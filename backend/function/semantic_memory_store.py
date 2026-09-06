@@ -640,7 +640,7 @@ def _delete_keys(table: object, keys: list[dict[str, object]]) -> None:
 
     for offset in range(0, len(keys), MAX_BATCH_SIZE):
         requests = [
-            {"DeleteRequest": {"Key": _serialized_key(key)}}
+            {"DeleteRequest": {"Key": _native_key(key)}}
             for key in keys[offset : offset + MAX_BATCH_SIZE]
         ]
         retries = 0
@@ -672,12 +672,14 @@ def _batch_client(table: object) -> tuple[str, object]:
     return table_name, client
 
 
-def _serialized_key(key: Mapping[str, object]) -> dict[str, dict[str, str]]:
+def _native_key(key: Mapping[str, object]) -> dict[str, str]:
     pk = key.get("PK")
     sk = key.get("SK")
     if not isinstance(pk, str) or not isinstance(sk, str):
-        raise SemanticMemoryStoreError("semantic memory persistence key is invalid")
-    return {"PK": {"S": pk}, "SK": {"S": sk}}
+        raise SemanticMemoryStoreError(
+            "semantic memory persistence key is invalid"
+        )
+    return {"PK": pk, "SK": sk}
 
 
 __all__ = [
