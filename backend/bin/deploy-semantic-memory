@@ -8,12 +8,19 @@ set -euo pipefail
 : "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
 : "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
 : "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required. Run: source .env}"
+: "${SEMANTIC_MEMORY_MAPPING_ENABLED:?SEMANTIC_MEMORY_MAPPING_ENABLED is required. Run: source .env}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/jm8_deployment_guard.sh"
 export JM8_OPERATION="deploy-semantic-memory"
 jm8_validate_contract_or_exit
+
+case "$SEMANTIC_MEMORY_MAPPING_ENABLED" in
+  true) MAPPING_TARGET_STATE="Enabled" ;;
+  false) MAPPING_TARGET_STATE="Disabled" ;;
+  *) echo "Semantic-memory mapping activation value is invalid." >&2; exit 1 ;;
+esac
 
 WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-semantic-memory-worker"
 WORKER_ROLE_NAME="${APP_NAME}-${STAGE}-semantic-memory-worker-role"
@@ -448,8 +455,140 @@ import sys
 print(json.dumps({"OnFailure": {"Destination": sys.argv[1]}}))
 PY
 
-ensure_disabled_event_source_mapping() {
-local MAPPING_UUID
+MAPPING_UUID=""
+MAPPING_STATE=""
+MAPPING_POLL_LIMIT=20
+
+poll_event_source_mapping_stable() {
+local MAPPING_POLL_ATTEMPT=1
+MAPPING_STATE=""
+
+while [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; do
+  MAPPING_STATE="$(
+    aws lambda get-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query State \
+      --output text
+  )"
+
+  case "$MAPPING_STATE" in
+    Enabled|Disabled)
+      return 0
+      ;;
+    Creating|Enabling|Disabling|Updating)
+      ;;
+    *)
+      echo "Semantic-memory event-source mapping entered an invalid state." >&2
+      exit 1
+      ;;
+  esac
+
+  MAPPING_POLL_ATTEMPT=$((MAPPING_POLL_ATTEMPT + 1))
+  if [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; then
+    sleep 3
+  fi
+done
+
+echo "Semantic-memory event-source mapping did not become stable." >&2
+exit 1
+}
+
+poll_event_source_mapping_target() {
+local MAPPING_EXPECTED_STATE="$1"
+local MAPPING_SOURCE_STATE="${2:-}"
+local MAPPING_POLL_ATTEMPT=1
+MAPPING_STATE=""
+
+while [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; do
+  MAPPING_STATE="$(
+    aws lambda get-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query State \
+      --output text
+  )"
+
+  if [ "$MAPPING_STATE" = "$MAPPING_EXPECTED_STATE" ]; then
+    return 0
+  fi
+
+  case "$MAPPING_STATE" in
+    Creating|Enabling|Disabling|Updating)
+      ;;
+    *)
+      if [ -z "$MAPPING_SOURCE_STATE" ] \
+        || [ "$MAPPING_STATE" != "$MAPPING_SOURCE_STATE" ]; then
+        echo "Semantic-memory event-source mapping entered an invalid state." >&2
+        exit 1
+      fi
+      ;;
+  esac
+
+  MAPPING_POLL_ATTEMPT=$((MAPPING_POLL_ATTEMPT + 1))
+  if [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; then
+    sleep 3
+  fi
+done
+
+echo "Semantic-memory event-source mapping did not reach its target state." >&2
+exit 1
+}
+
+verify_event_source_mapping() {
+local MAPPING_EXPECTED_STATE="$1"
+local MAPPING_VERIFICATION_NAME="$2"
+local MAPPING_FILE="$BUILD_DIR/mapping-${MAPPING_VERIFICATION_NAME}.json"
+local MAPPINGS_FILE="$BUILD_DIR/mappings-${MAPPING_VERIFICATION_NAME}.json"
+
+aws lambda get-event-source-mapping \
+  --uuid "$MAPPING_UUID" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  > "$MAPPING_FILE"
+python3 - "$MAPPING_FILE" "$STREAM_ARN" "$WORKER_ARN" "$DLQ_ARN" \
+  "$MAPPING_EXPECTED_STATE" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    mapping = json.load(handle)
+stream_arn, worker_arn, dlq_arn, expected_state = sys.argv[2:]
+expected = {
+    "EventSourceArn": stream_arn,
+    "FunctionArn": worker_arn,
+    "State": expected_state,
+    "StartingPosition": "LATEST",
+    "BatchSize": 25,
+    "MaximumBatchingWindowInSeconds": 1,
+    "ParallelizationFactor": 1,
+    "BisectBatchOnFunctionError": True,
+    "MaximumRetryAttempts": 5,
+    "MaximumRecordAgeInSeconds": 3600,
+    "FunctionResponseTypes": ["ReportBatchItemFailures"],
+    "DestinationConfig": {"OnFailure": {"Destination": dlq_arn}},
+}
+if any(mapping.get(key) != value for key, value in expected.items()):
+    raise SystemExit("Semantic-memory event-source mapping is invalid.")
+PY
+aws lambda list-event-source-mappings \
+  --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  > "$MAPPINGS_FILE"
+python3 - "$MAPPINGS_FILE" "$MAPPING_UUID" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    mappings = json.load(handle).get("EventSourceMappings")
+if not isinstance(mappings, list) or len(mappings) != 1 \
+        or mappings[0].get("UUID") != sys.argv[2]:
+    raise SystemExit("Semantic-memory event-source mapping count is invalid.")
+PY
+}
+
+ensure_event_source_mapping() {
 aws lambda list-event-source-mappings \
   --function-name "$WORKER_FUNCTION_NAME" \
   --profile "$AWS_PROFILE" \
@@ -483,11 +622,13 @@ if [ "$MAPPING_UUID" = "ABSENT" ]; then
     --region "$AWS_REGION" \
     --query UUID \
     --output text)"
+  poll_event_source_mapping_target "Disabled"
 else
+  poll_event_source_mapping_stable
+  MAPPING_INITIAL_STATE="$MAPPING_STATE"
   aws lambda update-event-source-mapping \
     --uuid "$MAPPING_UUID" \
     --function-name "$WORKER_FUNCTION_NAME" \
-    --no-enabled \
     --batch-size 25 \
     --maximum-batching-window-in-seconds 1 \
     --parallelization-factor 1 \
@@ -499,94 +640,45 @@ else
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
     >/dev/null
+  poll_event_source_mapping_target "$MAPPING_INITIAL_STATE" \
+    "$MAPPING_INITIAL_STATE"
 fi
 if [ -z "$MAPPING_UUID" ] || [ "$MAPPING_UUID" = "None" ] \
   || [ "$MAPPING_UUID" = "INVALID" ]; then
   echo "Semantic-memory event-source mapping identity is invalid." >&2
   exit 1
 fi
-MAPPING_POLL_ATTEMPT=1
-MAPPING_POLL_LIMIT=20
-MAPPING_STATE=""
+verify_event_source_mapping "$MAPPING_STATE" "configured"
+}
 
-while [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; do
-  MAPPING_STATE="$(
-    aws lambda get-event-source-mapping \
-      --uuid "$MAPPING_UUID" \
-      --profile "$AWS_PROFILE" \
-      --region "$AWS_REGION" \
-      --query State \
-      --output text
-  )"
+reconcile_event_source_mapping_state() {
+local MAPPING_SOURCE_STATE
+local MAPPING_STATE_FLAG
 
-  case "$MAPPING_STATE" in
-    Disabled)
-      break
-      ;;
-    Creating|Updating|Disabling)
-      ;;
-    *)
-      echo "Semantic-memory event-source mapping entered an invalid state." >&2
-      exit 1
-      ;;
+poll_event_source_mapping_stable
+MAPPING_SOURCE_STATE="$MAPPING_STATE"
+
+if [ "$MAPPING_SOURCE_STATE" != "$MAPPING_TARGET_STATE" ]; then
+  case "$MAPPING_TARGET_STATE" in
+    Enabled) MAPPING_STATE_FLAG="--enabled" ;;
+    Disabled) MAPPING_STATE_FLAG="--no-enabled" ;;
+    *) echo "Semantic-memory mapping target state is invalid." >&2; exit 1 ;;
   esac
 
-  MAPPING_POLL_ATTEMPT=$((MAPPING_POLL_ATTEMPT + 1))
-
-  if [ "$MAPPING_POLL_ATTEMPT" -le "$MAPPING_POLL_LIMIT" ]; then
-    sleep 3
-  fi
-done
-
-if [ "$MAPPING_STATE" != "Disabled" ]; then
-  echo "Semantic-memory event-source mapping did not become disabled." >&2
-  exit 1
+  aws lambda update-event-source-mapping \
+    --uuid "$MAPPING_UUID" \
+    "$MAPPING_STATE_FLAG" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    >/dev/null
+  poll_event_source_mapping_target "$MAPPING_TARGET_STATE" \
+    "$MAPPING_SOURCE_STATE"
 fi
-aws lambda get-event-source-mapping \
-  --uuid "$MAPPING_UUID" \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION" \
-  > "$BUILD_DIR/mapping-after.json"
-python3 - "$BUILD_DIR/mapping-after.json" "$STREAM_ARN" "$WORKER_ARN" "$DLQ_ARN" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    mapping = json.load(handle)
-stream_arn, worker_arn, dlq_arn = sys.argv[2:]
-expected = {
-    "EventSourceArn": stream_arn,
-    "FunctionArn": worker_arn,
-    "State": "Disabled",
-    "StartingPosition": "LATEST",
-    "BatchSize": 25,
-    "MaximumBatchingWindowInSeconds": 1,
-    "ParallelizationFactor": 1,
-    "BisectBatchOnFunctionError": True,
-    "MaximumRetryAttempts": 5,
-    "MaximumRecordAgeInSeconds": 3600,
-    "FunctionResponseTypes": ["ReportBatchItemFailures"],
-    "DestinationConfig": {"OnFailure": {"Destination": dlq_arn}},
-}
-if any(mapping.get(key) != value for key, value in expected.items()):
-    raise SystemExit("Semantic-memory event-source mapping is invalid.")
-PY
-aws lambda list-event-source-mappings \
-  --function-name "$WORKER_FUNCTION_NAME" \
-  --profile "$AWS_PROFILE" \
-  --region "$AWS_REGION" \
-  > "$BUILD_DIR/mappings-after.json"
-python3 - "$BUILD_DIR/mappings-after.json" "$MAPPING_UUID" <<'PY'
-import json
-import sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    mappings = json.load(handle).get("EventSourceMappings")
-if not isinstance(mappings, list) or len(mappings) != 1 \
-        or mappings[0].get("UUID") != sys.argv[2]:
-    raise SystemExit("Semantic-memory event-source mapping count is invalid.")
-PY
+
+verify_event_source_mapping "$MAPPING_TARGET_STATE" "final"
 }
 
-ensure_disabled_event_source_mapping
+ensure_event_source_mapping
 
 ALARM_NAMES=(
   "${WORKER_FUNCTION_NAME}-errors"
@@ -640,4 +732,6 @@ if not isinstance(names, list) or set(names) != set(sys.argv[2:]) \
     raise SystemExit("Semantic-memory alarms are incomplete.")
 PY
 
-echo "Semantic-memory worker infrastructure is ready with its mapping disabled."
+reconcile_event_source_mapping_state
+
+echo "Semantic-memory worker infrastructure is ready with its mapping ${MAPPING_TARGET_STATE}."

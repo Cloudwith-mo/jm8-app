@@ -1075,6 +1075,28 @@ def validate_confirmation_gate(stage: str) -> None:
             )
 
 
+def validate_semantic_memory_activation(
+    stage: str,
+    environment: Mapping[str, object],
+) -> None:
+    """Validate the explicit semantic-memory mapping activation gate."""
+
+    enabled = environment.get("SEMANTIC_MEMORY_MAPPING_ENABLED")
+    if enabled not in {"true", "false"}:
+        raise EnvironmentContractError(
+            "SEMANTIC_MEMORY_MAPPING_ENABLED must be exactly true or false"
+        )
+
+    if (
+        enabled == "true"
+        and environment.get("SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION") != stage
+    ):
+        raise EnvironmentContractError(
+            "Semantic-memory activation requires "
+            "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION=$STAGE"
+        )
+
+
 def _normalize_origin(origin: str) -> str:
     parsed = urlsplit(origin)
 
@@ -1203,6 +1225,10 @@ def validate_environment_contract() -> dict:
     validate_stage(stage)
     validate_stage_aws_profile(stage, aws_profile)
 
+    operation = os.environ.get("JM8_OPERATION", "").strip()
+    if operation.lower() == "deploy-semantic-memory":
+        validate_semantic_memory_activation(stage, os.environ)
+
     # Production controls are checked before STS so an unapproved profile or
     # incomplete same-account acknowledgment cannot initiate even a read call.
     if stage == "prod":
@@ -1256,7 +1282,6 @@ def validate_environment_contract() -> dict:
             )
 
     # Optional: operation-specific validation via JM8_OPERATION env var
-    operation = os.environ.get("JM8_OPERATION", "").strip()
     if operation:
         validate_operation_specific(operation, stage, actual_account_id)
 
@@ -1301,6 +1326,9 @@ def validate_operation_specific(
     stripe_bootstrap = validate_stripe_bootstrap_context(
         operation, stage, actual_account_id
     )
+
+    if op == "deploy-semantic-memory":
+        validate_semantic_memory_activation(stage, os.environ)
 
     if op == "deploy":
         stripe_secret_arn = os.environ.get("STRIPE_SECRET_ARN", "").strip()

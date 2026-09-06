@@ -40,6 +40,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_non_dev_urls,
     validate_stripe_credentials,
     validate_confirmation_gate,
+    validate_semantic_memory_activation,
     validate_allowed_origins,
     validate_https_frontend_origin,
     validate_stage_frontend_origin_contract,
@@ -112,6 +113,8 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "RAW_BUCKET",
         "EXPORT_BUCKET",
         "DEPLOY_CONFIRMATION",
+        "SEMANTIC_MEMORY_MAPPING_ENABLED",
+        "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION",
         "STRIPE_SECRET_KEY",
         "STRIPE_WEBHOOK_SECRET",
         "STRIPE_SECRET_ARN",
@@ -172,6 +175,39 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
 
 class TestEnvironmentContractValidation(EnvironmentIsolationTestCase):
     """Test environment variable validation."""
+
+    def test_semantic_memory_mapping_enabled_accepts_only_exact_booleans(self):
+        validate_semantic_memory_activation(
+            "staging",
+            {"SEMANTIC_MEMORY_MAPPING_ENABLED": "false"},
+        )
+        validate_semantic_memory_activation("staging", {
+            "SEMANTIC_MEMORY_MAPPING_ENABLED": "true",
+            "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION": "staging",
+        })
+
+        for invalid in (None, "", "TRUE", "False", "1", " true ", True, False):
+            with self.subTest(value=invalid):
+                with self.assertRaises(EnvironmentContractError):
+                    validate_semantic_memory_activation(
+                        "staging",
+                        {"SEMANTIC_MEMORY_MAPPING_ENABLED": invalid},
+                    )
+
+    def test_semantic_memory_activation_requires_exact_stage_confirmation(self):
+        for confirmation in (None, "", "dev", "STAGING", " staging "):
+            with self.subTest(confirmation=confirmation):
+                environment = {"SEMANTIC_MEMORY_MAPPING_ENABLED": "true"}
+                if confirmation is not None:
+                    environment[
+                        "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION"
+                    ] = confirmation
+                with self.assertRaises(EnvironmentContractError) as ctx:
+                    validate_semantic_memory_activation("staging", environment)
+                self.assertIn(
+                    "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION=$STAGE",
+                    str(ctx.exception),
+                )
 
     def test_export_bucket_is_exact_and_dedicated(self):
         validate_export_bucket_name(
@@ -1529,7 +1565,29 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
             template = BACKEND_ROOT / "infra" / "environments" / f"{stage}.env.example"
             with self.subTest(template=template.name):
                 self.assertTrue(template.exists())
-                self.assertFalse(fnmatch(template.relative_to(BACKEND_ROOT).as_posix(), generated_pattern))
+                self.assertFalse(fnmatch(
+                    template.relative_to(BACKEND_ROOT).as_posix(),
+                    generated_pattern,
+                ))
+
+    def test_tracked_environments_default_semantic_mapping_to_disabled(self):
+        for stage in ("dev", "staging", "prod"):
+            template = (
+                BACKEND_ROOT
+                / "infra"
+                / "environments"
+                / f"{stage}.env.example"
+            )
+            content = template.read_text(encoding="utf-8")
+            with self.subTest(stage=stage):
+                self.assertEqual(
+                    content.count("export SEMANTIC_MEMORY_MAPPING_ENABLED=false"),
+                    1,
+                )
+                self.assertNotIn(
+                    "\nexport SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION=",
+                    content,
+                )
 
     def test_deploy_sets_operation_name_for_contract_checks(self):
         script_text = self._read("bin/deploy")
@@ -1674,6 +1732,7 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
         os.environ.update({
             "APP_NAME": "journalm8",
             "TABLE_NAME": "journalm8-dev-main",
+            "SEMANTIC_MEMORY_MAPPING_ENABLED": "false",
         })
         os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
 

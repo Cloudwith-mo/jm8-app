@@ -93,14 +93,22 @@ args = sys.argv[1:]
 with log_path.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(args) + "\n")
 
+def option(name):
+    return args[args.index(name) + 1]
+
 if args[:2] == ["lambda", "list-event-source-mappings"]:
-    mappings = [] if state.get("mapping") is None else [{"UUID": "mapping-1"}]
+    if state.get("list_failure"):
+        raise SystemExit(41)
+    mappings = [] if state.get("mapping") is None else [{
+        "UUID": "mapping-1",
+        "State": state["mapping"]["State"],
+    }]
     print(json.dumps({"EventSourceMappings": mappings}))
-elif args[:2] in (["lambda", "create-event-source-mapping"], ["lambda", "update-event-source-mapping"]):
-    def option(name):
-        return args[args.index(name) + 1]
-    if "--no-enabled" not in args:
-        raise SystemExit("mapping must remain disabled")
+elif args[:2] == ["lambda", "create-event-source-mapping"]:
+    if state.get("create_failure"):
+        raise SystemExit(42)
+    if "--no-enabled" not in args or "--enabled" in args:
+        raise SystemExit("mapping creation must begin disabled")
     previous = state.get("mapping") or {}
     destination_path = option("--destination-config").removeprefix("file://")
     destination = json.loads(Path(destination_path).read_text(encoding="utf-8"))
@@ -124,13 +132,52 @@ elif args[:2] in (["lambda", "create-event-source-mapping"], ["lambda", "update-
     state_path.write_text(json.dumps(state), encoding="utf-8")
     if "--query" in args:
         print("mapping-1")
+elif args[:2] == ["lambda", "update-event-source-mapping"]:
+    is_state_update = "--enabled" in args or "--no-enabled" in args
+    if is_state_update and state.get("state_update_failure"):
+        raise SystemExit(43)
+    if not is_state_update and state.get("configuration_update_failure"):
+        raise SystemExit(44)
+    mapping = state["mapping"]
+    if is_state_update:
+        mapping["State"] = "Enabled" if "--enabled" in args else "Disabled"
+    else:
+        destination_path = option("--destination-config").removeprefix("file://")
+        mapping.update({
+            "FunctionArn": (
+                "arn:aws:lambda:us-east-1:114743615542:function:"
+                + option("--function-name")
+            ),
+            "BatchSize": int(option("--batch-size")),
+            "MaximumBatchingWindowInSeconds": int(
+                option("--maximum-batching-window-in-seconds")
+            ),
+            "ParallelizationFactor": int(option("--parallelization-factor")),
+            "BisectBatchOnFunctionError": "--bisect-batch-on-function-error" in args,
+            "MaximumRetryAttempts": int(option("--maximum-retry-attempts")),
+            "MaximumRecordAgeInSeconds": int(
+                option("--maximum-record-age-in-seconds")
+            ),
+            "FunctionResponseTypes": [option("--function-response-types")],
+            "DestinationConfig": json.loads(
+                Path(destination_path).read_text(encoding="utf-8")
+            ),
+        })
+    state["mapping"] = mapping
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 elif args[:2] == ["lambda", "get-event-source-mapping"]:
     if "--query" in args:
         poll_index = state.get("poll_index", 0)
         if state.get("poll_failure_at") == poll_index + 1:
             raise SystemExit(42)
-        poll_states = state.get("poll_states", ["Disabled"])
-        mapping_state = poll_states[min(poll_index, len(poll_states) - 1)]
+        poll_states = state.get("poll_states")
+        mapping_state = (
+            poll_states[min(poll_index, len(poll_states) - 1)]
+            if poll_states
+            else state["mapping"]["State"]
+        )
+        if mapping_state in ("Enabled", "Disabled"):
+            state["mapping"]["State"] = mapping_state
         state["poll_index"] = poll_index + 1
         state_path.write_text(json.dumps(state), encoding="utf-8")
         print(mapping_state)
@@ -153,11 +200,12 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         start = cls.create_resources.index("ensure_main_table_stream() {")
         end = cls.create_resources.index("\n}\n\necho", start) + 3
         cls.stream_function = cls.create_resources[start:end]
-        mapping_start = cls.deploy.index("ensure_disabled_event_source_mapping() {")
+        mapping_start = cls.deploy.index('MAPPING_UUID=""')
         mapping_end = cls.deploy.index(
-            "\n}\n\nensure_disabled_event_source_mapping", mapping_start
-        ) + 3
-        cls.mapping_function = cls.deploy[mapping_start:mapping_end]
+            "\n\nensure_event_source_mapping\n",
+            mapping_start,
+        )
+        cls.mapping_functions = cls.deploy[mapping_start:mapping_end]
 
     @staticmethod
     def _main_state(**changes: object) -> dict[str, object]:
@@ -175,7 +223,10 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         return state
 
     @staticmethod
-    def _mapping_state(**changes: object) -> dict[str, object]:
+    def _mapping_state(
+        mapping_state: str = "Disabled",
+        **changes: object,
+    ) -> dict[str, object]:
         mapping = {
             "UUID": "mapping-1",
             "EventSourceArn": (
@@ -186,7 +237,7 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
                 "arn:aws:lambda:us-east-1:114743615542:"
                 "function:journalm8-dev-semantic-memory-worker"
             ),
-            "State": "Disabled",
+            "State": mapping_state,
             "StartingPosition": "LATEST",
             "BatchSize": 25,
             "MaximumBatchingWindowInSeconds": 1,
@@ -208,7 +259,7 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         self,
         state: dict[str, object],
         *,
-        runs: int = 1,
+        target_enabled: bool = False,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -234,12 +285,15 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
                 "#!/usr/bin/env bash\nset -euo pipefail\nsleep() { :; }\n"
                 f"BUILD_DIR={str(build_dir)!r}\n"
                 "AWS_PROFILE=jm8-dev\nAWS_REGION=us-east-1\n"
+                "MAPPING_TARGET_STATE="
+                f"{'Enabled' if target_enabled else 'Disabled'}\n"
                 "WORKER_FUNCTION_NAME=journalm8-dev-semantic-memory-worker\n"
                 "WORKER_ARN=arn:aws:lambda:us-east-1:114743615542:function:journalm8-dev-semantic-memory-worker\n"
                 "STREAM_ARN=arn:aws:dynamodb:us-east-1:114743615542:table/journalm8-dev-main/stream/version\n"
                 f"DLQ_ARN={dlq_arn!r}\n"
-                f"{self.mapping_function}\n"
-                + "ensure_disabled_event_source_mapping\n" * runs,
+                f"{self.mapping_functions}\n"
+                "ensure_event_source_mapping\n"
+                "reconcile_event_source_mapping_state\n",
                 encoding="utf-8",
             )
             environment = dict(os.environ)
@@ -420,7 +474,7 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         ):
             self.assertIn(metric, self.deploy)
 
-    def test_mapping_is_created_and_reconciled_disabled_with_exact_settings(self):
+    def test_mapping_configuration_preserves_singleton_and_batch_failures(self):
         for expected in (
             "--no-enabled",
             "--starting-position LATEST",
@@ -433,19 +487,20 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
             "--function-response-types ReportBatchItemFailures",
         ):
             self.assertIn(expected, self.deploy)
-        self.assertNotIn("--enabled", self.deploy.replace("--no-enabled", ""))
         self.assertIn("mapping.get(key)", self.deploy)
-        self.assertIn('"State": "Disabled"', self.deploy)
+        self.assertIn('"State": expected_state', self.deploy)
         self.assertIn("create-event-source-mapping", self.deploy)
         self.assertIn("update-event-source-mapping", self.deploy)
         self.assertIn("len(mappings) > 1", self.deploy)
         self.assertIn("len(mappings) != 1", self.deploy)
         self.assertNotIn("event-source-mapping-updated", self.deploy)
+        self.assertNotIn("event-source-mapping-disabled", self.deploy)
 
-    def test_mapping_poll_succeeds_when_immediately_disabled(self):
-        result, _, calls = self._run_mapping_reconcile(self._mapping_state())
+    def test_safe_disabled_target_succeeds_immediately(self):
+        result, state, calls = self._run_mapping_reconcile(self._mapping_state())
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["mapping"]["State"], "Disabled")
         state_polls = [
             call for call in calls
             if call[:2] == ["lambda", "get-event-source-mapping"]
@@ -456,15 +511,25 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
             if call[:2] == ["lambda", "get-event-source-mapping"]
             and "--query" not in call
         ]
-        self.assertEqual(len(state_polls), 1)
-        self.assertEqual(len(full_gets), 1)
+        self.assertEqual(len(state_polls), 3)
+        self.assertEqual(len(full_gets), 2)
 
-    def test_mapping_poll_accepts_only_transitional_states_before_disabled(self):
-        for transitional_state in ("Creating", "Updating", "Disabling"):
+    def test_mapping_poll_accepts_transitional_states_before_stability(self):
+        for transitional_state in (
+            "Creating",
+            "Enabling",
+            "Disabling",
+            "Updating",
+        ):
             with self.subTest(state=transitional_state):
                 result, _, calls = self._run_mapping_reconcile(
                     self._mapping_state(
-                        poll_states=[transitional_state, "Disabled"],
+                        poll_states=[
+                            transitional_state,
+                            "Disabled",
+                            "Disabled",
+                            "Disabled",
+                        ],
                     )
                 )
 
@@ -474,12 +539,11 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
                     if call[:2] == ["lambda", "get-event-source-mapping"]
                     and "--query" in call
                 ]
-                self.assertEqual(len(state_polls), 2)
+                self.assertEqual(len(state_polls), 4)
 
     def test_mapping_poll_fails_closed_for_invalid_states(self):
         for invalid_state in (
-            "Enabled",
-            "Enabling",
+            "",
             "Failed",
             "Deleting",
             "UnknownState",
@@ -508,7 +572,7 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "event-source mapping did not become disabled",
+            "event-source mapping did not become stable",
             result.stderr,
         )
         state_polls = [
@@ -518,7 +582,7 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         ]
         self.assertEqual(len(state_polls), 20)
 
-    def test_mapping_poll_aws_failure_propagates(self):
+    def test_mapping_lookup_aws_failures_propagate(self):
         result, _, calls = self._run_mapping_reconcile(
             self._mapping_state(poll_failure_at=1)
         )
@@ -531,6 +595,134 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         ]
         self.assertEqual(len(state_polls), 1)
 
+    def test_disabled_mapping_transitions_to_enabled(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state(),
+            target_enabled=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["mapping"]["State"], "Enabled")
+        state_updates = [
+            call for call in calls
+            if call[:2] == ["lambda", "update-event-source-mapping"]
+            and "--enabled" in call
+        ]
+        self.assertEqual(len(state_updates), 1)
+
+    def test_enabled_mapping_transitions_to_disabled(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state("Enabled"),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["mapping"]["State"], "Disabled")
+        state_updates = [
+            call for call in calls
+            if call[:2] == ["lambda", "update-event-source-mapping"]
+            and "--no-enabled" in call
+        ]
+        self.assertEqual(len(state_updates), 1)
+
+    def test_mapping_already_at_target_is_idempotent(self):
+        for mapping_state, target_enabled in (
+            ("Disabled", False),
+            ("Enabled", True),
+        ):
+            with self.subTest(state=mapping_state):
+                result, state, calls = self._run_mapping_reconcile(
+                    self._mapping_state(mapping_state),
+                    target_enabled=target_enabled,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["mapping"]["State"], mapping_state)
+                state_updates = [
+                    call for call in calls
+                    if call[:2] == ["lambda", "update-event-source-mapping"]
+                    and ("--enabled" in call or "--no-enabled" in call)
+                ]
+                self.assertEqual(state_updates, [])
+
+    def test_enable_poll_is_bounded_and_accepts_transitional_states(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state(poll_states=[
+                "Disabled",
+                "Updating",
+                "Disabled",
+                "Disabled",
+                "Enabling",
+                "Updating",
+                "Enabled",
+            ]),
+            target_enabled=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["mapping"]["State"], "Enabled")
+        state_polls = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" in call
+        ]
+        self.assertEqual(len(state_polls), 7)
+
+    def test_disable_poll_accepts_disabling_and_updating_states(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state("Enabled", poll_states=[
+                "Enabled",
+                "Enabled",
+                "Enabled",
+                "Disabling",
+                "Updating",
+                "Disabled",
+            ]),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["mapping"]["State"], "Disabled")
+        state_polls = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" in call
+        ]
+        self.assertEqual(len(state_polls), 6)
+
+    def test_activation_poll_exhaustion_is_bounded(self):
+        result, _, calls = self._run_mapping_reconcile(
+            self._mapping_state(poll_states=(
+                ["Disabled", "Disabled", "Disabled"]
+                + ["Enabling"] * 20
+            )),
+            target_enabled=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "event-source mapping did not reach its target state",
+            result.stderr,
+        )
+        state_polls = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" in call
+        ]
+        self.assertEqual(len(state_polls), 23)
+
+    def test_mapping_update_failure_propagates_without_final_verification(self):
+        result, _, calls = self._run_mapping_reconcile(
+            self._mapping_state(state_update_failure=True),
+            target_enabled=True,
+        )
+
+        self.assertEqual(result.returncode, 43)
+        full_gets = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" not in call
+        ]
+        self.assertEqual(len(full_gets), 1)
+
     def test_existing_disabled_partial_resources_are_reused(self):
         result, state, calls = self._run_mapping_reconcile(
             self._mapping_state()
@@ -542,21 +734,77 @@ class SemanticMemoryDeploymentTests(unittest.TestCase):
         self.assertEqual(operations.count("update-event-source-mapping"), 1)
         self.assertEqual(state["mapping"]["State"], "Disabled")
 
-    def test_rerun_reuses_mapping_and_still_forces_it_disabled(self):
+    def test_new_mapping_creation_always_begins_disabled_before_activation(self):
         result, state, calls = self._run_mapping_reconcile(
             {"mapping": None},
-            runs=2,
+            target_enabled=True,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        operations = [call[1] for call in calls]
-        self.assertEqual(operations.count("create-event-source-mapping"), 1)
-        self.assertEqual(operations.count("update-event-source-mapping"), 1)
-        self.assertEqual(state["mapping"]["State"], "Disabled")
+        creates = [
+            call for call in calls
+            if call[:2] == ["lambda", "create-event-source-mapping"]
+        ]
+        self.assertEqual(len(creates), 1)
+        self.assertIn("--no-enabled", creates[0])
+        self.assertNotIn("--enabled", creates[0])
+        self.assertEqual(state["mapping"]["State"], "Enabled")
         self.assertEqual(
             state["mapping"]["FunctionResponseTypes"],
             ["ReportBatchItemFailures"],
         )
+
+    def test_no_activation_occurs_after_an_earlier_deployment_failure(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state(configuration_update_failure=True),
+            target_enabled=True,
+        )
+
+        self.assertEqual(result.returncode, 44)
+        self.assertEqual(state["mapping"]["State"], "Disabled")
+        self.assertFalse(any(
+            call[:2] == ["lambda", "update-event-source-mapping"]
+            and "--enabled" in call
+            for call in calls
+        ))
+
+    def test_activation_occurs_only_after_alarm_and_mapping_verification(self):
+        configured_verification = self.deploy.index(
+            'verify_event_source_mapping "$MAPPING_STATE" "configured"'
+        )
+        alarm_verification = self.deploy.index(
+            '> "$BUILD_DIR/alarms.json"'
+        )
+        activation = self.deploy.index(
+            "\nreconcile_event_source_mapping_state\n",
+            alarm_verification,
+        )
+        self.assertLess(configured_verification, alarm_verification)
+        self.assertLess(alarm_verification, activation)
+
+    def test_final_deployed_state_is_fully_verified(self):
+        result, state, calls = self._run_mapping_reconcile(
+            self._mapping_state(),
+            target_enabled=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state["mapping"]["State"], "Enabled")
+        full_gets = [
+            call for call in calls
+            if call[:2] == ["lambda", "get-event-source-mapping"]
+            and "--query" not in call
+        ]
+        list_calls = [
+            call for call in calls
+            if call[:2] == ["lambda", "list-event-source-mappings"]
+        ]
+        self.assertEqual(len(full_gets), 2)
+        self.assertEqual(len(list_calls), 3)
+
+    def test_unsupported_mapping_waiter_is_absent(self):
+        self.assertNotIn("event-source-mapping-disabled", self.deploy)
+        self.assertNotIn("event-source-mapping-enabled", self.deploy)
 
     def test_deployment_never_invokes_or_processes_data(self):
         lowered = self.deploy.lower()
