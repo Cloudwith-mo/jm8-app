@@ -236,13 +236,27 @@ def _validated_vector(value: object) -> list[float]:
 
 
 def _validated_token_count(value: object) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value < 1
-        or value > EMBEDDING_MAX_INPUT_TOKENS
-    ):
+    if isinstance(value, bool):
         raise SemanticEmbeddingContractError(
             "embedding token count is invalid"
         )
-    return value
+
+    if isinstance(value, int):
+        token_count = value
+    elif isinstance(value, Decimal) and value.is_finite():
+        integral = value.to_integral_value()
+        if value != integral:
+            raise SemanticEmbeddingContractError(
+                "embedding token count is invalid"
+            )
+        token_count = int(integral)
+    else:
+        raise SemanticEmbeddingContractError(
+            "embedding token count is invalid"
+        )
+
+    if token_count < 1 or token_count > EMBEDDING_MAX_INPUT_TOKENS:
+        raise SemanticEmbeddingContractError(
+            "embedding token count is invalid"
+        )
+    return token_count

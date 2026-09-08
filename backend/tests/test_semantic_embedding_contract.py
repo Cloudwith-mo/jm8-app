@@ -233,6 +233,31 @@ class TestEmbeddingResponse(unittest.TestCase):
 
 
 class TestStoredEmbedding(unittest.TestCase):
+    def test_integral_dynamodb_decimal_token_count_is_accepted(self):
+        item = stored_embedding()
+        item["embeddingInputTokenCount"] = Decimal("17")
+
+        result = validate_stored_embedding(
+            item,
+            user_id=USER_ID,
+            content_digest=CONTENT_DIGEST,
+        )
+
+        self.assertEqual(result["embeddingInputTokenCount"], 17)
+        self.assertIsInstance(result["embeddingInputTokenCount"], int)
+
+    def test_nonintegral_and_nonfinite_decimal_token_counts_are_rejected(self):
+        for value in (Decimal("17.5"), Decimal("NaN")):
+            with self.subTest(value=str(value)):
+                item = stored_embedding()
+                item["embeddingInputTokenCount"] = value
+                with self.assertRaises(SemanticEmbeddingContractError):
+                    validate_stored_embedding(
+                        item,
+                        user_id=USER_ID,
+                        content_digest=CONTENT_DIGEST,
+                    )
+
     def test_complete_active_embedding_is_current(self):
         item = stored_embedding()
         self.assertTrue(
