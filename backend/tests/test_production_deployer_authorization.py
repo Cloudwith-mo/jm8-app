@@ -360,6 +360,37 @@ class PolicyGenerationTests(unittest.TestCase):
         )
         self.assertNotIn("dynamodb:DeleteTable", statement["Action"])
 
+    def test_semantic_vector_search_is_exact_and_least_privilege(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-foundation"
+        ]["Statement"]
+        matches = [
+            statement
+            for statement in statements
+            if "dynamodb:SearchVectors" in statement["Action"]
+        ]
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(
+            matches[0],
+            {
+                "Sid": "SearchProductionSemanticVectorIndex",
+                "Effect": "Allow",
+                "Action": ["dynamodb:SearchVectors"],
+                "Resource": (
+                    f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+                    "table/journalm8-prod-entry-chunks/index/"
+                    "SemanticEmbeddingIndex"
+                ),
+            },
+        )
+        self.assertNotIn("*", matches[0]["Resource"])
+        self.assertNotEqual(
+            matches[0]["Resource"],
+            f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+            "table/journalm8-prod-entry-chunks",
+        )
+
     def test_entry_chunks_runtime_policy_has_only_required_data_actions(self):
         source = (BIN_DIR / "create-resources").read_text(encoding="utf-8")
         policy_source = source.split(

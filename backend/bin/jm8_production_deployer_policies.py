@@ -129,6 +129,9 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         f"arn:aws:dynamodb:{region}:{ACCOUNT_ID}:"
         "table/journalm8-prod-entry-chunks"
     )
+    entry_chunks_vector_index_arn = (
+        f"{entry_chunks_table_arn}/index/SemanticEmbeddingIndex"
+    )
     semantic_worker_arn = (
         f"arn:aws:lambda:{region}:{ACCOUNT_ID}:function:"
         "journalm8-prod-semantic-memory-worker"
@@ -225,6 +228,13 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "dynamodb:UpdateTable",
             ),
             entry_chunks_table_arn,
+        ),
+        _statement(
+            "SearchProductionSemanticVectorIndex",
+            (
+                "dynamodb:SearchVectors",
+            ),
+            entry_chunks_vector_index_arn,
         ),
         _statement(
             "ManageProductionRawBucket",
