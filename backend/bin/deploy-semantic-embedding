@@ -266,6 +266,59 @@ if applied != expected:
     raise SystemExit("Semantic-embedding worker policy verification failed.")
 PY
 
+run_lambda_create_with_iam_propagation_retry() {
+  local error_file="$1"
+  shift
+
+  local max_attempts=5
+  local retry_waits=(5 10 20 30)
+  local attempt=1
+  local command_status
+  local wait_seconds
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    echo "Lambda create-function attempt ${attempt}/${max_attempts}." >&2
+
+    if "$@" 2> "$error_file"; then
+      rm -f "$error_file"
+      echo \
+        "Lambda create-function succeeded on attempt ${attempt}/${max_attempts}." \
+        >&2
+      return 0
+    else
+      command_status=$?
+    fi
+
+    if (
+      grep -Fq "InvalidParameterValueException" "$error_file" &&
+      grep -Fq \
+        "The role defined for the function cannot be assumed by Lambda" \
+        "$error_file"
+    ); then
+      if [ "$attempt" -eq "$max_attempts" ]; then
+        echo \
+          "Lambda create-function exhausted ${max_attempts} IAM propagation attempts." \
+          >&2
+        cat "$error_file" >&2
+        return "$command_status"
+      fi
+
+      wait_seconds="${retry_waits[$((attempt - 1))]}"
+      echo \
+        "Known Lambda role propagation delay; waiting ${wait_seconds} seconds before retry." \
+        >&2
+      sleep "$wait_seconds"
+      attempt=$((attempt + 1))
+    else
+      echo "Lambda create-function failed with a non-retryable AWS error." >&2
+      cat "$error_file" >&2
+      return "$command_status"
+    fi
+  done
+
+  return 1
+}
+
 if aws lambda get-function --function-name "$WORKER_FUNCTION_NAME" \
   --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$WORKER_FUNCTION_NAME" \
@@ -282,13 +335,15 @@ if aws lambda get-function --function-name "$WORKER_FUNCTION_NAME" \
   aws lambda wait function-updated --function-name "$WORKER_FUNCTION_NAME" \
     --profile "$AWS_PROFILE" --region "$AWS_REGION"
 else
-  aws lambda create-function --function-name "$WORKER_FUNCTION_NAME" \
-    --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" \
-    --handler semantic_embedding_worker.lambda_handler \
-    --zip-file "fileb://$ZIP_FILE" --timeout 120 --memory-size 512 \
-    --environment "Variables={ENTRY_CHUNKS_TABLE_NAME=${ENTRY_CHUNKS_TABLE_NAME}}" \
-    --tags App="$APP_NAME",Stage="$STAGE",ManagedBy=aws-cli \
-    --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  run_lambda_create_with_iam_propagation_retry \
+    "$BUILD_DIR/lambda-create.err" \
+    aws lambda create-function --function-name "$WORKER_FUNCTION_NAME" \
+      --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" \
+      --handler semantic_embedding_worker.lambda_handler \
+      --zip-file "fileb://$ZIP_FILE" --timeout 120 --memory-size 512 \
+      --environment "Variables={ENTRY_CHUNKS_TABLE_NAME=${ENTRY_CHUNKS_TABLE_NAME}}" \
+      --tags App="$APP_NAME",Stage="$STAGE",ManagedBy=aws-cli \
+      --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-active-v2 --function-name "$WORKER_FUNCTION_NAME" \
     --profile "$AWS_PROFILE" --region "$AWS_REGION"
 fi

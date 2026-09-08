@@ -66,6 +66,7 @@ LOG_DELIVERY_CONTROL_PLANE_ACTIONS = {
     "logs:UpdateLogDelivery",
 }
 RESOURCE_STAR_ACTIONS = {
+    "cloudwatch:DescribeAlarms",
     "cloudfront:CreateDistribution",
     "cloudfront:CreateOriginAccessControl",
     "cognito-idp:CreateUserPool",
@@ -718,9 +719,14 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             requested_region_condition,
         ),
         _statement(
+            "DescribeProductionAlarms",
+            ("cloudwatch:DescribeAlarms",),
+            "*",
+            requested_region_condition,
+        ),
+        _statement(
             "ManageProductionAlarms",
             (
-                "cloudwatch:DescribeAlarms",
                 "cloudwatch:PutMetricAlarm",
                 "cloudwatch:TagResource",
             ),

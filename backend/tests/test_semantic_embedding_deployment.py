@@ -5,7 +5,9 @@ import io
 import json
 from pathlib import Path
 import stat
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -90,6 +92,131 @@ class SemanticEmbeddingDeploymentTests(unittest.TestCase):
             'Variables={ENTRY_CHUNKS_TABLE_NAME=${ENTRY_CHUNKS_TABLE_NAME}}',
             self.deploy,
         )
+
+    def _lambda_create_retry_function(self):
+        marker = "run_lambda_create_with_iam_propagation_retry() {"
+        start = self.deploy.index(marker)
+        end = self.deploy.index(
+            "\n}\n\nif aws lambda get-function",
+            start,
+        ) + 2
+        return self.deploy[start:end]
+
+    def _run_lambda_create_retry_scenario(self, scenario):
+        harness = "\n\n".join((
+            "#!/usr/bin/env bash\nset -u",
+            self._lambda_create_retry_function(),
+            r'''
+scenario="$1"
+events_file="$2"
+attempt_file="$3"
+error_file="$4"
+
+sleep() {
+  printf 'sleep:%s\n' "$1" >> "$events_file"
+}
+
+fake_lambda_create() {
+  local requested_scenario="$1"
+  local current_attempt=0
+
+  if [ -f "$attempt_file" ]; then
+    IFS= read -r current_attempt < "$attempt_file"
+  fi
+
+  current_attempt=$((current_attempt + 1))
+  printf '%s\n' "$current_attempt" > "$attempt_file"
+  printf 'attempt:%s\n' "$current_attempt" >> "$events_file"
+
+  case "$requested_scenario" in
+    propagation_then_success)
+      if [ "$current_attempt" -eq 1 ]; then
+        printf '%s\n' \
+          'An error occurred (InvalidParameterValueException): The role defined for the function cannot be assumed by Lambda.' \
+          >&2
+        return 42
+      fi
+      return 0
+      ;;
+    propagation_exhausted)
+      printf '%s\n' \
+        'An error occurred (InvalidParameterValueException): The role defined for the function cannot be assumed by Lambda.' \
+        >&2
+      return 42
+      ;;
+    unrelated_error)
+      printf '%s\n' \
+        'An error occurred (InvalidParameterValueException): The image is invalid.' \
+        >&2
+      return 43
+      ;;
+  esac
+}
+
+set +e
+run_lambda_create_with_iam_propagation_retry \
+  "$error_file" \
+  fake_lambda_create \
+  "$scenario"
+status=$?
+set -e
+
+printf 'status:%s\n' "$status" >> "$events_file"
+exit "$status"
+'''.strip(),
+        ))
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            harness_path = directory_path / "retry-harness.sh"
+            events_path = directory_path / "events.txt"
+            attempt_path = directory_path / "attempt.txt"
+            error_path = directory_path / "aws-error.txt"
+            harness_path.write_text(harness, encoding="utf-8")
+            result = subprocess.run(
+                ["bash", str(harness_path), scenario, str(events_path),
+                 str(attempt_path), str(error_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            events = events_path.read_text(encoding="utf-8").splitlines()
+        return result, events
+
+    def test_lambda_role_propagation_retry_reaches_success(self):
+        result, events = self._run_lambda_create_retry_scenario(
+            "propagation_then_success"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            events,
+            ["attempt:1", "sleep:5", "attempt:2", "status:0"],
+        )
+        self.assertIn("waiting 5 seconds", result.stderr)
+        self.assertIn("succeeded on attempt 2/5", result.stderr)
+
+    def test_lambda_role_propagation_retry_is_bounded(self):
+        result, events = self._run_lambda_create_retry_scenario(
+            "propagation_exhausted"
+        )
+        self.assertEqual(result.returncode, 42)
+        self.assertEqual(
+            [event for event in events if event.startswith("sleep:")],
+            ["sleep:5", "sleep:10", "sleep:20", "sleep:30"],
+        )
+        self.assertEqual(
+            [event for event in events if event.startswith("attempt:")],
+            ["attempt:1", "attempt:2", "attempt:3", "attempt:4", "attempt:5"],
+        )
+        self.assertIn("exhausted 5 IAM propagation attempts", result.stderr)
+
+    def test_lambda_create_retry_fails_closed_for_other_errors(self):
+        result, events = self._run_lambda_create_retry_scenario(
+            "unrelated_error"
+        )
+        self.assertEqual(result.returncode, 43)
+        self.assertEqual(events, ["attempt:1", "status:43"])
+        self.assertIn("non-retryable AWS error", result.stderr)
 
     def test_worker_policy_is_exact_and_has_no_data_plane_escape_hatches(self):
         body = self.deploy.split(
