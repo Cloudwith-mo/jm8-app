@@ -29,6 +29,15 @@ from insights_ask_answer import (
     AskAnswerResponseError,
     answer_journal_history,
 )
+from insights_ask_semantic_context import (
+    AskSemanticContextError,
+    compose_ask_context_with_semantic_evidence,
+)
+from semantic_query_retrieval import (
+    SemanticQueryInputError,
+    SemanticQueryUnavailableError,
+    retrieve_semantic_query_evidence,
+)
 from ask_usage import (
     AskUsageLimitError,
     AskUsageUnavailableError,
@@ -93,6 +102,7 @@ from account_deletion_guard import (
 )
 from ocr_workflow_client import start_ocr_execution
 import base64
+import boto3
 import json
 import os
 from typing import Any
@@ -120,6 +130,32 @@ from storage import (
     update_entry_review,
     delete_entry,
 )
+
+
+def build_semantic_ask_context(
+    user_id: str,
+    ask_context: dict[str, Any],
+) -> dict[str, Any]:
+    semantic_retrieval = (
+        retrieve_semantic_query_evidence(
+            boto3.client("bedrock-runtime"),
+            boto3.client("dynamodb"),
+            table_name=os.environ[
+                "ENTRY_CHUNKS_TABLE_NAME"
+            ],
+            user_id=user_id,
+            question=ask_context.get(
+                "question"
+            ),
+            top_k=24,
+        )
+    )
+    return (
+        compose_ask_context_with_semantic_evidence(
+            ask_context,
+            semantic_retrieval,
+        )
+    )
 
 
 def deletion_guard_response(user_id):
@@ -587,6 +623,76 @@ def lambda_handler(event, context):
                     503,
                     exc.payload,
                 )
+
+            try:
+                ask_context = (
+                    build_semantic_ask_context(
+                        user_id,
+                        ask_context,
+                    )
+                )
+
+            except SemanticQueryUnavailableError:
+                fail_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
+                print(json.dumps({
+                    "event": (
+                        "ask_jm8_semantic_"
+                        "retrieval_failed"
+                    ),
+                    "failureCode": (
+                        "SemanticQueryUnavailableError"
+                    ),
+                    "retryable": True,
+                }))
+
+                return response(503, {
+                    "error": (
+                        "AskJM8RetrievalUnavailable"
+                    ),
+                    "message": (
+                        "JM8 could not retrieve "
+                        "journal evidence right now."
+                    ),
+                    "retryable": True,
+                    "retryAfterSeconds": 2,
+                })
+
+            except (
+                SemanticQueryInputError,
+                AskSemanticContextError,
+                KeyError,
+            ) as exc:
+                fail_ask_usage(
+                    user_id,
+                    usage_reservation,
+                )
+
+                print(json.dumps({
+                    "event": (
+                        "ask_jm8_semantic_"
+                        "retrieval_failed"
+                    ),
+                    "failureCode": (
+                        type(exc).__name__
+                    ),
+                    "retryable": False,
+                }))
+
+                return response(502, {
+                    "error": (
+                        "AskJM8InvalidRetrieval"
+                    ),
+                    "message": (
+                        "JM8 could not validate "
+                        "the retrieved journal "
+                        "evidence."
+                    ),
+                    "retryable": False,
+                })
 
             try:
                 answer = (

@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from datetime import (
     datetime,
@@ -22,12 +23,15 @@ from llm_journal_analyzer import (
 
 
 ASK_ANSWER_VERSION = "1.0"
-ASK_PROMPT_VERSION = "ask-jm8-v1"
+ASK_PROMPT_VERSION = "ask-jm8-v2"
 
 MAX_MODEL_CONTEXT_CHARACTERS = 70_000
 MAX_MODEL_SOURCE_SIGNALS = 10
 MAX_MODEL_TIMELINE_PERIODS = 12
 MAX_MODEL_AGGREGATE_ITEMS = 6
+MAX_MODEL_SEMANTIC_EVIDENCE_ITEMS = 8
+MAX_MODEL_SEMANTIC_EXCERPT_CHARACTERS = 1_200
+MAX_MODEL_SEMANTIC_EVIDENCE_CHARACTERS = 8_000
 
 MAX_EVIDENCE_ITEMS = 6
 MAX_TAKEAWAYS = 6
@@ -214,9 +218,9 @@ ASK_ANSWER_OUTPUT_SCHEMA: dict[
 SYSTEM_PROMPT = """
 You are JM8, a private journal-history intelligence engine.
 
-Answer the user's question using only the supplied structured journal
-analysis context. The context contains derived analysis signals, not the
-writer's raw journal transcript.
+Answer the user's question using only the supplied private journal context.
+The context may contain derived analysis signals and a bounded set of raw
+journal excerpts selected through tenant-isolated semantic retrieval.
 
 Grounding rules:
 
@@ -225,10 +229,10 @@ Grounding rules:
 2. Do not claim certainty when the context is partial, ambiguous, or
    insufficient.
 3. Do not diagnose mental-health conditions or make clinical judgments.
-4. Do not produce direct quotations. Evidence must be concise paraphrases
-   of the supplied derived signals.
-5. Evidence dates and source types must come from the supplied source
-   signals.
+4. Do not reproduce or directly quote journal excerpts. Evidence must be a
+   concise paraphrase of a supplied source signal or semantic excerpt.
+5. Evidence dates and source types must exactly match a supplied source
+   signal or semantic excerpt.
 6. A related theme must already appear in the supplied aggregate themes
    or emerging topics.
 7. A growth signal must already appear in the supplied aggregate growth
@@ -244,6 +248,8 @@ Grounding rules:
 13. suggestedFollowUps must be questions the user could ask JM8 next.
 14. Return INSUFFICIENT_CONTEXT when the available evidence cannot
     responsibly answer the question.
+15. Distinguish what the journal evidence supports from your inference. Do
+    not treat vector similarity as proof that a claim is true.
 """.strip()
 
 
@@ -768,6 +774,119 @@ def normalize_coverage(
     }
 
 
+def normalize_semantic_evidence(
+    value: Any,
+) -> dict[str, Any]:
+    semantic = (
+        value
+        if isinstance(value, dict)
+        else {}
+    )
+
+    status = clean_text_value(
+        semantic.get("status"),
+        max_characters=20,
+    ).upper()
+
+    if status not in {"EMPTY", "READY"}:
+        status = "EMPTY"
+
+    raw_items = semantic.get("items")
+    items: list[dict[str, Any]] = []
+    included_characters = 0
+
+    for item in (
+        raw_items
+        if isinstance(raw_items, list)
+        else []
+    ):
+        if not isinstance(item, dict):
+            continue
+
+        evidence_date = clean_text_value(
+            item.get("date"),
+            max_characters=10,
+        )
+        source_type = clean_text_value(
+            item.get("sourceType"),
+            max_characters=20,
+        ).casefold()
+        excerpt = clean_text_value(
+            item.get("excerpt"),
+            max_characters=(
+                MAX_MODEL_SEMANTIC_EXCERPT_CHARACTERS
+            ),
+        )
+        distance = item.get("distance")
+
+        if (
+            not evidence_date
+            or source_type not in {"typed", "image", "unknown"}
+            or not excerpt
+            or isinstance(distance, bool)
+            or not isinstance(distance, (int, float))
+            or not math.isfinite(float(distance))
+        ):
+            continue
+
+        if (
+            included_characters + len(excerpt)
+            > MAX_MODEL_SEMANTIC_EVIDENCE_CHARACTERS
+        ):
+            continue
+
+        items.append({
+            "date": evidence_date,
+            "sourceType": source_type,
+            "distance": round(float(distance), 8),
+            "excerpt": excerpt,
+        })
+        included_characters += len(excerpt)
+
+        if len(items) >= MAX_MODEL_SEMANTIC_EVIDENCE_ITEMS:
+            break
+
+    if not items:
+        status = "EMPTY"
+
+    return {
+        "semanticContextVersion": clean_text_value(
+            semantic.get("semanticContextVersion"),
+            max_characters=30,
+        ),
+        "retrievalVersion": clean_text_value(
+            semantic.get("retrievalVersion"),
+            max_characters=30,
+        ),
+        "status": status,
+        "retrievedEvidence": max(
+            integer_value(semantic.get("retrievedEvidence")),
+            0,
+        ),
+        "includedEvidence": len(items),
+        "scopeExcludedEvidence": max(
+            integer_value(semantic.get("scopeExcludedEvidence")),
+            0,
+        ),
+        "invalidExcludedEvidence": max(
+            integer_value(semantic.get("invalidExcludedEvidence")),
+            0,
+        ),
+        "duplicateExcludedEvidence": max(
+            integer_value(semantic.get("duplicateExcludedEvidence")),
+            0,
+        ),
+        "limitExcludedEvidence": max(
+            integer_value(semantic.get("limitExcludedEvidence")),
+            0,
+        ),
+        "contextTruncated": bool(
+            semantic.get("contextTruncated")
+        ),
+        "items": items,
+    }
+
+
 def prepare_model_context(
     context: Any,
 ) -> dict[str, Any]:
@@ -910,6 +1029,13 @@ def prepare_model_context(
         "timeline": timeline,
         "sourceSignals": (
             source_signals
+        ),
+        "semanticEvidence": (
+            normalize_semantic_evidence(
+                context.get(
+                    "semanticEvidence"
+                )
+            )
         ),
     }
 
@@ -1132,6 +1258,41 @@ def normalize_evidence(
                     source_type,
                 ))
 
+    semantic_evidence = context.get(
+        "semanticEvidence"
+    )
+
+    if isinstance(semantic_evidence, dict):
+        semantic_items = semantic_evidence.get(
+            "items"
+        )
+        for item in (
+            semantic_items
+            if isinstance(semantic_items, list)
+            else []
+        ):
+            if not isinstance(item, dict):
+                continue
+
+            evidence_date = clean_text_value(
+                item.get("date"),
+                max_characters=10,
+            )
+            source_type = clean_text_value(
+                item.get("sourceType"),
+                max_characters=20,
+            ).casefold()
+
+            if (
+                evidence_date
+                and source_type
+                in {"typed", "image", "unknown"}
+            ):
+                allowed_sources.add((
+                    evidence_date,
+                    source_type,
+                ))
+
     results: list[
         dict[str, Any]
     ] = []
@@ -1299,6 +1460,44 @@ def deterministic_limitations(
             ),
             max_items=MAX_LIMITATIONS,
         )
+
+    semantic = context.get(
+        "semanticEvidence"
+    )
+
+    if isinstance(semantic, dict):
+        if bool(
+            semantic.get(
+                "contextTruncated"
+            )
+        ):
+            append_unique(
+                limitations,
+                (
+                    "JM8 used a bounded subset "
+                    "of the matching journal "
+                    "passages for this answer."
+                ),
+                max_items=MAX_LIMITATIONS,
+            )
+
+        if (
+            integer_value(
+                semantic.get(
+                    "scopeExcludedEvidence"
+                )
+            )
+            > 0
+        ):
+            append_unique(
+                limitations,
+                (
+                    "Semantic matches outside "
+                    "the selected date range "
+                    "were excluded."
+                ),
+                max_items=MAX_LIMITATIONS,
+            )
 
     return limitations
 
@@ -1676,7 +1875,16 @@ def answer_journal_history(
         ]["analyzedEntries"]
     )
 
-    if analyzed_entries == 0:
+    semantic_items = (
+        prepared_context[
+            "semanticEvidence"
+        ]["items"]
+    )
+
+    if (
+        analyzed_entries == 0
+        and not semantic_items
+    ):
         return build_empty_answer(
             prepared_context,
             now=now,
@@ -1714,7 +1922,7 @@ def answer_journal_history(
                                 "Answer this private "
                                 "journal-history question "
                                 "using only the supplied "
-                                "structured context.\n\n"
+                                "grounded context.\n\n"
                                 f"{context_json}"
                             ),
                         },
@@ -1734,7 +1942,7 @@ def answer_journal_history(
                         "jsonSchema": {
                             "name": (
                                 "jm8_history_"
-                                "answer_v1"
+                                "answer_v2"
                             ),
                             "description": (
                                 "Grounded structured "
@@ -1897,6 +2105,11 @@ def answer_journal_history(
                 prepared_context[
                     "sourceSignals"
                 ]
+            ),
+            "semanticEvidence": len(
+                prepared_context[
+                    "semanticEvidence"
+                ]["items"]
             ),
             "evidenceItems": len(
                 normalized["evidence"]

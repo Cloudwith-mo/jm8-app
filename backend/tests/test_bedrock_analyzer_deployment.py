@@ -11,6 +11,7 @@ import unittest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BIN_DIR = BACKEND_ROOT / "bin"
+FUNCTION_DIR = BACKEND_ROOT / "function"
 DEPLOY_SCRIPT = BIN_DIR / "deploy"
 CONFIGURE_SCRIPT = BIN_DIR / "configure-bedrock-analyzer"
 POLICY_HELPER = BIN_DIR / "jm8_bedrock_analysis_policy.sh"
@@ -18,10 +19,15 @@ POLICY_TOOL = BIN_DIR / "jm8_bedrock_analysis_policy.py"
 DEFAULT_PROFILE = object()
 
 sys.path.insert(0, str(BIN_DIR))
+sys.path.insert(0, str(FUNCTION_DIR))
 
 from jm8_bedrock_analysis_policy import (  # noqa: E402
+    SEMANTIC_EMBEDDING_MODEL_ID,
     build_policy,
     verify_applied_policy,
+)
+from semantic_embedding_contract import (  # noqa: E402
+    EMBEDDING_MODEL_ID,
 )
 
 
@@ -46,6 +52,10 @@ class BedrockAnalyzerDeploymentTests(unittest.TestCase):
             "anthropic.claude-haiku-test-v1:0"
         ),
     ]
+    SEMANTIC_MODEL_ARN = (
+        "arn:aws:bedrock:us-east-1::foundation-model/"
+        "amazon.titan-embed-text-v2:0"
+    )
 
     @classmethod
     def setUpClass(cls):
@@ -291,6 +301,10 @@ fi
             )
 
     def test_policy_resources_actions_and_condition_are_exact(self):
+        self.assertEqual(
+            SEMANTIC_EMBEDDING_MODEL_ID,
+            EMBEDDING_MODEL_ID,
+        )
         policy = self._build_policy()
         statements = {
             statement["Sid"]: statement
@@ -323,6 +337,15 @@ fi
                 "StringEquals": {
                     "bedrock:InferenceProfileArn": self.PROFILE_ARN,
                 },
+            },
+        )
+        self.assertEqual(
+            statements["InvokeJM8SemanticQueryEmbeddingModel"],
+            {
+                "Sid": "InvokeJM8SemanticQueryEmbeddingModel",
+                "Effect": "Allow",
+                "Action": ["bedrock:InvokeModel"],
+                "Resource": self.SEMANTIC_MODEL_ARN,
             },
         )
 
@@ -470,6 +493,20 @@ fi
         self.assertNotIn(">> .env", self.deploy)
         self.assertNotIn("  .env \\", self.deploy)
         self.assertIn("  .env \\", self.configure)
+
+    def test_api_receives_semantic_retrieval_table_environment(self):
+        self.assertIn(
+            ': "${ENTRY_CHUNKS_TABLE_NAME:?',
+            self.deploy,
+        )
+        self.assertIn(
+            "export ENTRY_CHUNKS_TABLE_NAME",
+            self.deploy,
+        )
+        self.assertIn(
+            '"ENTRY_CHUNKS_TABLE_NAME",',
+            self.deploy,
+        )
 
     def test_no_wildcards_or_weakened_shell_behavior(self):
         related_sources = "\n".join((

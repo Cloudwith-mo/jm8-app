@@ -560,11 +560,20 @@ cat > .build/lambda-app-policy.json <<POLICY
       "Effect": "Allow",
       "Action": [
         "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
         "dynamodb:PutItem",
         "dynamodb:Query",
         "dynamodb:BatchWriteItem"
       ],
       "Resource": "arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${ENTRY_CHUNKS_TABLE_NAME}"
+    },
+    {
+      "Sid": "DynamoDBSemanticVectorSearch",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:SearchVectors"
+      ],
+      "Resource": "arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/${ENTRY_CHUNKS_TABLE_NAME}/index/SemanticEmbeddingIndex"
     },
     {
       "Sid": "S3JournalM8RawUploadAccess",

@@ -2,7 +2,7 @@ import json
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 os.environ.setdefault(
@@ -36,11 +36,20 @@ os.environ.setdefault(
 )
 
 
-from app import lambda_handler  # noqa: E402
+from app import (  # noqa: E402
+    build_semantic_ask_context,
+    lambda_handler,
+)
 from insights_ask_answer import (  # noqa: E402
     AskAnswerInputError,
     AskAnswerInvocationError,
     AskAnswerResponseError,
+)
+from insights_ask_semantic_context import (  # noqa: E402
+    AskSemanticContextError,
+)
+from semantic_query_retrieval import (  # noqa: E402
+    SemanticQueryUnavailableError,
 )
 
 
@@ -129,6 +138,57 @@ class AskJm8ApiTests(
         self.guard = patch("app.ensure_user_mutation_allowed")
         self.guard.start()
         self.addCleanup(self.guard.stop)
+        self.semantic_context = patch(
+            "app.build_semantic_ask_context",
+            side_effect=lambda _user_id, context: {
+                **context,
+                "semanticEvidence": {
+                    "status": "EMPTY",
+                    "items": [],
+                },
+            },
+        )
+        self.build_semantic_context = self.semantic_context.start()
+        self.addCleanup(self.semantic_context.stop)
+
+    @patch("app.compose_ask_context_with_semantic_evidence")
+    @patch("app.retrieve_semantic_query_evidence")
+    @patch("app.boto3.client")
+    def test_semantic_context_uses_authenticated_user_and_runtime_clients(
+        self,
+        create_client,
+        retrieve_evidence,
+        compose_context,
+    ):
+        bedrock = object()
+        dynamodb = object()
+        create_client.side_effect = [bedrock, dynamodb]
+        context = {"question": "What challenge keeps returning?"}
+        semantic = {"semanticRetrievalStatus": "EMPTY"}
+        combined = {**context, "semanticEvidence": {"items": []}}
+        retrieve_evidence.return_value = semantic
+        compose_context.return_value = combined
+
+        with patch.dict(
+            os.environ,
+            {"ENTRY_CHUNKS_TABLE_NAME": "journalm8-test-entry-chunks"},
+        ):
+            result = build_semantic_ask_context("private-user", context)
+
+        self.assertIs(result, combined)
+        self.assertEqual(
+            create_client.call_args_list,
+            [call("bedrock-runtime"), call("dynamodb")],
+        )
+        retrieve_evidence.assert_called_once_with(
+            bedrock,
+            dynamodb,
+            table_name="journalm8-test-entry-chunks",
+            user_id="private-user",
+            question="What challenge keeps returning?",
+            top_k=24,
+        )
+        compose_context.assert_called_once_with(context, semantic)
 
     @patch(
         "app.complete_ask_usage"
@@ -262,6 +322,11 @@ class AskJm8ApiTests(
 
         reserve_usage.assert_called_once()
 
+        self.build_semantic_context.assert_called_once_with(
+            "private-user",
+            reserve_usage.call_args.args[1],
+        )
+
         persist_history.assert_called_once_with(
             "private-user",
             answer_history.return_value,
@@ -273,6 +338,63 @@ class AskJm8ApiTests(
             body["history"]["historyId"],
             "askhist_api123456789012",
         )
+
+    @patch("app.fail_ask_usage")
+    @patch("app.reserve_ask_usage")
+    @patch("app.list_insights_overview_entries")
+    def test_semantic_retrieval_failure_releases_usage_and_is_sanitized(
+        self,
+        list_entries,
+        reserve_usage,
+        fail_usage,
+    ):
+        list_entries.return_value = [analyzed_entry()]
+        reservation = {"reservationId": "private-reservation"}
+        reserve_usage.return_value = reservation
+        self.build_semantic_context.side_effect = (
+            SemanticQueryUnavailableError("private provider detail")
+        )
+
+        result = lambda_handler(
+            api_event({"question": "What challenge keeps returning?"}),
+            None,
+        )
+        body = json.loads(result["body"])
+
+        self.assertEqual(result["statusCode"], 503)
+        self.assertEqual(body["error"], "AskJM8RetrievalUnavailable")
+        self.assertTrue(body["retryable"])
+        fail_usage.assert_called_once_with("private-user", reservation)
+        self.assertNotIn("private provider detail", result["body"])
+        self.assertNotIn("private-reservation", result["body"])
+
+    @patch("app.fail_ask_usage")
+    @patch("app.reserve_ask_usage")
+    @patch("app.list_insights_overview_entries")
+    def test_invalid_semantic_context_releases_usage_and_fails_closed(
+        self,
+        list_entries,
+        reserve_usage,
+        fail_usage,
+    ):
+        list_entries.return_value = [analyzed_entry()]
+        reservation = {"reservationId": "private-reservation"}
+        reserve_usage.return_value = reservation
+        self.build_semantic_context.side_effect = AskSemanticContextError(
+            "private malformed retrieval detail"
+        )
+
+        result = lambda_handler(
+            api_event({"question": "What challenge keeps returning?"}),
+            None,
+        )
+        body = json.loads(result["body"])
+
+        self.assertEqual(result["statusCode"], 502)
+        self.assertEqual(body["error"], "AskJM8InvalidRetrieval")
+        self.assertFalse(body["retryable"])
+        fail_usage.assert_called_once_with("private-user", reservation)
+        self.assertNotIn("private malformed", result["body"])
 
     @patch(
         "app."
@@ -673,9 +795,9 @@ class AskJm8ApiTests(
             response["body"],
         )
 
-    @patch(
-        "app.persist_ask_history"
-    )
+    @patch("app.complete_ask_usage")
+    @patch("app.reserve_ask_usage")
+    @patch("app.persist_ask_history")
     @patch(
         "insights_ask_answer."
         "create_bedrock_client"
@@ -689,6 +811,8 @@ class AskJm8ApiTests(
         list_entries,
         create_client,
         persist_history,
+        reserve_usage,
+        complete_usage,
     ):
         list_entries.return_value = []
 
@@ -728,6 +852,8 @@ class AskJm8ApiTests(
         )
 
         create_client.assert_not_called()
+        reserve_usage.assert_called_once()
+        complete_usage.assert_called_once()
 
     def test_deployment_scripts_include_secured_route(
         self,

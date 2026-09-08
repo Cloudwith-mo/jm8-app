@@ -417,6 +417,7 @@ class PolicyGenerationTests(unittest.TestCase):
             set(statement["Action"]),
             {
                 "dynamodb:GetItem",
+                "dynamodb:BatchGetItem",
                 "dynamodb:PutItem",
                 "dynamodb:Query",
                 "dynamodb:BatchWriteItem",
@@ -428,6 +429,25 @@ class PolicyGenerationTests(unittest.TestCase):
                 f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
                 "table/journalm8-prod-entry-chunks"
             ),
+        )
+
+        vector_statement = next(
+            item
+            for item in policy["Statement"]
+            if item["Sid"] == "DynamoDBSemanticVectorSearch"
+        )
+        self.assertEqual(
+            vector_statement,
+            {
+                "Sid": "DynamoDBSemanticVectorSearch",
+                "Effect": "Allow",
+                "Action": ["dynamodb:SearchVectors"],
+                "Resource": (
+                    f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+                    "table/journalm8-prod-entry-chunks/index/"
+                    "SemanticEmbeddingIndex"
+                ),
+            },
         )
         self.assertNotIn("*", statement["Resource"])
         self.assertNotIn("dynamodb:Scan", statement["Action"])
