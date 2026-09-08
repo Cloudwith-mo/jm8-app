@@ -17,6 +17,7 @@ sys.path.insert(0, str(BIN_DIR))
 from jm8_environment_contract import (  # noqa: E402
     EnvironmentContractError,
     validate_entry_chunks_table_description,
+    validate_entry_chunks_stream_description,
     validate_entry_chunks_table_pitr,
     validate_entry_chunks_table_tags,
 )
@@ -352,6 +353,54 @@ class SemanticMemoryResourceTests(unittest.TestCase):
                     }
                 }
             })
+
+    def test_entry_chunks_description_accepts_only_the_embedding_stream(self):
+        state = self._compatible_state()
+        table = {
+            "TableName": state["name"],
+            "TableArn": state["arn"],
+            "TableStatus": state["status"],
+            "KeySchema": state["key_schema"],
+            "AttributeDefinitions": state["attributes"],
+            "BillingModeSummary": {"BillingMode": state["billing_mode"]},
+            "StreamSpecification": {
+                "StreamEnabled": True,
+                "StreamViewType": "NEW_AND_OLD_IMAGES",
+            },
+            "LatestStreamArn": state["arn"] + "/stream/version",
+        }
+        document = {"Table": table}
+        self.assertEqual(
+            validate_entry_chunks_stream_description(
+                document,
+                app_name="journalm8",
+                stage="dev",
+                account_id="114743615542",
+                region="us-east-1",
+                table_name="journalm8-dev-entry-chunks",
+                require_stream=True,
+            ),
+            "REUSE",
+        )
+        for invalid in ("KEYS_ONLY", "NEW_IMAGE", "OLD_IMAGE"):
+            with self.subTest(stream_view_type=invalid):
+                broken = {"Table": {
+                    **table,
+                    "StreamSpecification": {
+                        "StreamEnabled": True,
+                        "StreamViewType": invalid,
+                    },
+                }}
+                with self.assertRaises(EnvironmentContractError):
+                    validate_entry_chunks_stream_description(
+                        broken,
+                        app_name="journalm8",
+                        stage="dev",
+                        account_id="114743615542",
+                        region="us-east-1",
+                        table_name="journalm8-dev-entry-chunks",
+                        require_stream=False,
+                    )
 
     def test_entry_chunks_provisioner_has_no_forbidden_features_or_operations(self):
         normalized = self.function_source.lower()

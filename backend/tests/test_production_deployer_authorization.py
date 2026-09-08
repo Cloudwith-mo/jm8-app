@@ -984,6 +984,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "deploy-observability",
             "deploy-account-export",
             "deploy-semantic-memory",
+            "deploy-semantic-embedding",
             "deploy-analysis-observability",
             "deploy-bedrock-budget",
             "deploy-production-budget",
@@ -1121,6 +1122,10 @@ class PolicyGenerationTests(unittest.TestCase):
                 (
                     f"arn:aws:iam::{ACCOUNT_ID}:role/"
                     "journalm8-prod-semantic-memory-worker-role"
+                ),
+                (
+                    f"arn:aws:iam::{ACCOUNT_ID}:role/"
+                    "journalm8-prod-semantic-embedding-worker-role"
                 ),
             },
         )

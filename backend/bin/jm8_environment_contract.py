@@ -57,6 +57,7 @@ ENTRY_CHUNKS_REQUIRED_OPERATIONS = {
     "create-resources",
     "deploy",
     "deploy-account-deletion",
+    "deploy-semantic-embedding",
     "deploy-semantic-memory",
 }
 FRONTEND_STACK_COMPLETE_STATUSES = {
@@ -407,6 +408,10 @@ def validate_entry_chunks_table_description(
     stream_enabled = (
         stream.get("StreamEnabled") if isinstance(stream, Mapping) else False
     )
+    stream_view_type = (
+        stream.get("StreamViewType") if isinstance(stream, Mapping) else None
+    )
+    latest_stream_arn = table.get("LatestStreamArn")
 
     if (
         table.get("TableName") != table_name
@@ -420,16 +425,55 @@ def validate_entry_chunks_table_description(
         or bool(table.get("GlobalSecondaryIndexes"))
         or bool(table.get("LocalSecondaryIndexes"))
         or bool(table.get("VectorIndexes"))
-        or stream_enabled is not False
     ):
         raise EnvironmentContractError(
             "Entry chunks table does not match the required contract"
+        )
+    if stream_enabled and (
+        stream_view_type != "NEW_AND_OLD_IMAGES"
+        or not isinstance(latest_stream_arn, str)
+        or not latest_stream_arn.startswith(f"{expected_arn}/stream/")
+    ):
+        raise EnvironmentContractError(
+            "Entry chunks table stream does not match the required contract"
         )
     if require_deletion_protection and table.get("DeletionProtectionEnabled") is not True:
         raise EnvironmentContractError(
             "Entry chunks table deletion protection is not enabled"
         )
     return expected_arn
+
+
+def validate_entry_chunks_stream_description(
+    document: Mapping[str, Any],
+    *,
+    app_name: str,
+    stage: str,
+    account_id: str,
+    region: str,
+    table_name: str,
+    require_stream: bool,
+) -> str:
+    """Validate or request the exact EntryChunks embedding stream."""
+
+    validate_entry_chunks_table_description(
+        document,
+        app_name=app_name,
+        stage=stage,
+        account_id=account_id,
+        region=region,
+        table_name=table_name,
+    )
+    table = document["Table"]
+    stream = table.get("StreamSpecification")
+    stream_enabled = (
+        stream.get("StreamEnabled") if isinstance(stream, Mapping) else False
+    )
+    if stream_enabled:
+        return "REUSE"
+    if require_stream:
+        raise EnvironmentContractError("Entry chunks table stream is not enabled")
+    return "ENABLE"
 
 
 def validate_entry_chunks_table_tags(
@@ -1097,6 +1141,27 @@ def validate_semantic_memory_activation(
         )
 
 
+def validate_semantic_embedding_activation(
+    stage: str,
+    environment: Mapping[str, object],
+) -> None:
+    """Validate the independent semantic-embedding mapping activation gate."""
+
+    enabled = environment.get("SEMANTIC_EMBEDDING_MAPPING_ENABLED")
+    if enabled not in {"true", "false"}:
+        raise EnvironmentContractError(
+            "SEMANTIC_EMBEDDING_MAPPING_ENABLED must be exactly true or false"
+        )
+    if (
+        enabled == "true"
+        and environment.get("SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION") != stage
+    ):
+        raise EnvironmentContractError(
+            "Semantic-embedding activation requires "
+            "SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION=$STAGE"
+        )
+
+
 def _normalize_origin(origin: str) -> str:
     parsed = urlsplit(origin)
 
@@ -1228,6 +1293,8 @@ def validate_environment_contract() -> dict:
     operation = os.environ.get("JM8_OPERATION", "").strip()
     if operation.lower() == "deploy-semantic-memory":
         validate_semantic_memory_activation(stage, os.environ)
+    if operation.lower() == "deploy-semantic-embedding":
+        validate_semantic_embedding_activation(stage, os.environ)
 
     # Production controls are checked before STS so an unapproved profile or
     # incomplete same-account acknowledgment cannot initiate even a read call.
@@ -1329,6 +1396,8 @@ def validate_operation_specific(
 
     if op == "deploy-semantic-memory":
         validate_semantic_memory_activation(stage, os.environ)
+    if op == "deploy-semantic-embedding":
+        validate_semantic_embedding_activation(stage, os.environ)
 
     if op == "deploy":
         stripe_secret_arn = os.environ.get("STRIPE_SECRET_ARN", "").strip()
@@ -1622,6 +1691,25 @@ def main(argv: list[str]) -> None:
                     "Entry chunks table PITR arguments are invalid"
                 )
             validate_entry_chunks_table_pitr(_load_contract_json(argv[2]))
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "entry-chunks-stream":
+        try:
+            if len(argv) != 9 or argv[8] not in {"before", "after"}:
+                raise EnvironmentContractError(
+                    "Entry chunks table stream arguments are invalid"
+                )
+            print(validate_entry_chunks_stream_description(
+                _load_contract_json(argv[2]),
+                app_name=argv[3],
+                stage=argv[4],
+                account_id=argv[5],
+                region=argv[6],
+                table_name=argv[7],
+                require_stream=argv[8] == "after",
+            ))
             sys.exit(0)
         except EnvironmentContractError as exc:
             print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)

@@ -530,3 +530,7 @@ aws lambda get-function \
 # Reconcile the semantic-memory worker and its event-source mapping in the
 # intentionally disabled state. Activation requires a future explicit gate.
 ./bin/deploy-semantic-memory
+
+# Reconcile the semantic-embedding worker after semantic-memory infrastructure.
+# Its EntryChunks mapping is independently gated and disabled by default.
+./bin/deploy-semantic-embedding
