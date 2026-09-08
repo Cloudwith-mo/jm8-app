@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+: "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required. Run: source .env}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="deploy-semantic-vector-index"
+jm8_validate_contract_or_exit
+
+BUILD_DIR="${BACKEND_DIR}/.build/semantic-vector-index"
+INDEX_NAME="SemanticEmbeddingIndex"
+PARTITION_ATTRIBUTE="embeddingPartition"
+MAX_ATTEMPTS=180
+POLL_SECONDS=10
+
+CALLER_ARN="$(aws sts get-caller-identity \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --query Arn --output text)"
+if [[ ! "$CALLER_ARN" =~ ^arn:([a-z0-9-]+):(iam|sts)::([0-9]{12}): ]]; then
+  echo "AWS caller identity is malformed." >&2
+  exit 1
+fi
+ACCOUNT_ID="${BASH_REMATCH[3]}"
+if [ "$ACCOUNT_ID" != "$EXPECTED_AWS_ACCOUNT_ID" ]; then
+  echo "AWS caller account does not match the deployment contract." >&2
+  exit 1
+fi
+
+mkdir -p "$BUILD_DIR"
+
+describe_index() {
+  aws dynamodb describe-table \
+    --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+    > "$BUILD_DIR/entry-chunks.json"
+}
+
+classify_index() {
+  python3 "$SCRIPT_DIR/jm8_environment_contract.py" \
+    entry-chunks-vector-index "$BUILD_DIR/entry-chunks.json" \
+    "$APP_NAME" "$STAGE" "$ACCOUNT_ID" "$AWS_REGION" \
+    "$ENTRY_CHUNKS_TABLE_NAME"
+}
+
+describe_index
+INDEX_ACTION="$(classify_index)"
+
+case "$INDEX_ACTION" in
+  CREATE)
+    python3 > "$BUILD_DIR/vector-index-update.json" <<'PY'
+import json
+
+print(json.dumps([{"Create": {
+    "IndexName": "SemanticEmbeddingIndex",
+    "VectorAttribute": {"AttributeName": "embedding"},
+    "SearchSchema": [{
+        "AttributeName": "embeddingPartition",
+        "SearchSchemaElementType": "HASH",
+    }],
+    "Projection": {"ProjectionType": "KEYS_ONLY"},
+    "Dimensions": 1024,
+    "DistanceFunction": "COSINE",
+}}], sort_keys=True))
+PY
+    aws dynamodb update-table \
+      --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+      --attribute-definitions \
+        "AttributeName=${PARTITION_ATTRIBUTE},AttributeType=S" \
+      --vector-index-updates "file://$BUILD_DIR/vector-index-update.json" \
+      --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+      >/dev/null
+    echo "Semantic vector index creation started."
+    ;;
+  WAIT)
+    echo "Semantic vector index creation is already in progress."
+    ;;
+  READY)
+    echo "Semantic vector index already matches the required contract."
+    ;;
+  *)
+    echo "Semantic vector index verification returned an invalid result." >&2
+    exit 1
+    ;;
+esac
+
+if [ "$INDEX_ACTION" != "READY" ]; then
+  for ((attempt=1; attempt<=MAX_ATTEMPTS; attempt++)); do
+    sleep "$POLL_SECONDS"
+    describe_index
+    INDEX_ACTION="$(classify_index)"
+    case "$INDEX_ACTION" in
+      READY) break ;;
+      WAIT)
+        echo "Waiting for semantic vector index (${attempt}/${MAX_ATTEMPTS})."
+        ;;
+      *)
+        echo "Semantic vector index entered an invalid reconciliation state." >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+if [ "$INDEX_ACTION" != "READY" ]; then
+  echo "Semantic vector index did not become active within 30 minutes." >&2
+  exit 1
+fi
+
+describe_index
+python3 "$SCRIPT_DIR/jm8_environment_contract.py" \
+  entry-chunks-description "$BUILD_DIR/entry-chunks.json" \
+  "$APP_NAME" "$STAGE" "$ACCOUNT_ID" "$AWS_REGION" \
+  "$ENTRY_CHUNKS_TABLE_NAME" after >/dev/null
+
+echo "Semantic vector index ${INDEX_NAME} is active and verified."

@@ -182,6 +182,12 @@ def validate_stored_embedding(
     }
 
 
+def validate_embedding_vector(value: object) -> list[float]:
+    """Return one exact normalized vector suitable for storage or search."""
+
+    return _validated_vector(value)
+
+
 def embedding_is_current(
     item: Mapping[str, object],
     *,

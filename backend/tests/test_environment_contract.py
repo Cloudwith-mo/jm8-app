@@ -75,6 +75,7 @@ SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-semantic-memory",
     BACKEND_ROOT / "bin" / "deploy-semantic-embedding",
+    BACKEND_ROOT / "bin" / "deploy-semantic-vector-index",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
     BACKEND_ROOT / "bin" / "provision-stripe-secret",
     BACKEND_ROOT / "bin" / "setup-stripe-catalog",
@@ -97,6 +98,7 @@ NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-semantic-memory",
     BACKEND_ROOT / "bin" / "deploy-semantic-embedding",
+    BACKEND_ROOT / "bin" / "deploy-semantic-vector-index",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
 ]
 
@@ -1792,6 +1794,18 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
 
         with self.assertRaises(EnvironmentContractError) as ctx:
             validate_operation_specific("deploy-semantic-embedding", "dev")
+
+        self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
+
+    def test_semantic_vector_index_deploy_requires_entry_chunks_table_contract(self):
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "TABLE_NAME": "journalm8-dev-main",
+        })
+        os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("deploy-semantic-vector-index", "dev")
 
         self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
 

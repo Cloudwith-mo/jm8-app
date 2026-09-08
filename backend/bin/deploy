@@ -531,6 +531,10 @@ aws lambda get-function \
 # intentionally disabled state. Activation requires a future explicit gate.
 ./bin/deploy-semantic-memory
 
+# Reconcile the exact tenant-partitioned vector index before embeddings can be
+# written. Existing incompatible indexes fail closed and are never replaced.
+./bin/deploy-semantic-vector-index
+
 # Reconcile the semantic-embedding worker after semantic-memory infrastructure.
 # Its EntryChunks mapping is independently gated and disabled by default.
 ./bin/deploy-semantic-embedding
