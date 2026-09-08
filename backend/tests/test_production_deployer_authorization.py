@@ -631,7 +631,6 @@ class PolicyGenerationTests(unittest.TestCase):
         self.assertEqual(
             set(alarms["Action"]),
             {
-                "cloudwatch:DescribeAlarms",
                 "cloudwatch:PutMetricAlarm",
                 "cloudwatch:TagResource",
             },
@@ -645,6 +644,23 @@ class PolicyGenerationTests(unittest.TestCase):
                 f"arn:aws:cloudwatch:us-east-1:{ACCOUNT_ID}:alarm:{alarm_name}"
             )
             self.assertTrue(fnmatchcase(alarm_arn, alarms["Resource"]))
+
+        describe_alarms = next(
+            item for item in statements
+            if item["Sid"] == "DescribeProductionAlarms"
+        )
+        self.assertEqual(
+            describe_alarms,
+            {
+                "Sid": "DescribeProductionAlarms",
+                "Effect": "Allow",
+                "Action": ["cloudwatch:DescribeAlarms"],
+                "Resource": "*",
+                "Condition": {
+                    "StringEquals": {"aws:RequestedRegion": "us-east-1"},
+                },
+            },
+        )
 
         dashboard = next(
             item for item in statements
@@ -984,6 +1000,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "deploy-observability",
             "deploy-account-export",
             "deploy-semantic-memory",
+            "deploy-semantic-embedding",
             "deploy-analysis-observability",
             "deploy-bedrock-budget",
             "deploy-production-budget",
@@ -1121,6 +1138,10 @@ class PolicyGenerationTests(unittest.TestCase):
                 (
                     f"arn:aws:iam::{ACCOUNT_ID}:role/"
                     "journalm8-prod-semantic-memory-worker-role"
+                ),
+                (
+                    f"arn:aws:iam::{ACCOUNT_ID}:role/"
+                    "journalm8-prod-semantic-embedding-worker-role"
                 ),
             },
         )

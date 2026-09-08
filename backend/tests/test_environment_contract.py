@@ -40,6 +40,7 @@ from jm8_environment_contract import (  # noqa: E402
     validate_non_dev_urls,
     validate_stripe_credentials,
     validate_confirmation_gate,
+    validate_semantic_embedding_activation,
     validate_semantic_memory_activation,
     validate_allowed_origins,
     validate_https_frontend_origin,
@@ -73,6 +74,7 @@ SCRIPT_PATHS = [
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-semantic-memory",
+    BACKEND_ROOT / "bin" / "deploy-semantic-embedding",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
     BACKEND_ROOT / "bin" / "provision-stripe-secret",
     BACKEND_ROOT / "bin" / "setup-stripe-catalog",
@@ -94,6 +96,7 @@ NON_STRIPE_MUTATING_SCRIPTS = [
     BACKEND_ROOT / "bin" / "deploy-observability",
     BACKEND_ROOT / "bin" / "deploy-ocr-workflow",
     BACKEND_ROOT / "bin" / "deploy-semantic-memory",
+    BACKEND_ROOT / "bin" / "deploy-semantic-embedding",
     BACKEND_ROOT / "bin" / "deploy-production-budget",
 ]
 
@@ -115,6 +118,8 @@ class EnvironmentIsolationTestCase(unittest.TestCase):
         "DEPLOY_CONFIRMATION",
         "SEMANTIC_MEMORY_MAPPING_ENABLED",
         "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION",
+        "SEMANTIC_EMBEDDING_MAPPING_ENABLED",
+        "SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION",
         "STRIPE_SECRET_KEY",
         "STRIPE_WEBHOOK_SECRET",
         "STRIPE_SECRET_ARN",
@@ -208,6 +213,32 @@ class TestEnvironmentContractValidation(EnvironmentIsolationTestCase):
                     "SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION=$STAGE",
                     str(ctx.exception),
                 )
+
+    def test_semantic_embedding_mapping_has_an_independent_activation_gate(self):
+        validate_semantic_embedding_activation(
+            "staging",
+            {"SEMANTIC_EMBEDDING_MAPPING_ENABLED": "false"},
+        )
+        validate_semantic_embedding_activation("staging", {
+            "SEMANTIC_EMBEDDING_MAPPING_ENABLED": "true",
+            "SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION": "staging",
+        })
+        for invalid in (None, "", "TRUE", "False", "1", " true ", True):
+            with self.subTest(value=invalid):
+                with self.assertRaises(EnvironmentContractError):
+                    validate_semantic_embedding_activation(
+                        "staging",
+                        {"SEMANTIC_EMBEDDING_MAPPING_ENABLED": invalid},
+                    )
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_semantic_embedding_activation("staging", {
+                "SEMANTIC_EMBEDDING_MAPPING_ENABLED": "true",
+                "SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION": "dev",
+            })
+        self.assertIn(
+            "SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION=$STAGE",
+            str(ctx.exception),
+        )
 
     def test_export_bucket_is_exact_and_dedicated(self):
         validate_export_bucket_name(
@@ -1570,7 +1601,7 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
                     generated_pattern,
                 ))
 
-    def test_tracked_environments_default_semantic_mapping_to_disabled(self):
+    def test_tracked_environments_default_semantic_mappings_to_disabled(self):
         for stage in ("dev", "staging", "prod"):
             template = (
                 BACKEND_ROOT
@@ -1586,6 +1617,16 @@ class TestOperationSpecificValidation(EnvironmentIsolationTestCase):
                 )
                 self.assertNotIn(
                     "\nexport SEMANTIC_MEMORY_ACTIVATION_CONFIRMATION=",
+                    content,
+                )
+                self.assertEqual(
+                    content.count(
+                        "export SEMANTIC_EMBEDDING_MAPPING_ENABLED=false"
+                    ),
+                    1,
+                )
+                self.assertNotIn(
+                    "\nexport SEMANTIC_EMBEDDING_ACTIVATION_CONFIRMATION=",
                     content,
                 )
 
@@ -1738,6 +1779,19 @@ class TestOperationSpecificContractHooks(EnvironmentIsolationTestCase):
 
         with self.assertRaises(EnvironmentContractError) as ctx:
             validate_operation_specific("deploy-semantic-memory", "dev")
+
+        self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
+
+    def test_semantic_embedding_deploy_requires_entry_chunks_table_contract(self):
+        os.environ.update({
+            "APP_NAME": "journalm8",
+            "TABLE_NAME": "journalm8-dev-main",
+            "SEMANTIC_EMBEDDING_MAPPING_ENABLED": "false",
+        })
+        os.environ.pop("ENTRY_CHUNKS_TABLE_NAME", None)
+
+        with self.assertRaises(EnvironmentContractError) as ctx:
+            validate_operation_specific("deploy-semantic-embedding", "dev")
 
         self.assertIn("ENTRY_CHUNKS_TABLE_NAME", str(ctx.exception))
 

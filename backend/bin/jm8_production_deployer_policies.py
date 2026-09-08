@@ -66,6 +66,7 @@ LOG_DELIVERY_CONTROL_PLANE_ACTIONS = {
     "logs:UpdateLogDelivery",
 }
 RESOURCE_STAR_ACTIONS = {
+    "cloudwatch:DescribeAlarms",
     "cloudfront:CreateDistribution",
     "cloudfront:CreateOriginAccessControl",
     "cognito-idp:CreateUserPool",
@@ -135,6 +136,14 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
     semantic_dlq_arn = (
         f"arn:aws:sqs:{region}:{ACCOUNT_ID}:journalm8-prod-semantic-memory-dlq"
     )
+    embedding_worker_arn = (
+        f"arn:aws:lambda:{region}:{ACCOUNT_ID}:function:"
+        "journalm8-prod-semantic-embedding-worker"
+    )
+    embedding_dlq_arn = (
+        f"arn:aws:sqs:{region}:{ACCOUNT_ID}:"
+        "journalm8-prod-semantic-embedding-dlq"
+    )
     raw_bucket_arn = f"arn:aws:s3:::journalm8-prod-raw-{ACCOUNT_ID}"
     frontend_bucket_arn = f"arn:aws:s3:::journalm8-prod-frontend-{ACCOUNT_ID}"
     export_bucket_arn = f"arn:aws:s3:::journalm8-prod-exports-{ACCOUNT_ID}"
@@ -159,6 +168,7 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         "journalm8-prod-account-deletion-worker-role",
         "journalm8-prod-account-deletion-step-role",
         "journalm8-prod-semantic-memory-worker-role",
+        "journalm8-prod-semantic-embedding-worker-role",
     )
     runtime_role_arns = tuple(
         f"arn:aws:iam::{ACCOUNT_ID}:role/{name}"
@@ -250,6 +260,18 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "sqs:TagQueue",
             ),
             semantic_dlq_arn,
+        ),
+        _statement(
+            "ManageProductionSemanticEmbeddingDlq",
+            (
+                "sqs:CreateQueue",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+                "sqs:ListQueueTags",
+                "sqs:SetQueueAttributes",
+                "sqs:TagQueue",
+            ),
+            embedding_dlq_arn,
         ),
         _statement(
             "ManageProductionExportBucket",
@@ -399,6 +421,27 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             "*",
             {
                 "ArnEquals": {"lambda:FunctionArn": semantic_worker_arn},
+                "StringEquals": {"aws:RequestedRegion": region},
+            },
+        ),
+        _statement(
+            "CreateSemanticEmbeddingEventSourceMapping",
+            ("lambda:CreateEventSourceMapping",),
+            "*",
+            {
+                "ArnEquals": {"lambda:FunctionArn": embedding_worker_arn},
+                "StringEquals": {"aws:RequestedRegion": region},
+            },
+        ),
+        _statement(
+            "ManageSemanticEmbeddingEventSourceMapping",
+            (
+                "lambda:GetEventSourceMapping",
+                "lambda:UpdateEventSourceMapping",
+            ),
+            "*",
+            {
+                "ArnEquals": {"lambda:FunctionArn": embedding_worker_arn},
                 "StringEquals": {"aws:RequestedRegion": region},
             },
         ),
@@ -676,9 +719,14 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
             requested_region_condition,
         ),
         _statement(
+            "DescribeProductionAlarms",
+            ("cloudwatch:DescribeAlarms",),
+            "*",
+            requested_region_condition,
+        ),
+        _statement(
             "ManageProductionAlarms",
             (
-                "cloudwatch:DescribeAlarms",
                 "cloudwatch:PutMetricAlarm",
                 "cloudwatch:TagResource",
             ),

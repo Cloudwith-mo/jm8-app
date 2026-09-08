@@ -1,0 +1,553 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+: "${TABLE_NAME:?TABLE_NAME is required. Run: source .env}"
+: "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required. Run: source .env}"
+: "${SEMANTIC_EMBEDDING_MAPPING_ENABLED:?SEMANTIC_EMBEDDING_MAPPING_ENABLED is required. Run: source .env}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="deploy-semantic-embedding"
+jm8_validate_contract_or_exit
+
+case "$SEMANTIC_EMBEDDING_MAPPING_ENABLED" in
+  true) MAPPING_TARGET_STATE="Enabled" ;;
+  false) MAPPING_TARGET_STATE="Disabled" ;;
+  *) echo "Semantic-embedding mapping activation value is invalid." >&2; exit 1 ;;
+esac
+
+WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-semantic-embedding-worker"
+WORKER_ROLE_NAME="${APP_NAME}-${STAGE}-semantic-embedding-worker-role"
+WORKER_POLICY_NAME="${APP_NAME}-${STAGE}-semantic-embedding-worker-access"
+DLQ_NAME="${APP_NAME}-${STAGE}-semantic-embedding-dlq"
+LOG_GROUP_NAME="/aws/lambda/${WORKER_FUNCTION_NAME}"
+BUILD_DIR="${BACKEND_DIR}/.build/semantic-embedding"
+PACKAGE_DIR="${BUILD_DIR}/package"
+ZIP_FILE="${BUILD_DIR}/semantic-embedding-worker.zip"
+DLQ_RETENTION_SECONDS=1209600
+EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
+
+case "$STAGE" in
+  prod) RESERVED_CONCURRENCY=1 ;;
+  dev|staging) RESERVED_CONCURRENCY=2 ;;
+  *) echo "Semantic-embedding deployment stage is invalid." >&2; exit 1 ;;
+esac
+
+CALLER_ARN="$(aws sts get-caller-identity \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --query Arn --output text)"
+if [[ ! "$CALLER_ARN" =~ ^arn:([a-z0-9-]+):(iam|sts)::([0-9]{12}): ]]; then
+  echo "AWS caller identity is malformed." >&2
+  exit 1
+fi
+AWS_PARTITION="${BASH_REMATCH[1]}"
+ACCOUNT_ID="${BASH_REMATCH[3]}"
+if [ "$ACCOUNT_ID" != "$EXPECTED_AWS_ACCOUNT_ID" ]; then
+  echo "AWS caller account does not match the deployment contract." >&2
+  exit 1
+fi
+
+mkdir -p "$BUILD_DIR"
+
+aws dynamodb describe-table \
+  --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  > "$BUILD_DIR/entry-chunks-stream-before.json"
+STREAM_ACTION="$(python3 "$SCRIPT_DIR/jm8_environment_contract.py" \
+  entry-chunks-stream "$BUILD_DIR/entry-chunks-stream-before.json" \
+  "$APP_NAME" "$STAGE" "$ACCOUNT_ID" "$AWS_REGION" \
+  "$ENTRY_CHUNKS_TABLE_NAME" before)"
+case "$STREAM_ACTION" in
+  ENABLE)
+    aws dynamodb update-table \
+      --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+      --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \
+      --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+    aws dynamodb wait table-exists \
+      --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+      --profile "$AWS_PROFILE" --region "$AWS_REGION"
+    ;;
+  REUSE) ;;
+  *) echo "EntryChunks stream verification returned an invalid result." >&2; exit 1 ;;
+esac
+aws dynamodb describe-table \
+  --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  > "$BUILD_DIR/entry-chunks-stream-after.json"
+python3 "$SCRIPT_DIR/jm8_environment_contract.py" \
+  entry-chunks-stream "$BUILD_DIR/entry-chunks-stream-after.json" \
+  "$APP_NAME" "$STAGE" "$ACCOUNT_ID" "$AWS_REGION" \
+  "$ENTRY_CHUNKS_TABLE_NAME" after >/dev/null
+read -r ENTRY_CHUNKS_TABLE_ARN STREAM_ARN < <(python3 - \
+  "$BUILD_DIR/entry-chunks-stream-after.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    table = json.load(handle)["Table"]
+print(table["TableArn"], table["LatestStreamArn"])
+PY
+)
+
+rm -rf "$PACKAGE_DIR"
+rm -f "$ZIP_FILE"
+mkdir -p "$PACKAGE_DIR"
+REQUIRED_MODULES=(
+  semantic_chunking.py
+  semantic_memory_contract.py
+  semantic_memory_store.py
+  semantic_embedding_contract.py
+  semantic_embedding_provider.py
+  semantic_embedding_store.py
+  semantic_embedding_lifecycle.py
+  semantic_embedding_worker.py
+)
+for module in "${REQUIRED_MODULES[@]}"; do
+  cp "$BACKEND_DIR/function/$module" "$PACKAGE_DIR/$module"
+done
+(
+  cd "$PACKAGE_DIR"
+  python3 -m zipfile -c "$ZIP_FILE" "${REQUIRED_MODULES[@]}"
+)
+
+cat > "$BUILD_DIR/lambda-trust.json" <<'JSON'
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+JSON
+
+set +e
+aws sqs get-queue-url \
+  --queue-name "$DLQ_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --query QueueUrl --output text \
+  > "$BUILD_DIR/dlq-url.txt" 2> "$BUILD_DIR/dlq-lookup.err"
+DLQ_LOOKUP_STATUS=$?
+set -e
+if [ "$DLQ_LOOKUP_STATUS" -ne 0 ]; then
+  if ! grep -q 'QueueDoesNotExist\|AWS.SimpleQueueService.NonExistentQueue' \
+    "$BUILD_DIR/dlq-lookup.err"; then
+    echo "Semantic-embedding DLQ lookup failed." >&2
+    exit "$DLQ_LOOKUP_STATUS"
+  fi
+  aws sqs create-queue \
+    --queue-name "$DLQ_NAME" \
+    --attributes KmsMasterKeyId=alias/aws/sqs,MessageRetentionPeriod="$DLQ_RETENTION_SECONDS" \
+    --tags App="$APP_NAME",Stage="$STAGE",ManagedBy=aws-cli \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+    --query QueueUrl --output text > "$BUILD_DIR/dlq-url.txt"
+fi
+DLQ_URL="$(<"$BUILD_DIR/dlq-url.txt")"
+if [ -z "$DLQ_URL" ] || [ "$DLQ_URL" = "None" ]; then
+  echo "Semantic-embedding DLQ URL could not be resolved." >&2
+  exit 1
+fi
+aws sqs set-queue-attributes \
+  --queue-url "$DLQ_URL" \
+  --attributes KmsMasterKeyId=alias/aws/sqs,MessageRetentionPeriod="$DLQ_RETENTION_SECONDS" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws sqs tag-queue \
+  --queue-url "$DLQ_URL" \
+  --tags App="$APP_NAME",Stage="$STAGE",ManagedBy=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws sqs get-queue-attributes \
+  --queue-url "$DLQ_URL" \
+  --attribute-names QueueArn KmsMasterKeyId MessageRetentionPeriod \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  > "$BUILD_DIR/dlq-attributes.json"
+aws sqs list-queue-tags \
+  --queue-url "$DLQ_URL" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  > "$BUILD_DIR/dlq-tags.json"
+DLQ_ARN="$(python3 - "$BUILD_DIR/dlq-attributes.json" \
+  "$BUILD_DIR/dlq-tags.json" "$DLQ_RETENTION_SECONDS" "$APP_NAME" "$STAGE" \
+  "$AWS_PARTITION" "$AWS_REGION" "$ACCOUNT_ID" "$DLQ_NAME" <<'PY'
+import json
+import sys
+attributes_path, tags_path, retention, app, stage, partition, region, account, name = sys.argv[1:]
+with open(attributes_path, encoding="utf-8") as handle:
+    attributes = json.load(handle).get("Attributes", {})
+with open(tags_path, encoding="utf-8") as handle:
+    tags = json.load(handle).get("Tags", {})
+expected_arn = f"arn:{partition}:sqs:{region}:{account}:{name}"
+if attributes != {"QueueArn": expected_arn, "KmsMasterKeyId": "alias/aws/sqs", "MessageRetentionPeriod": retention}:
+    raise SystemExit("Semantic-embedding DLQ attributes are invalid.")
+if any(tags.get(key) != value for key, value in {"App": app, "Stage": stage, "ManagedBy": "aws-cli"}.items()):
+    raise SystemExit("Semantic-embedding DLQ tags are invalid.")
+print(expected_arn)
+PY
+)"
+
+set +e
+aws logs describe-log-groups \
+  --log-group-name-prefix "$LOG_GROUP_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --query "logGroups[?logGroupName=='${LOG_GROUP_NAME}'].logGroupName | [0]" \
+  --output text > "$BUILD_DIR/log-group.txt" 2> "$BUILD_DIR/log-group.err"
+LOG_LOOKUP_STATUS=$?
+set -e
+if [ "$LOG_LOOKUP_STATUS" -ne 0 ]; then
+  echo "Semantic-embedding log group lookup failed." >&2
+  exit "$LOG_LOOKUP_STATUS"
+fi
+if ! grep -Fxq "$LOG_GROUP_NAME" "$BUILD_DIR/log-group.txt"; then
+  aws logs create-log-group \
+    --log-group-name "$LOG_GROUP_NAME" \
+    --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION"
+fi
+aws logs put-retention-policy \
+  --log-group-name "$LOG_GROUP_NAME" --retention-in-days 30 \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+
+if aws iam get-role --role-name "$WORKER_ROLE_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws iam update-assume-role-policy \
+    --role-name "$WORKER_ROLE_NAME" \
+    --policy-document "file://$BUILD_DIR/lambda-trust.json" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION"
+else
+  aws iam create-role \
+    --role-name "$WORKER_ROLE_NAME" \
+    --description "JournalM8 semantic embedding worker role" \
+    --assume-role-policy-document "file://$BUILD_DIR/lambda-trust.json" \
+    --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws iam wait role-exists --role-name "$WORKER_ROLE_NAME" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION"
+fi
+aws iam tag-role --role-name "$WORKER_ROLE_NAME" \
+  --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" \
+  --policy-arn "arn:${AWS_PARTITION}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+WORKER_ROLE_ARN="$(aws iam get-role --role-name "$WORKER_ROLE_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" --query Role.Arn --output text)"
+EXPECTED_ROLE_ARN="arn:${AWS_PARTITION}:iam::${ACCOUNT_ID}:role/${WORKER_ROLE_NAME}"
+if [ "$WORKER_ROLE_ARN" != "$EXPECTED_ROLE_ARN" ]; then
+  echo "Semantic-embedding worker role identity is invalid." >&2
+  exit 1
+fi
+
+BEDROCK_MODEL_ARN="arn:${AWS_PARTITION}:bedrock:${AWS_REGION}::foundation-model/${EMBEDDING_MODEL_ID}"
+python3 - "$STREAM_ARN" "$ENTRY_CHUNKS_TABLE_ARN" "$BEDROCK_MODEL_ARN" "$DLQ_ARN" \
+  > "$BUILD_DIR/worker-policy.json" <<'PY'
+import json
+import sys
+stream_arn, table_arn, model_arn, dlq_arn = sys.argv[1:]
+print(json.dumps({"Version": "2012-10-17", "Statement": [
+    {"Sid": "ReadExactEntryChunksStream", "Effect": "Allow", "Action": ["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"], "Resource": stream_arn},
+    {"Sid": "ListEntryChunksStreams", "Effect": "Allow", "Action": ["dynamodb:ListStreams"], "Resource": "*"},
+    {"Sid": "ReadAndPersistExactEntryChunks", "Effect": "Allow", "Action": ["dynamodb:Query", "dynamodb:TransactWriteItems"], "Resource": table_arn},
+    {"Sid": "InvokeExactEmbeddingModel", "Effect": "Allow", "Action": ["bedrock:InvokeModel"], "Resource": model_arn},
+    {"Sid": "SendExactSemanticEmbeddingDlq", "Effect": "Allow", "Action": ["sqs:SendMessage"], "Resource": dlq_arn},
+]}, sort_keys=True))
+PY
+aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" \
+  --policy-name "$WORKER_POLICY_NAME" \
+  --policy-document "file://$BUILD_DIR/worker-policy.json" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws iam get-role-policy --role-name "$WORKER_ROLE_NAME" \
+  --policy-name "$WORKER_POLICY_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  > "$BUILD_DIR/applied-worker-policy.json"
+python3 - "$BUILD_DIR/worker-policy.json" "$BUILD_DIR/applied-worker-policy.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    expected = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    applied = json.load(handle).get("PolicyDocument")
+if applied != expected:
+    raise SystemExit("Semantic-embedding worker policy verification failed.")
+PY
+
+run_lambda_create_with_iam_propagation_retry() {
+  local error_file="$1"
+  shift
+
+  local max_attempts=5
+  local retry_waits=(5 10 20 30)
+  local attempt=1
+  local command_status
+  local wait_seconds
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    echo "Lambda create-function attempt ${attempt}/${max_attempts}." >&2
+
+    if "$@" 2> "$error_file"; then
+      rm -f "$error_file"
+      echo \
+        "Lambda create-function succeeded on attempt ${attempt}/${max_attempts}." \
+        >&2
+      return 0
+    else
+      command_status=$?
+    fi
+
+    if (
+      grep -Fq "InvalidParameterValueException" "$error_file" &&
+      grep -Fq \
+        "The role defined for the function cannot be assumed by Lambda" \
+        "$error_file"
+    ); then
+      if [ "$attempt" -eq "$max_attempts" ]; then
+        echo \
+          "Lambda create-function exhausted ${max_attempts} IAM propagation attempts." \
+          >&2
+        cat "$error_file" >&2
+        return "$command_status"
+      fi
+
+      wait_seconds="${retry_waits[$((attempt - 1))]}"
+      echo \
+        "Known Lambda role propagation delay; waiting ${wait_seconds} seconds before retry." \
+        >&2
+      sleep "$wait_seconds"
+      attempt=$((attempt + 1))
+    else
+      echo "Lambda create-function failed with a non-retryable AWS error." >&2
+      cat "$error_file" >&2
+      return "$command_status"
+    fi
+  done
+
+  return 1
+}
+
+if aws lambda get-function --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null 2>&1; then
+  aws lambda update-function-code --function-name "$WORKER_FUNCTION_NAME" \
+    --zip-file "fileb://$ZIP_FILE" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-updated --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION"
+  aws lambda update-function-configuration --function-name "$WORKER_FUNCTION_NAME" \
+    --runtime python3.12 --role "$WORKER_ROLE_ARN" \
+    --handler semantic_embedding_worker.lambda_handler \
+    --timeout 120 --memory-size 512 \
+    --environment "Variables={ENTRY_CHUNKS_TABLE_NAME=${ENTRY_CHUNKS_TABLE_NAME}}" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-updated --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION"
+else
+  run_lambda_create_with_iam_propagation_retry \
+    "$BUILD_DIR/lambda-create.err" \
+    aws lambda create-function --function-name "$WORKER_FUNCTION_NAME" \
+      --runtime python3.12 --architectures arm64 --role "$WORKER_ROLE_ARN" \
+      --handler semantic_embedding_worker.lambda_handler \
+      --zip-file "fileb://$ZIP_FILE" --timeout 120 --memory-size 512 \
+      --environment "Variables={ENTRY_CHUNKS_TABLE_NAME=${ENTRY_CHUNKS_TABLE_NAME}}" \
+      --tags App="$APP_NAME",Stage="$STAGE",ManagedBy=aws-cli \
+      --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  aws lambda wait function-active-v2 --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION"
+fi
+WORKER_ARN="arn:${AWS_PARTITION}:lambda:${AWS_REGION}:${ACCOUNT_ID}:function:${WORKER_FUNCTION_NAME}"
+aws lambda tag-resource --resource "$WORKER_ARN" \
+  --tags "App=${APP_NAME},Stage=${STAGE},ManagedBy=aws-cli" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws lambda put-function-concurrency --function-name "$WORKER_FUNCTION_NAME" \
+  --reserved-concurrent-executions "$RESERVED_CONCURRENCY" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+aws lambda get-function-configuration --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" > "$BUILD_DIR/worker-configuration.json"
+aws lambda get-function-concurrency --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" > "$BUILD_DIR/worker-concurrency.json"
+aws lambda list-tags --resource "$WORKER_ARN" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" > "$BUILD_DIR/worker-tags.json"
+python3 - "$BUILD_DIR/worker-configuration.json" "$BUILD_DIR/worker-concurrency.json" \
+  "$BUILD_DIR/worker-tags.json" "$WORKER_ARN" "$WORKER_ROLE_ARN" \
+  "$ENTRY_CHUNKS_TABLE_NAME" "$RESERVED_CONCURRENCY" "$APP_NAME" "$STAGE" <<'PY'
+import json
+import sys
+configuration_path, concurrency_path, tags_path, function_arn, role_arn, table_name, concurrency, app, stage = sys.argv[1:]
+with open(configuration_path, encoding="utf-8") as handle:
+    configuration = json.load(handle)
+with open(concurrency_path, encoding="utf-8") as handle:
+    concurrency_document = json.load(handle)
+with open(tags_path, encoding="utf-8") as handle:
+    tags = json.load(handle).get("Tags", {})
+if any((
+    configuration.get("FunctionArn") != function_arn,
+    configuration.get("Runtime") != "python3.12",
+    configuration.get("Handler") != "semantic_embedding_worker.lambda_handler",
+    configuration.get("Role") != role_arn,
+    configuration.get("Timeout") != 120,
+    configuration.get("MemorySize") != 512,
+    configuration.get("State") != "Active",
+    configuration.get("LastUpdateStatus") != "Successful",
+    configuration.get("Environment", {}).get("Variables") != {"ENTRY_CHUNKS_TABLE_NAME": table_name},
+    concurrency_document.get("ReservedConcurrentExecutions") != int(concurrency),
+    any(tags.get(key) != value for key, value in {"App": app, "Stage": stage, "ManagedBy": "aws-cli"}.items()),
+)):
+    raise SystemExit("Semantic-embedding worker configuration is invalid.")
+PY
+
+python3 - "$DLQ_ARN" > "$BUILD_DIR/destination-config.json" <<'PY'
+import json
+import sys
+print(json.dumps({"OnFailure": {"Destination": sys.argv[1]}}))
+PY
+
+MAPPING_UUID=""
+MAPPING_STATE=""
+MAPPING_POLL_LIMIT=20
+
+poll_mapping() {
+  local expected_state="${1:-}"
+  local attempt=1
+  while [ "$attempt" -le "$MAPPING_POLL_LIMIT" ]; do
+    MAPPING_STATE="$(aws lambda get-event-source-mapping --uuid "$MAPPING_UUID" \
+      --profile "$AWS_PROFILE" --region "$AWS_REGION" --query State --output text)"
+    if [ -n "$expected_state" ] && [ "$MAPPING_STATE" = "$expected_state" ]; then
+      return 0
+    fi
+    if [ -z "$expected_state" ] && { [ "$MAPPING_STATE" = "Enabled" ] || [ "$MAPPING_STATE" = "Disabled" ]; }; then
+      return 0
+    fi
+    case "$MAPPING_STATE" in
+      Creating|Enabling|Disabling|Updating) ;;
+      *) echo "Semantic-embedding event-source mapping entered an invalid state." >&2; exit 1 ;;
+    esac
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le "$MAPPING_POLL_LIMIT" ]; then sleep 3; fi
+  done
+  echo "Semantic-embedding event-source mapping did not reach a stable target state." >&2
+  exit 1
+}
+
+verify_mapping() {
+  local expected_state="$1"
+  local name="$2"
+  aws lambda get-event-source-mapping --uuid "$MAPPING_UUID" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" > "$BUILD_DIR/mapping-${name}.json"
+  python3 - "$BUILD_DIR/mapping-${name}.json" "$STREAM_ARN" "$WORKER_ARN" \
+    "$DLQ_ARN" "$expected_state" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    mapping = json.load(handle)
+stream_arn, worker_arn, dlq_arn, expected_state = sys.argv[2:]
+expected = {"EventSourceArn": stream_arn, "FunctionArn": worker_arn, "State": expected_state, "StartingPosition": "LATEST", "BatchSize": 10, "MaximumBatchingWindowInSeconds": 1, "ParallelizationFactor": 1, "BisectBatchOnFunctionError": True, "MaximumRetryAttempts": 5, "MaximumRecordAgeInSeconds": 3600, "FunctionResponseTypes": ["ReportBatchItemFailures"], "DestinationConfig": {"OnFailure": {"Destination": dlq_arn}}}
+if any(mapping.get(key) != value for key, value in expected.items()):
+    raise SystemExit("Semantic-embedding event-source mapping is invalid.")
+PY
+}
+
+aws lambda list-event-source-mappings --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" > "$BUILD_DIR/mappings-before.json"
+MAPPING_UUID="$(python3 - "$BUILD_DIR/mappings-before.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    mappings = json.load(handle).get("EventSourceMappings")
+if not isinstance(mappings, list) or len(mappings) > 1:
+    raise SystemExit("Semantic-embedding event-source mapping count is invalid.")
+print("ABSENT" if not mappings else mappings[0].get("UUID", "INVALID"))
+PY
+)"
+if [ "$MAPPING_UUID" = "ABSENT" ]; then
+  MAPPING_UUID="$(aws lambda create-event-source-mapping \
+    --function-name "$WORKER_FUNCTION_NAME" --event-source-arn "$STREAM_ARN" \
+    --no-enabled --starting-position LATEST --batch-size 10 \
+    --maximum-batching-window-in-seconds 1 --parallelization-factor 1 \
+    --bisect-batch-on-function-error --maximum-retry-attempts 5 \
+    --maximum-record-age-in-seconds 3600 \
+    --function-response-types ReportBatchItemFailures \
+    --destination-config "file://$BUILD_DIR/destination-config.json" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" --query UUID --output text)"
+  poll_mapping Disabled
+else
+  if [ "$MAPPING_UUID" = "INVALID" ] || [ -z "$MAPPING_UUID" ]; then
+    echo "Semantic-embedding event-source mapping identity is invalid." >&2
+    exit 1
+  fi
+  poll_mapping
+  INITIAL_MAPPING_STATE="$MAPPING_STATE"
+  aws lambda update-event-source-mapping --uuid "$MAPPING_UUID" \
+    --function-name "$WORKER_FUNCTION_NAME" --batch-size 10 \
+    --maximum-batching-window-in-seconds 1 --parallelization-factor 1 \
+    --bisect-batch-on-function-error --maximum-retry-attempts 5 \
+    --maximum-record-age-in-seconds 3600 \
+    --function-response-types ReportBatchItemFailures \
+    --destination-config "file://$BUILD_DIR/destination-config.json" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  poll_mapping "$INITIAL_MAPPING_STATE"
+fi
+verify_mapping "$MAPPING_STATE" configured
+
+ALARM_NAMES=(
+  "${WORKER_FUNCTION_NAME}-errors"
+  "${WORKER_FUNCTION_NAME}-throttles"
+  "${WORKER_FUNCTION_NAME}-iterator-age"
+  "${DLQ_NAME}-visible-messages"
+)
+aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[0]}" \
+  --namespace AWS/Lambda --metric-name Errors \
+  --dimensions Name=FunctionName,Value="$WORKER_FUNCTION_NAME" \
+  --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching \
+  --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[1]}" \
+  --namespace AWS/Lambda --metric-name Throttles \
+  --dimensions Name=FunctionName,Value="$WORKER_FUNCTION_NAME" \
+  --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching \
+  --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[2]}" \
+  --namespace AWS/Lambda --metric-name IteratorAge \
+  --dimensions Name=FunctionName,Value="$WORKER_FUNCTION_NAME" \
+  --statistic Maximum --period 300 --evaluation-periods 1 --threshold 300000 \
+  --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching \
+  --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[3]}" \
+  --namespace AWS/SQS --metric-name ApproximateNumberOfMessagesVisible \
+  --dimensions Name=QueueName,Value="$DLQ_NAME" \
+  --statistic Maximum --period 300 --evaluation-periods 1 --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching \
+  --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch describe-alarms --alarm-names "${ALARM_NAMES[@]}" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --query 'MetricAlarms[].AlarmName' --output json > "$BUILD_DIR/alarms.json"
+python3 - "$BUILD_DIR/alarms.json" "${ALARM_NAMES[@]}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    names = json.load(handle)
+if not isinstance(names, list) or set(names) != set(sys.argv[2:]) or len(names) != len(sys.argv[2:]):
+    raise SystemExit("Semantic-embedding alarms are incomplete.")
+PY
+
+poll_mapping
+if [ "$MAPPING_STATE" != "$MAPPING_TARGET_STATE" ]; then
+  case "$MAPPING_TARGET_STATE" in
+    Enabled) STATE_FLAG="--enabled" ;;
+    Disabled) STATE_FLAG="--no-enabled" ;;
+    *) echo "Semantic-embedding mapping target state is invalid." >&2; exit 1 ;;
+  esac
+  aws lambda update-event-source-mapping --uuid "$MAPPING_UUID" "$STATE_FLAG" \
+    --profile "$AWS_PROFILE" --region "$AWS_REGION" >/dev/null
+  poll_mapping "$MAPPING_TARGET_STATE"
+fi
+verify_mapping "$MAPPING_TARGET_STATE" final
+aws lambda list-event-source-mappings --function-name "$WORKER_FUNCTION_NAME" \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" > "$BUILD_DIR/mappings-final.json"
+python3 - "$BUILD_DIR/mappings-final.json" "$MAPPING_UUID" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    mappings = json.load(handle).get("EventSourceMappings")
+if not isinstance(mappings, list) or len(mappings) != 1 or mappings[0].get("UUID") != sys.argv[2]:
+    raise SystemExit("Semantic-embedding event-source mapping count is invalid.")
+PY
+
+echo "Semantic-embedding worker infrastructure is ready with its mapping ${MAPPING_TARGET_STATE}."
