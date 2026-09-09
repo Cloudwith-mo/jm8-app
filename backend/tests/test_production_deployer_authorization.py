@@ -713,6 +713,23 @@ class PolicyGenerationTests(unittest.TestCase):
             },
         )
 
+        operational_metrics = next(
+            item for item in statements
+            if item["Sid"] == "ReadProductionOperationalMetrics"
+        )
+        self.assertEqual(
+            operational_metrics,
+            {
+                "Sid": "ReadProductionOperationalMetrics",
+                "Effect": "Allow",
+                "Action": ["cloudwatch:GetMetricData"],
+                "Resource": "*",
+                "Condition": {
+                    "StringEquals": {"aws:RequestedRegion": "us-east-1"},
+                },
+            },
+        )
+
         dashboard = next(
             item for item in statements
             if item["Sid"] == "ManageProductionDashboards"
