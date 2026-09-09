@@ -88,22 +88,12 @@ def validate_activation_readiness(
 
     table = _mapping(table_document, "semantic table description").get("Table")
     table = _mapping(table, "semantic table")
-    if table.get("TableName") != table_name:
+    if (
+        table.get("TableName") != table_name
+        or table.get("TableArn") != table_arn
+    ):
         raise SemanticEmbeddingActivationError(
             "semantic table identity is invalid"
-        )
-    try:
-        index_state = validate_vector_index_state(
-            table_document,  # type: ignore[arg-type]
-            table_arn=table_arn,
-        )
-    except SemanticVectorIndexContractError:
-        raise SemanticEmbeddingActivationError(
-            "semantic vector index is not ready"
-        ) from None
-    if index_state.get("action") != "READY":
-        raise SemanticEmbeddingActivationError(
-            "semantic vector index is not ready"
         )
     stream_arn = table.get("LatestStreamArn")
     stream = table.get("StreamSpecification")
@@ -117,6 +107,35 @@ def validate_activation_readiness(
     ):
         raise SemanticEmbeddingActivationError(
             "semantic table stream is invalid"
+        )
+
+    mapping = _validate_mapping(
+        mappings_document,
+        stream_arn=stream_arn,
+        worker_arn=worker_arn,
+        dlq_arn=dlq_arn,
+    )
+    current_state = mapping["State"]
+
+    if target_state == "Disabled":
+        if activation_mode != "disable" or evaluation_report is not None:
+            raise SemanticEmbeddingActivationError(
+                "semantic embedding disable request is invalid"
+            )
+        return "NOOP" if current_state == "Disabled" else "DISABLE"
+
+    try:
+        index_state = validate_vector_index_state(
+            table_document,  # type: ignore[arg-type]
+            table_arn=table_arn,
+        )
+    except SemanticVectorIndexContractError:
+        raise SemanticEmbeddingActivationError(
+            "semantic vector index is not ready"
+        ) from None
+    if index_state.get("action") != "READY":
+        raise SemanticEmbeddingActivationError(
+            "semantic vector index is not ready"
         )
 
     configuration = _mapping(
@@ -170,7 +189,11 @@ def validate_activation_readiness(
             {
                 "Sid": "ReadAndPersistExactEntryChunks",
                 "Effect": "Allow",
-                "Action": ["dynamodb:Query", "dynamodb:TransactWriteItems"],
+                "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:Query",
+                    "dynamodb:TransactWriteItems",
+                ],
                 "Resource": table_arn,
             },
             {
@@ -217,20 +240,6 @@ def validate_activation_readiness(
         )
 
     _validate_alarms(alarms_document, worker_name, dlq_name)
-    mapping = _validate_mapping(
-        mappings_document,
-        stream_arn=stream_arn,
-        worker_arn=worker_arn,
-        dlq_arn=dlq_arn,
-    )
-    current_state = mapping["State"]
-
-    if target_state == "Disabled":
-        if activation_mode != "disable" or evaluation_report is not None:
-            raise SemanticEmbeddingActivationError(
-                "semantic embedding disable request is invalid"
-            )
-        return "NOOP" if current_state == "Disabled" else "DISABLE"
 
     if activation_mode == "canary":
         if evaluation_report is not None:
@@ -359,6 +368,14 @@ def _validate_alarms(document: object, worker_name: str, dlq_name: str) -> None:
             "IteratorAge",
             "Maximum",
             300000.0,
+            "FunctionName",
+            worker_name,
+        ),
+        f"{worker_name}-record-failures": (
+            "JournalM8/SemanticEmbedding",
+            "RecordFailures",
+            "Sum",
+            1.0,
             "FunctionName",
             worker_name,
         ),

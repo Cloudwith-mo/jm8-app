@@ -12,13 +12,24 @@ from typing import NotRequired, TypedDict
 
 from boto3.dynamodb.types import TypeDeserializer
 
-from semantic_embedding_contract import embedding_is_current
-from semantic_embedding_provider import embed_canonical_text
+from semantic_embedding_contract import (
+    SemanticEmbeddingContractError,
+    embedding_is_current,
+)
+from semantic_embedding_provider import (
+    SemanticEmbeddingProviderError,
+    embed_canonical_text,
+)
 from semantic_embedding_store import (
+    SemanticEmbeddingPersistenceError,
     SemanticEmbeddingStaleGenerationError,
     persist_active_embedding,
 )
-from semantic_memory_store import CHUNK_ENTITY_TYPE, get_entry_memory
+from semantic_memory_store import (
+    CHUNK_ENTITY_TYPE,
+    SemanticMemoryStoreError,
+    get_entry_memory,
+)
 
 
 EMBEDDED = "EMBEDDED"
@@ -30,6 +41,14 @@ _SUPPORTED_EVENT_NAMES = frozenset({"INSERT", "MODIFY", "REMOVE"})
 _ATTRIBUTE_VALUE_TYPES = frozenset(
     {"B", "BOOL", "BS", "L", "M", "N", "NS", "NULL", "S", "SS"}
 )
+FAILURE_CATEGORIES = (
+    "MemoryReadFailures",
+    "ProviderFailures",
+    "PersistenceFailures",
+    "ContractFailures",
+    "UnexpectedFailures",
+)
+METRIC_NAMESPACE = "JournalM8/SemanticEmbedding"
 
 
 class SemanticEmbeddingLifecycleError(RuntimeError):
@@ -52,6 +71,14 @@ class BatchItemFailure(TypedDict):
 
 class EmbeddingStreamBatchResponse(TypedDict):
     batchItemFailures: list[BatchItemFailure]
+
+
+class EmbeddingStreamBatchTelemetry(TypedDict):
+    """Privacy-safe aggregate telemetry for one stream batch."""
+
+    recordCount: int
+    failureCount: int
+    failureCounts: dict[str, int]
 
 
 def apply_embedding_stream_record(
@@ -167,6 +194,21 @@ def process_embedding_stream_event(
 ) -> EmbeddingStreamBatchResponse:
     """Process records independently and return Lambda partial failures."""
 
+    response, _ = process_embedding_stream_event_with_telemetry(
+        entry_chunks_table,
+        bedrock_client,
+        event,
+    )
+    return response
+
+
+def process_embedding_stream_event_with_telemetry(
+    entry_chunks_table: object,
+    bedrock_client: object,
+    event: Mapping[str, object],
+) -> tuple[EmbeddingStreamBatchResponse, EmbeddingStreamBatchTelemetry]:
+    """Process records and return privacy-safe failure classifications."""
+
     if not isinstance(event, Mapping):
         raise SemanticEmbeddingLifecycleError("stream batch event is malformed")
     records = event.get("Records")
@@ -174,6 +216,7 @@ def process_embedding_stream_event(
         raise SemanticEmbeddingLifecycleError("stream batch event is malformed")
 
     failures: list[BatchItemFailure] = []
+    failure_counts = {category: 0 for category in FAILURE_CATEGORIES}
     failed_sequence_numbers: set[str] = set()
     for record in records:
         try:
@@ -182,7 +225,8 @@ def process_embedding_stream_event(
                 bedrock_client,
                 record,  # type: ignore[arg-type]
             )
-        except Exception:
+        except Exception as error:
+            failure_counts[_failure_category(error)] += 1
             sequence_number = _sequence_number(record)
             if sequence_number is None:
                 raise SemanticEmbeddingLifecycleError(
@@ -191,7 +235,60 @@ def process_embedding_stream_event(
             if sequence_number not in failed_sequence_numbers:
                 failures.append({"itemIdentifier": sequence_number})
                 failed_sequence_numbers.add(sequence_number)
-    return {"batchItemFailures": failures}
+    response: EmbeddingStreamBatchResponse = {
+        "batchItemFailures": failures,
+    }
+    telemetry: EmbeddingStreamBatchTelemetry = {
+        "recordCount": len(records),
+        "failureCount": sum(failure_counts.values()),
+        "failureCounts": failure_counts,
+    }
+    return response, telemetry
+
+
+def _failure_category(error: Exception) -> str:
+    if isinstance(error, SemanticMemoryStoreError):
+        return "MemoryReadFailures"
+    if isinstance(error, SemanticEmbeddingProviderError):
+        return "ProviderFailures"
+    if isinstance(error, SemanticEmbeddingPersistenceError):
+        return "PersistenceFailures"
+    if isinstance(
+        error,
+        (SemanticEmbeddingContractError, SemanticEmbeddingLifecycleError),
+    ):
+        return "ContractFailures"
+    return "UnexpectedFailures"
+
+
+def build_embedding_telemetry_document(
+    telemetry: EmbeddingStreamBatchTelemetry,
+    *,
+    function_name: str,
+    timestamp_ms: int,
+) -> dict[str, object]:
+    """Build one bounded CloudWatch EMF document without record content."""
+
+    metric_names = ["RecordCount", "RecordFailures", *FAILURE_CATEGORIES]
+    document: dict[str, object] = {
+        "_aws": {
+            "Timestamp": timestamp_ms,
+            "CloudWatchMetrics": [{
+                "Namespace": METRIC_NAMESPACE,
+                "Dimensions": [["FunctionName"]],
+                "Metrics": [
+                    {"Name": name, "Unit": "Count"}
+                    for name in metric_names
+                ],
+            }],
+        },
+        "event": "SemanticEmbeddingLifecycleBatch",
+        "FunctionName": function_name,
+        "RecordCount": telemetry["recordCount"],
+        "RecordFailures": telemetry["failureCount"],
+    }
+    document.update(telemetry["failureCounts"])
+    return document
 
 
 def _result(
@@ -334,7 +431,12 @@ __all__ = [
     "BatchItemFailure",
     "EmbeddingStreamBatchResponse",
     "EmbeddingStreamRecordResult",
+    "EmbeddingStreamBatchTelemetry",
+    "FAILURE_CATEGORIES",
+    "METRIC_NAMESPACE",
     "SemanticEmbeddingLifecycleError",
     "apply_embedding_stream_record",
+    "build_embedding_telemetry_document",
     "process_embedding_stream_event",
+    "process_embedding_stream_event_with_telemetry",
 ]

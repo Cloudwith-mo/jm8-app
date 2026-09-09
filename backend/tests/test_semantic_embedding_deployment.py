@@ -244,7 +244,11 @@ exit "$status"
         )
         self.assertEqual(
             set(statements["ReadAndPersistExactEntryChunks"]["Action"]),
-            {"dynamodb:Query", "dynamodb:TransactWriteItems"},
+            {
+                "dynamodb:GetItem",
+                "dynamodb:Query",
+                "dynamodb:TransactWriteItems",
+            },
         )
         self.assertEqual(
             statements["InvokeExactEmbeddingModel"],

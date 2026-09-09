@@ -129,6 +129,20 @@ collect_state() {
     --region "$AWS_REGION" \
     --output json \
     > "$BUILD_DIR/table-${suffix}.json"
+  aws lambda list-event-source-mappings \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/mappings-${suffix}.json"
+  if [ "$TARGET_STATE" = Disabled ]; then
+    printf '{}\n' > "$BUILD_DIR/worker-${suffix}.json"
+    printf '{}\n' > "$BUILD_DIR/concurrency-${suffix}.json"
+    printf '{}\n' > "$BUILD_DIR/worker-policy-${suffix}.json"
+    printf '{}\n' > "$BUILD_DIR/queue-${suffix}.json"
+    printf '{}\n' > "$BUILD_DIR/alarms-${suffix}.json"
+    return
+  fi
   aws lambda get-function-configuration \
     --function-name "$WORKER_FUNCTION_NAME" \
     --profile "$AWS_PROFILE" \
@@ -147,12 +161,6 @@ collect_state() {
     --profile "$AWS_PROFILE" \
     --output json \
     > "$BUILD_DIR/worker-policy-${suffix}.json"
-  aws lambda list-event-source-mappings \
-    --function-name "$WORKER_FUNCTION_NAME" \
-    --profile "$AWS_PROFILE" \
-    --region "$AWS_REGION" \
-    --output json \
-    > "$BUILD_DIR/mappings-${suffix}.json"
   aws sqs get-queue-url \
     --queue-name "$DLQ_NAME" \
     --profile "$AWS_PROFILE" \

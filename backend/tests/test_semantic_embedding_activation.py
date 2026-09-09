@@ -116,7 +116,8 @@ def documents(mapping_state="Disabled"):
             {"Sid": "ListEntryChunksStreams", "Effect": "Allow",
              "Action": ["dynamodb:ListStreams"], "Resource": "*"},
             {"Sid": "ReadAndPersistExactEntryChunks", "Effect": "Allow",
-             "Action": ["dynamodb:Query", "dynamodb:TransactWriteItems"],
+             "Action": ["dynamodb:GetItem", "dynamodb:Query",
+                        "dynamodb:TransactWriteItems"],
              "Resource": TABLE_ARN},
             {"Sid": "InvokeExactEmbeddingModel", "Effect": "Allow",
              "Action": ["bedrock:InvokeModel"], "Resource": MODEL_ARN},
@@ -155,6 +156,8 @@ def documents(mapping_state="Disabled"):
          "FunctionName", WORKER_NAME),
         (f"{WORKER_NAME}-iterator-age", "AWS/Lambda", "IteratorAge", "Maximum",
          300000.0, "FunctionName", WORKER_NAME),
+        (f"{WORKER_NAME}-record-failures", "JournalM8/SemanticEmbedding",
+         "RecordFailures", "Sum", 1.0, "FunctionName", WORKER_NAME),
         (f"{DLQ_NAME}-visible-messages", "AWS/SQS",
          "ApproximateNumberOfMessagesVisible", "Maximum", 1.0,
          "QueueName", DLQ_NAME),
@@ -215,6 +218,46 @@ class SemanticEmbeddingActivationTests(unittest.TestCase):
             validate(documents(), target="Disabled", mode="disable"),
             "NOOP",
         )
+
+    def test_disable_remains_available_during_an_embedding_incident(self):
+        values = documents("Enabled")
+        values["table_document"]["Table"]["VectorIndexes"] = []
+        values["worker_configuration"] = {"State": "Failed"}
+        values["worker_concurrency"] = {}
+        values["worker_policy_response"] = {}
+        values["queue_attributes"]["Attributes"][
+            "ApproximateNumberOfMessages"
+        ] = "3"
+        values["alarms_document"]["MetricAlarms"][3][
+            "StateValue"
+        ] = "ALARM"
+
+        self.assertEqual(
+            validate(values, target="Disabled", mode="disable"),
+            "DISABLE",
+        )
+
+    def test_disable_still_requires_exact_target_identity(self):
+        mutations = []
+
+        value = documents("Enabled")
+        value["caller_identity"]["Account"] = "000000000000"
+        mutations.append(value)
+
+        value = documents("Enabled")
+        value["table_document"]["Table"]["TableArn"] = "invalid"
+        mutations.append(value)
+
+        value = documents("Enabled")
+        value["mappings_document"]["EventSourceMappings"][0][
+            "FunctionArn"
+        ] = "invalid"
+        mutations.append(value)
+
+        for index, value in enumerate(mutations):
+            with self.subTest(boundary=index):
+                with self.assertRaises(SemanticEmbeddingActivationError):
+                    validate(value, target="Disabled", mode="disable")
 
     def test_steady_requires_enabled_mapping_and_passing_report(self):
         report = passing_report()
@@ -311,6 +354,8 @@ class SemanticEmbeddingActivationTests(unittest.TestCase):
         )
         self.assertIn("ACTIVATED_BY_THIS_RUN", source)
         self.assertIn("attempting to disable the mapping", source)
+        self.assertIn('if [ "$TARGET_STATE" = Disabled ]', source)
+        self.assertIn("return", source)
         self.assertEqual(source.count("aws lambda update-event-source-mapping"), 3)
         for forbidden in (
             "aws lambda update-function-code",
