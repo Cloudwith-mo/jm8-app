@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+: "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required. Run: source .env}"
+: "${SEMANTIC_EMBEDDING_MAPPING_ENABLED:?SEMANTIC_EMBEDDING_MAPPING_ENABLED is required.}"
+: "${SEMANTIC_EMBEDDING_ACTIVATION_MODE:?SEMANTIC_EMBEDDING_ACTIVATION_MODE is required.}"
+
+ACTIVATION_EXECUTE="${SEMANTIC_EMBEDDING_ACTIVATION_EXECUTE:-false}"
+case "$ACTIVATION_EXECUTE" in
+  true|false) ;;
+  *)
+    echo "SEMANTIC_EMBEDDING_ACTIVATION_EXECUTE must be exactly true or false." >&2
+    exit 1
+    ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="deploy-semantic-embedding"
+jm8_validate_contract_or_exit
+
+case "$SEMANTIC_EMBEDDING_MAPPING_ENABLED:$SEMANTIC_EMBEDDING_ACTIVATION_MODE" in
+  true:canary)
+    if [ "${SEMANTIC_EMBEDDING_CANARY_CONFIRMATION:-}" != "$STAGE" ]; then
+      echo "Semantic-embedding canary activation requires SEMANTIC_EMBEDDING_CANARY_CONFIRMATION=\$STAGE." >&2
+      exit 1
+    fi
+    if [ -n "${SEMANTIC_RETRIEVAL_EVALUATION_REPORT:-}" ]; then
+      echo "Semantic retrieval evaluation report is not accepted in canary mode." >&2
+      exit 1
+    fi
+    TARGET_STATE="Enabled"
+    ;;
+  true:steady)
+    : "${SEMANTIC_RETRIEVAL_EVALUATION_REPORT:?SEMANTIC_RETRIEVAL_EVALUATION_REPORT is required for steady mode.}"
+    if [ ! -f "$SEMANTIC_RETRIEVAL_EVALUATION_REPORT" ]; then
+      echo "Semantic retrieval evaluation report was not found." >&2
+      exit 1
+    fi
+    TARGET_STATE="Enabled"
+    ;;
+  false:disable)
+    if [ -n "${SEMANTIC_RETRIEVAL_EVALUATION_REPORT:-}" ]; then
+      echo "Semantic retrieval evaluation report is not accepted in disable mode." >&2
+      exit 1
+    fi
+    TARGET_STATE="Disabled"
+    ;;
+  *)
+    echo "Semantic-embedding activation mode and target are inconsistent." >&2
+    exit 1
+    ;;
+esac
+
+WORKER_FUNCTION_NAME="${APP_NAME}-${STAGE}-semantic-embedding-worker"
+WORKER_ROLE_NAME="${APP_NAME}-${STAGE}-semantic-embedding-worker-role"
+WORKER_POLICY_NAME="${APP_NAME}-${STAGE}-semantic-embedding-worker-access"
+DLQ_NAME="${APP_NAME}-${STAGE}-semantic-embedding-dlq"
+BUILD_DIR="$(mktemp -d /tmp/jm8-semantic-embedding-activation.XXXXXX)"
+MAPPING_UUID=""
+ACTIVATED_BY_THIS_RUN=false
+
+poll_mapping() {
+  local expected_state="$1"
+  local attempt=1
+  local state=""
+  while [ "$attempt" -le 20 ]; do
+    state="$(aws lambda get-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      --query State \
+      --output text)"
+    if [ "$state" = "$expected_state" ]; then
+      return 0
+    fi
+    case "$state" in
+      Creating|Enabling|Disabling|Updating) ;;
+      *)
+        echo "Semantic-embedding mapping entered an invalid state." >&2
+        return 1
+        ;;
+    esac
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le 20 ]; then
+      sleep 3
+    fi
+  done
+  echo "Semantic-embedding mapping did not reach its target state." >&2
+  return 1
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$ACTIVATED_BY_THIS_RUN" = true ] && [ -n "$MAPPING_UUID" ]; then
+    echo "Activation failed after enabling; attempting to disable the mapping." >&2
+    set +e
+    aws lambda update-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --no-enabled \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+    poll_mapping Disabled
+    set -e
+  fi
+  rm -rf -- "$BUILD_DIR"
+  exit "$status"
+}
+trap cleanup EXIT
+
+collect_state() {
+  local suffix="$1"
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/caller-${suffix}.json"
+  aws dynamodb describe-table \
+    --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/table-${suffix}.json"
+  aws lambda get-function-configuration \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/worker-${suffix}.json"
+  aws lambda get-function-concurrency \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/concurrency-${suffix}.json"
+  aws iam get-role-policy \
+    --role-name "$WORKER_ROLE_NAME" \
+    --policy-name "$WORKER_POLICY_NAME" \
+    --profile "$AWS_PROFILE" \
+    --output json \
+    > "$BUILD_DIR/worker-policy-${suffix}.json"
+  aws lambda list-event-source-mappings \
+    --function-name "$WORKER_FUNCTION_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/mappings-${suffix}.json"
+  aws sqs get-queue-url \
+    --queue-name "$DLQ_NAME" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query QueueUrl \
+    --output text \
+    > "$BUILD_DIR/dlq-url-${suffix}.txt"
+  local queue_url
+  queue_url="$(<"$BUILD_DIR/dlq-url-${suffix}.txt")"
+  aws sqs get-queue-attributes \
+    --queue-url "$queue_url" \
+    --attribute-names All \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/queue-${suffix}.json"
+  aws cloudwatch describe-alarms \
+    --alarm-names \
+      "${WORKER_FUNCTION_NAME}-errors" \
+      "${WORKER_FUNCTION_NAME}-throttles" \
+      "${WORKER_FUNCTION_NAME}-iterator-age" \
+      "${DLQ_NAME}-visible-messages" \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --output json \
+    > "$BUILD_DIR/alarms-${suffix}.json"
+}
+
+validation_command() {
+  local command="$1"
+  local suffix="$2"
+  local arguments=(
+    "$SCRIPT_DIR/jm8_semantic_embedding_activation.py"
+    "$command"
+    --caller "$BUILD_DIR/caller-${suffix}.json"
+    --table "$BUILD_DIR/table-${suffix}.json"
+    --worker "$BUILD_DIR/worker-${suffix}.json"
+    --concurrency "$BUILD_DIR/concurrency-${suffix}.json"
+    --worker-policy "$BUILD_DIR/worker-policy-${suffix}.json"
+    --mappings "$BUILD_DIR/mappings-${suffix}.json"
+    --queue "$BUILD_DIR/queue-${suffix}.json"
+    --alarms "$BUILD_DIR/alarms-${suffix}.json"
+    --target-state "$TARGET_STATE"
+    --activation-mode "$SEMANTIC_EMBEDDING_ACTIVATION_MODE"
+    --app-name "$APP_NAME"
+    --stage "$STAGE"
+    --region "$AWS_REGION"
+    --account "$EXPECTED_AWS_ACCOUNT_ID"
+  )
+  if [ "$SEMANTIC_EMBEDDING_ACTIVATION_MODE" = steady ]; then
+    arguments+=(--evaluation-report "$SEMANTIC_RETRIEVAL_EVALUATION_REPORT")
+  fi
+  python3 "${arguments[@]}"
+}
+
+collect_state before
+ACTION="$(validation_command preflight before)"
+MAPPING_UUID="$(python3 - "$BUILD_DIR/mappings-before.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+mappings = json.loads(Path(sys.argv[1]).read_text())["EventSourceMappings"]
+print(mappings[0]["UUID"])
+PY
+)"
+
+if [ "$ACTIVATION_EXECUTE" = false ]; then
+  echo "Semantic-embedding activation readiness is verified."
+  echo "Required mapping action: $ACTION"
+  echo "No mapping state was changed."
+  exit 0
+fi
+
+case "$ACTION" in
+  ENABLE)
+    ACTIVATED_BY_THIS_RUN=true
+    aws lambda update-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --enabled \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+    poll_mapping Enabled
+    ;;
+  DISABLE)
+    aws lambda update-event-source-mapping \
+      --uuid "$MAPPING_UUID" \
+      --no-enabled \
+      --profile "$AWS_PROFILE" \
+      --region "$AWS_REGION" \
+      >/dev/null
+    poll_mapping Disabled
+    ;;
+  NOOP) ;;
+  *)
+    echo "Semantic-embedding activation action is invalid." >&2
+    exit 1
+    ;;
+esac
+
+collect_state final
+validation_command verify final >/dev/null
+ACTIVATED_BY_THIS_RUN=false
+
+echo "Semantic-embedding mapping is ${TARGET_STATE} in ${SEMANTIC_EMBEDDING_ACTIVATION_MODE} mode."
