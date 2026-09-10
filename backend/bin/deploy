@@ -540,3 +540,7 @@ aws lambda get-function \
 # Reconcile the semantic-embedding worker after semantic-memory infrastructure.
 # Its EntryChunks mapping is independently gated and disabled by default.
 ./bin/deploy-semantic-embedding
+
+# Publish the semantic pipeline efficiency dashboard only after the memory,
+# vector-index, and embedding-worker infrastructure has been reconciled.
+./bin/deploy-semantic-observability

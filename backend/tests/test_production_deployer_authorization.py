@@ -1066,6 +1066,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "create-frontend-hosting",
             "deploy-frontend",
             "deploy-observability",
+            "deploy-semantic-observability",
             "deploy-account-export",
             "deploy-semantic-memory",
             "deploy-semantic-embedding",
