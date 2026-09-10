@@ -356,6 +356,10 @@ class SemanticEmbeddingActivationTests(unittest.TestCase):
         self.assertIn("attempting to disable the mapping", source)
         self.assertIn('if [ "$TARGET_STATE" = Disabled ]', source)
         self.assertIn("return", source)
+        self.assertIn(
+            '"${WORKER_FUNCTION_NAME}-record-failures"',
+            source,
+        )
         self.assertEqual(source.count("aws lambda update-event-source-mapping"), 3)
         for forbidden in (
             "aws lambda update-function-code",

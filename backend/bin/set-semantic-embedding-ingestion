@@ -182,6 +182,7 @@ collect_state() {
       "${WORKER_FUNCTION_NAME}-errors" \
       "${WORKER_FUNCTION_NAME}-throttles" \
       "${WORKER_FUNCTION_NAME}-iterator-age" \
+      "${WORKER_FUNCTION_NAME}-record-failures" \
       "${DLQ_NAME}-visible-messages" \
     --profile "$AWS_PROFILE" \
     --region "$AWS_REGION" \
