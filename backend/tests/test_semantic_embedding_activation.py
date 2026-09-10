@@ -115,10 +115,16 @@ def documents(mapping_state="Disabled"):
                         "dynamodb:GetShardIterator"], "Resource": STREAM_ARN},
             {"Sid": "ListEntryChunksStreams", "Effect": "Allow",
              "Action": ["dynamodb:ListStreams"], "Resource": "*"},
-            {"Sid": "ReadAndPersistExactEntryChunks", "Effect": "Allow",
-             "Action": ["dynamodb:GetItem", "dynamodb:Query",
-                        "dynamodb:TransactWriteItems"],
+            {"Sid": "ReadExactEntryChunks", "Effect": "Allow",
+             "Action": ["dynamodb:GetItem", "dynamodb:Query"],
              "Resource": TABLE_ARN},
+            {"Sid": "PersistExactEntryChunksTransaction", "Effect": "Allow",
+             "Action": ["dynamodb:ConditionCheckItem",
+                        "dynamodb:UpdateItem"],
+             "Resource": TABLE_ARN,
+             "Condition": {"ForAnyValue:StringEquals": {
+                 "dynamodb:EnclosingOperation": ["TransactWriteItems"],
+             }}},
             {"Sid": "InvokeExactEmbeddingModel", "Effect": "Allow",
              "Action": ["bedrock:InvokeModel"], "Resource": MODEL_ARN},
             {"Sid": "SendExactSemanticEmbeddingDlq", "Effect": "Allow",
@@ -304,7 +310,7 @@ class SemanticEmbeddingActivationTests(unittest.TestCase):
         mutations.append(value)
 
         value = documents()
-        value["worker_policy_response"]["PolicyDocument"]["Statement"][3]["Resource"] = "*"
+        value["worker_policy_response"]["PolicyDocument"]["Statement"][4]["Resource"] = "*"
         mutations.append(value)
 
         value = documents()

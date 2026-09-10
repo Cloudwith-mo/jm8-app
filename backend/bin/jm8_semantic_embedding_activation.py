@@ -187,14 +187,26 @@ def validate_activation_readiness(
                 "Resource": "*",
             },
             {
-                "Sid": "ReadAndPersistExactEntryChunks",
+                "Sid": "ReadExactEntryChunks",
+                "Effect": "Allow",
+                "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+                "Resource": table_arn,
+            },
+            {
+                "Sid": "PersistExactEntryChunksTransaction",
                 "Effect": "Allow",
                 "Action": [
-                    "dynamodb:GetItem",
-                    "dynamodb:Query",
-                    "dynamodb:TransactWriteItems",
+                    "dynamodb:ConditionCheckItem",
+                    "dynamodb:UpdateItem",
                 ],
                 "Resource": table_arn,
+                "Condition": {
+                    "ForAnyValue:StringEquals": {
+                        "dynamodb:EnclosingOperation": [
+                            "TransactWriteItems"
+                        ],
+                    },
+                },
             },
             {
                 "Sid": "InvokeExactEmbeddingModel",

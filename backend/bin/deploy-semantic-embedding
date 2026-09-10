@@ -242,7 +242,8 @@ stream_arn, table_arn, model_arn, dlq_arn = sys.argv[1:]
 print(json.dumps({"Version": "2012-10-17", "Statement": [
     {"Sid": "ReadExactEntryChunksStream", "Effect": "Allow", "Action": ["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"], "Resource": stream_arn},
     {"Sid": "ListEntryChunksStreams", "Effect": "Allow", "Action": ["dynamodb:ListStreams"], "Resource": "*"},
-    {"Sid": "ReadAndPersistExactEntryChunks", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:TransactWriteItems"], "Resource": table_arn},
+    {"Sid": "ReadExactEntryChunks", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:Query"], "Resource": table_arn},
+    {"Sid": "PersistExactEntryChunksTransaction", "Effect": "Allow", "Action": ["dynamodb:ConditionCheckItem", "dynamodb:UpdateItem"], "Resource": table_arn, "Condition": {"ForAnyValue:StringEquals": {"dynamodb:EnclosingOperation": ["TransactWriteItems"]}}},
     {"Sid": "InvokeExactEmbeddingModel", "Effect": "Allow", "Action": ["bedrock:InvokeModel"], "Resource": model_arn},
     {"Sid": "SendExactSemanticEmbeddingDlq", "Effect": "Allow", "Action": ["sqs:SendMessage"], "Resource": dlq_arn},
 ]}, sort_keys=True))

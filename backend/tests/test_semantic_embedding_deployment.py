@@ -243,11 +243,31 @@ exit "$status"
             },
         )
         self.assertEqual(
-            set(statements["ReadAndPersistExactEntryChunks"]["Action"]),
+            statements["ReadExactEntryChunks"],
             {
-                "dynamodb:GetItem",
-                "dynamodb:Query",
-                "dynamodb:TransactWriteItems",
+                "Sid": "ReadExactEntryChunks",
+                "Effect": "Allow",
+                "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+                "Resource": arguments[2],
+            },
+        )
+        self.assertEqual(
+            statements["PersistExactEntryChunksTransaction"],
+            {
+                "Sid": "PersistExactEntryChunksTransaction",
+                "Effect": "Allow",
+                "Action": [
+                    "dynamodb:ConditionCheckItem",
+                    "dynamodb:UpdateItem",
+                ],
+                "Resource": arguments[2],
+                "Condition": {
+                    "ForAnyValue:StringEquals": {
+                        "dynamodb:EnclosingOperation": [
+                            "TransactWriteItems"
+                        ],
+                    },
+                },
             },
         )
         self.assertEqual(
@@ -269,6 +289,7 @@ exit "$status"
             "dynamodb:DeleteTable",
             "dynamodb:DeleteItem",
             "dynamodb:BatchWriteItem",
+            "dynamodb:TransactWriteItems",
             "bedrock:InvokeModelWithResponseStream",
             "s3:",
             "cognito-idp:",
