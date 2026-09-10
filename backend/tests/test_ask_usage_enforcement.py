@@ -71,6 +71,7 @@ def ready_context():
 def partial_context():
     return {
         "contextStatus": "PARTIAL",
+        "question": "What patterns keep returning?",
         "coverage": {
             "analyzedEntries": 1,
         },
@@ -80,6 +81,7 @@ def partial_context():
 def empty_context():
     return {
         "contextStatus": "EMPTY",
+        "question": "What patterns keep returning?",
         "coverage": {
             "analyzedEntries": 0,
         },
@@ -146,10 +148,10 @@ def api_event():
 class AskUsageHelperTests(
     unittest.TestCase
 ):
-    def test_empty_context_does_not_require_usage(
+    def test_empty_context_requires_usage_for_query_embedding(
         self,
     ):
-        self.assertFalse(
+        self.assertTrue(
             ask_context_requires_usage(
                 empty_context()
             )
@@ -405,6 +407,18 @@ class AskUsageApiTests(
         self.guard = patch("app.ensure_user_mutation_allowed")
         self.guard.start()
         self.addCleanup(self.guard.stop)
+        self.semantic_context = patch(
+            "app.build_semantic_ask_context",
+            side_effect=lambda _user_id, context: {
+                **context,
+                "semanticEvidence": {
+                    "status": "EMPTY",
+                    "items": [],
+                },
+            },
+        )
+        self.semantic_context.start()
+        self.addCleanup(self.semantic_context.stop)
 
     def test_quota_limit_returns_429_before_answer(
         self,

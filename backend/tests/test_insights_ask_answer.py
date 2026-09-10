@@ -213,6 +213,35 @@ def build_context() -> dict:
     )
 
 
+def add_semantic_evidence(
+    context: dict,
+    *,
+    excerpt: str = "I kept returning to the same difficult routine.",
+    evidence_date: str = "2026-01-10",
+) -> dict:
+    return {
+        **context,
+        "semanticEvidence": {
+            "semanticContextVersion": "1.0",
+            "retrievalVersion": "1.0",
+            "status": "READY",
+            "retrievedEvidence": 1,
+            "includedEvidence": 1,
+            "scopeExcludedEvidence": 0,
+            "invalidExcludedEvidence": 0,
+            "duplicateExcludedEvidence": 0,
+            "limitExcludedEvidence": 0,
+            "contextTruncated": False,
+            "items": [{
+                "date": evidence_date,
+                "sourceType": "typed",
+                "distance": 0.125,
+                "excerpt": excerpt,
+            }],
+        },
+    }
+
+
 class FakeBedrockClient:
     def __init__(
         self,
@@ -435,6 +464,53 @@ class AskAnswerTests(
             ],
         )
 
+    def test_semantic_evidence_can_answer_without_structured_analysis(self):
+        context = build_ask_context(
+            [],
+            question="What challenge keeps returning?",
+            now=FIXED_NOW,
+        )
+        context = add_semantic_evidence(context)
+        payload = {
+            **VALID_PAYLOAD,
+            "evidence": [{
+                "paraphrase": "A journal passage described returning to a difficult routine.",
+                "date": "2026-01-10",
+                "sourceType": "typed",
+                "relevance": "high",
+            }],
+        }
+        client = FakeBedrockClient(payload)
+
+        result = answer_journal_history(
+            context,
+            client=client,
+            now=FIXED_NOW,
+        )
+
+        self.assertIsNotNone(client.last_request)
+        self.assertEqual(result["status"], "ANSWERED")
+        self.assertEqual(len(result["evidence"]), 1)
+
+    def test_semantic_excerpt_is_bounded_to_model_context(self):
+        private_excerpt = "A private but relevant journal passage."
+        client = FakeBedrockClient()
+
+        answer_journal_history(
+            add_semantic_evidence(
+                build_context(),
+                excerpt=private_excerpt,
+            ),
+            client=client,
+            now=FIXED_NOW,
+        )
+
+        user_text = client.last_request["messages"][0]["content"][0]["text"]
+        self.assertIn(private_excerpt, user_text)
+        self.assertIn('"semanticEvidence"', user_text)
+        self.assertNotIn("entryId", user_text)
+        self.assertNotIn("queryEmbedding", user_text)
+
     def test_request_uses_structured_schema(
         self,
     ):
@@ -465,7 +541,7 @@ class AskAnswerTests(
 
         self.assertEqual(
             schema["name"],
-            "jm8_history_answer_v1",
+            "jm8_history_answer_v2",
         )
 
         user_text = request[

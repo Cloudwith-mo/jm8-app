@@ -37,6 +37,20 @@ else:
     os.environ["ENTRY_CHUNKS_TABLE_NAME"] = PREVIOUS_TABLE_NAME
 
 
+def telemetry(*, failures: int) -> dict[str, object]:
+    return {
+        "recordCount": 1,
+        "failureCount": failures,
+        "failureCounts": {
+            "MemoryReadFailures": failures,
+            "ProviderFailures": 0,
+            "PersistenceFailures": 0,
+            "ContractFailures": 0,
+            "UnexpectedFailures": 0,
+        },
+    }
+
+
 class SemanticEmbeddingWorkerTests(unittest.TestCase):
     def test_cold_start_creates_only_exact_runtime_dependencies(self):
         self.assertEqual([call.args for call in RESOURCE_CALLS], [("dynamodb",)])
@@ -59,18 +73,26 @@ class SemanticEmbeddingWorkerTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(
             worker,
-            "process_embedding_stream_event",
-            return_value=expected,
-        ) as process, patch("sys.stdout", output):
+            "process_embedding_stream_event_with_telemetry",
+            return_value=(expected, telemetry(failures=1)),
+        ) as process, patch.object(
+            worker.time,
+            "time",
+            return_value=123.456,
+        ), patch.dict(
+            os.environ,
+            {"AWS_LAMBDA_FUNCTION_NAME": "journalm8-test-worker"},
+        ), patch("sys.stdout", output):
             result = worker.lambda_handler(event, object())
 
         process.assert_called_once_with(TABLE, BEDROCK, event)
         self.assertIs(result, expected)
-        self.assertEqual(json.loads(output.getvalue()), {
-            "event": "SemanticEmbeddingLifecycleBatch",
-            "processedCount": 1,
-            "failedCount": 1,
-        })
+        logged = json.loads(output.getvalue())
+        self.assertEqual(logged["RecordCount"], 1)
+        self.assertEqual(logged["RecordFailures"], 1)
+        self.assertEqual(logged["MemoryReadFailures"], 1)
+        self.assertEqual(logged["FunctionName"], "journalm8-test-worker")
+        self.assertEqual(logged["_aws"]["Timestamp"], 123456)
 
     def test_operational_log_is_aggregate_and_privacy_safe(self):
         secrets = (
@@ -96,15 +118,27 @@ class SemanticEmbeddingWorkerTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(
             worker,
-            "process_embedding_stream_event",
-            return_value={"batchItemFailures": []},
+            "process_embedding_stream_event_with_telemetry",
+            return_value=(
+                {"batchItemFailures": []},
+                telemetry(failures=0),
+            ),
         ), patch("sys.stdout", output):
             worker.lambda_handler(event, None)
 
         logged = output.getvalue()
+        payload = json.loads(logged)
         self.assertEqual(
-            set(json.loads(logged)),
-            {"event", "processedCount", "failedCount"},
+            set(payload) - {"_aws", "event", "FunctionName"},
+            {
+                "RecordCount",
+                "RecordFailures",
+                "MemoryReadFailures",
+                "ProviderFailures",
+                "PersistenceFailures",
+                "ContractFailures",
+                "UnexpectedFailures",
+            },
         )
         for secret in secrets:
             self.assertNotIn(secret, logged)
@@ -114,7 +148,7 @@ class SemanticEmbeddingWorkerTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(
             worker,
-            "process_embedding_stream_event",
+            "process_embedding_stream_event_with_telemetry",
             side_effect=failure,
         ), patch("sys.stdout", output), self.assertRaises(RuntimeError) as raised:
             worker.lambda_handler({"Records": []}, None)

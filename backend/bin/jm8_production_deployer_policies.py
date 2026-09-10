@@ -67,6 +67,7 @@ LOG_DELIVERY_CONTROL_PLANE_ACTIONS = {
 }
 RESOURCE_STAR_ACTIONS = {
     "cloudwatch:DescribeAlarms",
+    "cloudwatch:GetMetricData",
     "cloudfront:CreateDistribution",
     "cloudfront:CreateOriginAccessControl",
     "cognito-idp:CreateUserPool",
@@ -128,6 +129,9 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
     entry_chunks_table_arn = (
         f"arn:aws:dynamodb:{region}:{ACCOUNT_ID}:"
         "table/journalm8-prod-entry-chunks"
+    )
+    entry_chunks_vector_index_arn = (
+        f"{entry_chunks_table_arn}/index/SemanticEmbeddingIndex"
     )
     semantic_worker_arn = (
         f"arn:aws:lambda:{region}:{ACCOUNT_ID}:function:"
@@ -225,6 +229,13 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
                 "dynamodb:UpdateTable",
             ),
             entry_chunks_table_arn,
+        ),
+        _statement(
+            "SearchProductionSemanticVectorIndex",
+            (
+                "dynamodb:SearchVectors",
+            ),
+            entry_chunks_vector_index_arn,
         ),
         _statement(
             "ManageProductionRawBucket",
@@ -721,6 +732,12 @@ def generate_policies(region: str = "us-east-1") -> dict[str, dict[str, Any]]:
         _statement(
             "DescribeProductionAlarms",
             ("cloudwatch:DescribeAlarms",),
+            "*",
+            requested_region_condition,
+        ),
+        _statement(
+            "ReadProductionOperationalMetrics",
+            ("cloudwatch:GetMetricData",),
             "*",
             requested_region_condition,
         ),

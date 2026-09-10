@@ -356,6 +356,7 @@ export APP_NAME
 export STAGE
 export EXPECTED_AWS_ACCOUNT_ID
 export TABLE_NAME
+export ENTRY_CHUNKS_TABLE_NAME
 export RAW_BUCKET
 export OCR_WORKFLOW_ARN
 export HISTORICAL_REANALYSIS_WORKFLOW_ARN
@@ -389,6 +390,7 @@ environment_keys = [
     "STAGE",
     "EXPECTED_AWS_ACCOUNT_ID",
     "TABLE_NAME",
+    "ENTRY_CHUNKS_TABLE_NAME",
     "RAW_BUCKET",
     "OCR_WORKFLOW_ARN",
     "HISTORICAL_REANALYSIS_WORKFLOW_ARN",
@@ -531,6 +533,14 @@ aws lambda get-function \
 # intentionally disabled state. Activation requires a future explicit gate.
 ./bin/deploy-semantic-memory
 
+# Reconcile the exact tenant-partitioned vector index before embeddings can be
+# written. Existing incompatible indexes fail closed and are never replaced.
+./bin/deploy-semantic-vector-index
+
 # Reconcile the semantic-embedding worker after semantic-memory infrastructure.
 # Its EntryChunks mapping is independently gated and disabled by default.
 ./bin/deploy-semantic-embedding
+
+# Publish the semantic pipeline efficiency dashboard only after the memory,
+# vector-index, and embedding-worker infrastructure has been reconciled.
+./bin/deploy-semantic-observability

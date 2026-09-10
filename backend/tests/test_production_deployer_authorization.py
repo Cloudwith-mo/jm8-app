@@ -360,6 +360,37 @@ class PolicyGenerationTests(unittest.TestCase):
         )
         self.assertNotIn("dynamodb:DeleteTable", statement["Action"])
 
+    def test_semantic_vector_search_is_exact_and_least_privilege(self):
+        statements = generate_policies()[
+            "journalm8-prod-deployer-foundation"
+        ]["Statement"]
+        matches = [
+            statement
+            for statement in statements
+            if "dynamodb:SearchVectors" in statement["Action"]
+        ]
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(
+            matches[0],
+            {
+                "Sid": "SearchProductionSemanticVectorIndex",
+                "Effect": "Allow",
+                "Action": ["dynamodb:SearchVectors"],
+                "Resource": (
+                    f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+                    "table/journalm8-prod-entry-chunks/index/"
+                    "SemanticEmbeddingIndex"
+                ),
+            },
+        )
+        self.assertNotIn("*", matches[0]["Resource"])
+        self.assertNotEqual(
+            matches[0]["Resource"],
+            f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+            "table/journalm8-prod-entry-chunks",
+        )
+
     def test_entry_chunks_runtime_policy_has_only_required_data_actions(self):
         source = (BIN_DIR / "create-resources").read_text(encoding="utf-8")
         policy_source = source.split(
@@ -386,6 +417,7 @@ class PolicyGenerationTests(unittest.TestCase):
             set(statement["Action"]),
             {
                 "dynamodb:GetItem",
+                "dynamodb:BatchGetItem",
                 "dynamodb:PutItem",
                 "dynamodb:Query",
                 "dynamodb:BatchWriteItem",
@@ -397,6 +429,25 @@ class PolicyGenerationTests(unittest.TestCase):
                 f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
                 "table/journalm8-prod-entry-chunks"
             ),
+        )
+
+        vector_statement = next(
+            item
+            for item in policy["Statement"]
+            if item["Sid"] == "DynamoDBSemanticVectorSearch"
+        )
+        self.assertEqual(
+            vector_statement,
+            {
+                "Sid": "DynamoDBSemanticVectorSearch",
+                "Effect": "Allow",
+                "Action": ["dynamodb:SearchVectors"],
+                "Resource": (
+                    f"arn:aws:dynamodb:us-east-1:{ACCOUNT_ID}:"
+                    "table/journalm8-prod-entry-chunks/index/"
+                    "SemanticEmbeddingIndex"
+                ),
+            },
         )
         self.assertNotIn("*", statement["Resource"])
         self.assertNotIn("dynamodb:Scan", statement["Action"])
@@ -655,6 +706,23 @@ class PolicyGenerationTests(unittest.TestCase):
                 "Sid": "DescribeProductionAlarms",
                 "Effect": "Allow",
                 "Action": ["cloudwatch:DescribeAlarms"],
+                "Resource": "*",
+                "Condition": {
+                    "StringEquals": {"aws:RequestedRegion": "us-east-1"},
+                },
+            },
+        )
+
+        operational_metrics = next(
+            item for item in statements
+            if item["Sid"] == "ReadProductionOperationalMetrics"
+        )
+        self.assertEqual(
+            operational_metrics,
+            {
+                "Sid": "ReadProductionOperationalMetrics",
+                "Effect": "Allow",
+                "Action": ["cloudwatch:GetMetricData"],
                 "Resource": "*",
                 "Condition": {
                     "StringEquals": {"aws:RequestedRegion": "us-east-1"},
@@ -998,6 +1066,7 @@ class PolicyGenerationTests(unittest.TestCase):
             "create-frontend-hosting",
             "deploy-frontend",
             "deploy-observability",
+            "deploy-semantic-observability",
             "deploy-account-export",
             "deploy-semantic-memory",
             "deploy-semantic-embedding",

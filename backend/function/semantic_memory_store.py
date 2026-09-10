@@ -235,6 +235,13 @@ def delete_user_memory(table: object, user_id: str) -> int:
     return len(keys)
 
 
+def semantic_memory_manifest_key(user_id: str, entry_id: str) -> dict[str, str]:
+    """Return the exact key for one tenant-owned active-generation manifest."""
+
+    _validate_identity(user_id, entry_id)
+    return {"PK": _user_pk(user_id), "SK": _manifest_sk(entry_id)}
+
+
 def _entry_identity(entry: Mapping[str, object]) -> tuple[str, str]:
     if not isinstance(entry, Mapping):
         raise SemanticMemoryIdentityError("entry must be a mapping")
@@ -697,4 +704,5 @@ __all__ = [
     "delete_user_memory",
     "get_entry_memory",
     "replace_entry_memory",
+    "semantic_memory_manifest_key",
 ]

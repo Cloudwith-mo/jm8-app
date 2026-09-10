@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Mapping
 from typing import Any
 
 import boto3
 
-from semantic_embedding_lifecycle import process_embedding_stream_event
+from semantic_embedding_lifecycle import (
+    build_embedding_telemetry_document,
+    process_embedding_stream_event_with_telemetry,
+)
 
 
 class SemanticEmbeddingWorkerConfigurationError(RuntimeError):
@@ -33,19 +37,24 @@ bedrock_client = boto3.client("bedrock-runtime")
 def lambda_handler(event: Mapping[str, object], context: object) -> dict[str, Any]:
     """Delegate the batch contract and emit privacy-safe aggregate telemetry."""
 
-    response = process_embedding_stream_event(
+    response, telemetry = process_embedding_stream_event_with_telemetry(
         entry_chunks_table,
         bedrock_client,
         event,
     )
-    failures = response["batchItemFailures"]
-    records = event.get("Records") if isinstance(event, Mapping) else None
-    processed_count = len(records) if isinstance(records, list) else 0
-    print(json.dumps({
-        "event": "SemanticEmbeddingLifecycleBatch",
-        "processedCount": processed_count,
-        "failedCount": len(failures),
-    }, sort_keys=True, separators=(",", ":")))
+    function_name = os.environ.get(
+        "AWS_LAMBDA_FUNCTION_NAME",
+        "semantic-embedding-worker",
+    )
+    print(json.dumps(
+        build_embedding_telemetry_document(
+            telemetry,
+            function_name=function_name,
+            timestamp_ms=int(time.time() * 1000),
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    ))
     return response
 
 

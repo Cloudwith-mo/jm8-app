@@ -240,6 +240,18 @@ class AskHistoryPersistenceTests(
         self.guard = patch("app.ensure_user_mutation_allowed")
         self.guard.start()
         self.addCleanup(self.guard.stop)
+        self.semantic_context = patch(
+            "app.build_semantic_ask_context",
+            side_effect=lambda _user_id, context: {
+                **context,
+                "semanticEvidence": {
+                    "status": "EMPTY",
+                    "items": [],
+                },
+            },
+        )
+        self.semantic_context.start()
+        self.addCleanup(self.semantic_context.stop)
 
     def test_stable_id_is_deterministic(
         self,

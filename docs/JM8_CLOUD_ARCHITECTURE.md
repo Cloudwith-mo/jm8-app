@@ -207,6 +207,8 @@ sequenceDiagram
 
 `backend/bin/deploy-analysis-observability` creates analysis outcome, token, latency, and SDK-retry metrics in `JM8/${STAGE}/AI`, two analysis alarms, and `${APP_NAME}-${STAGE}-ai-operations`. `backend/bin/deploy-bedrock-budget` creates `${APP_NAME}-${STAGE}-bedrock-monthly`, defaulting to USD 10 per month, with actual-spend notifications above 50%, 80%, and 100% through the same SNS topic.
 
+`backend/bin/deploy-semantic-observability` creates the separate `${APP_NAME}-${STAGE}-semantic-pipeline` dashboard. It visualizes semantic-memory and embedding throughput, record success percentage, Lambda duration, stream backlog, DLQ depth, classified embedding failures, Bedrock request health and token volume, account-wide delayed Bedrock estimated charges, and EntryChunks activity. Its inventory counts come from DynamoDB `DescribeTable` and are labeled as approximate; the dashboard never scans journal or log content and does not claim that base-table and vector-index item counts form an exact coverage ratio.
+
 ```mermaid
 flowchart LR
     APIGW["API Gateway access logs<br/>and detailed metrics"] --> CW["CloudWatch"]

@@ -12,6 +12,7 @@ from urllib.parse import unquote
 VALID_STAGES = {"dev", "staging", "prod"}
 ARN_COMPONENT_PATTERN = re.compile(r"^[a-z0-9-]+$")
 ACCOUNT_PATTERN = re.compile(r"^[0-9]{12}$")
+SEMANTIC_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 
 
 def _load_json(path: Path, label: str) -> Any:
@@ -132,6 +133,7 @@ def _validate_destination_model_arn(
 def _policy_document(
     profile_arn: str,
     model_arns: list[str],
+    semantic_embedding_model_arn: str,
 ) -> dict[str, Any]:
     return {
         "Version": "2012-10-17",
@@ -158,6 +160,12 @@ def _policy_document(
                         "bedrock:InferenceProfileArn": profile_arn,
                     },
                 },
+            },
+            {
+                "Sid": "InvokeJM8SemanticQueryEmbeddingModel",
+                "Effect": "Allow",
+                "Action": ["bedrock:InvokeModel"],
+                "Resource": semantic_embedding_model_arn,
             },
         ],
     }
@@ -219,7 +227,20 @@ def build_policy(
     if len(set(model_arns)) != len(model_arns):
         raise SystemExit("Bedrock inference profile returned duplicate destination models.")
 
-    return _policy_document(profile_arn, sorted(model_arns))
+    semantic_embedding_model_arn = (
+        f"arn:{expected_partition}:bedrock:{expected_region}::"
+        f"foundation-model/{SEMANTIC_EMBEDDING_MODEL_ID}"
+    )
+    _validate_destination_model_arn(
+        semantic_embedding_model_arn,
+        expected_partition,
+    )
+
+    return _policy_document(
+        profile_arn,
+        sorted(model_arns),
+        semantic_embedding_model_arn,
+    )
 
 
 def _decode_policy_document(value: Any) -> dict[str, Any]:
@@ -269,6 +290,7 @@ def _validate_canonical_policy(
         "ReadJM8AnalysisInferenceProfile",
         "InvokeJM8AnalysisInferenceProfile",
         "InvokeJM8AnalysisDestinationModels",
+        "InvokeJM8SemanticQueryEmbeddingModel",
     }
     if set(by_sid) != required_sids:
         raise SystemExit("Expected Bedrock policy statements are incorrect.")
@@ -276,6 +298,9 @@ def _validate_canonical_policy(
     read_statement = by_sid["ReadJM8AnalysisInferenceProfile"]
     invoke_statement = by_sid["InvokeJM8AnalysisInferenceProfile"]
     destination_statement = by_sid["InvokeJM8AnalysisDestinationModels"]
+    semantic_statement = by_sid[
+        "InvokeJM8SemanticQueryEmbeddingModel"
+    ]
     profile_arn = _validate_profile_arn(
         read_statement.get("Resource"),
         model_id,
@@ -293,7 +318,24 @@ def _validate_canonical_policy(
     if len(set(model_arns)) != len(model_arns):
         raise SystemExit("Expected Bedrock destination resources contain duplicates.")
 
-    canonical = _policy_document(profile_arn, sorted(model_arns))
+    semantic_model_arn = _validate_destination_model_arn(
+        semantic_statement.get("Resource"),
+        expected_partition,
+    )
+    expected_semantic_model_arn = (
+        f"arn:{expected_partition}:bedrock:{expected_region}::"
+        f"foundation-model/{SEMANTIC_EMBEDDING_MODEL_ID}"
+    )
+    if semantic_model_arn != expected_semantic_model_arn:
+        raise SystemExit(
+            "Expected semantic embedding model resource is incorrect."
+        )
+
+    canonical = _policy_document(
+        profile_arn,
+        sorted(model_arns),
+        semantic_model_arn,
+    )
     if policy != canonical:
         raise SystemExit("Expected Bedrock policy is not canonical least privilege.")
     if invoke_statement.get("Resource") != profile_arn:

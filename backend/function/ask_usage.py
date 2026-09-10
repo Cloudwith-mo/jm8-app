@@ -71,23 +71,6 @@ class AskUsageUnavailableError(
             ] = 2
 
 
-def _safe_integer(
-    value: Any,
-) -> int:
-    if isinstance(value, bool):
-        return 0
-
-    try:
-        parsed = int(value)
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return 0
-
-    return max(parsed, 0)
-
-
 def ask_context_requires_usage(
     ask_context: Mapping[str, Any],
 ) -> bool:
@@ -104,28 +87,18 @@ def ask_context_requires_usage(
         )
     ).strip().upper()
 
-    coverage = ask_context.get(
-        "coverage"
-    )
-
-    if not isinstance(
-        coverage,
-        Mapping,
-    ):
-        return False
-
-    analyzed_entries = _safe_integer(
-        coverage.get(
-            "analyzedEntries"
-        )
+    question = ask_context.get(
+        "question"
     )
 
     return (
         status in {
+            "EMPTY",
             "PARTIAL",
             "READY",
         }
-        and analyzed_entries > 0
+        and isinstance(question, str)
+        and len(question.strip()) >= 3
     )
 
 

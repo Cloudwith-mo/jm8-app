@@ -242,7 +242,8 @@ stream_arn, table_arn, model_arn, dlq_arn = sys.argv[1:]
 print(json.dumps({"Version": "2012-10-17", "Statement": [
     {"Sid": "ReadExactEntryChunksStream", "Effect": "Allow", "Action": ["dynamodb:DescribeStream", "dynamodb:GetRecords", "dynamodb:GetShardIterator"], "Resource": stream_arn},
     {"Sid": "ListEntryChunksStreams", "Effect": "Allow", "Action": ["dynamodb:ListStreams"], "Resource": "*"},
-    {"Sid": "ReadAndPersistExactEntryChunks", "Effect": "Allow", "Action": ["dynamodb:Query", "dynamodb:TransactWriteItems"], "Resource": table_arn},
+    {"Sid": "ReadExactEntryChunks", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:Query"], "Resource": table_arn},
+    {"Sid": "PersistExactEntryChunksTransaction", "Effect": "Allow", "Action": ["dynamodb:ConditionCheckItem", "dynamodb:UpdateItem"], "Resource": table_arn, "Condition": {"ForAnyValue:StringEquals": {"dynamodb:EnclosingOperation": ["TransactWriteItems"]}}},
     {"Sid": "InvokeExactEmbeddingModel", "Effect": "Allow", "Action": ["bedrock:InvokeModel"], "Resource": model_arn},
     {"Sid": "SendExactSemanticEmbeddingDlq", "Effect": "Allow", "Action": ["sqs:SendMessage"], "Resource": dlq_arn},
 ]}, sort_keys=True))
@@ -485,6 +486,7 @@ ALARM_NAMES=(
   "${WORKER_FUNCTION_NAME}-errors"
   "${WORKER_FUNCTION_NAME}-throttles"
   "${WORKER_FUNCTION_NAME}-iterator-age"
+  "${WORKER_FUNCTION_NAME}-record-failures"
   "${DLQ_NAME}-visible-messages"
 )
 aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[0]}" \
@@ -509,6 +511,13 @@ aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[2]}" \
   --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
   --profile "$AWS_PROFILE" --region "$AWS_REGION"
 aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[3]}" \
+  --namespace JournalM8/SemanticEmbedding --metric-name RecordFailures \
+  --dimensions Name=FunctionName,Value="$WORKER_FUNCTION_NAME" \
+  --statistic Sum --period 300 --evaluation-periods 1 --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold --treat-missing-data notBreaching \
+  --tags Key=App,Value="$APP_NAME" Key=Stage,Value="$STAGE" Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm --alarm-name "${ALARM_NAMES[4]}" \
   --namespace AWS/SQS --metric-name ApproximateNumberOfMessagesVisible \
   --dimensions Name=QueueName,Value="$DLQ_NAME" \
   --statistic Maximum --period 300 --evaluation-periods 1 --threshold 1 \

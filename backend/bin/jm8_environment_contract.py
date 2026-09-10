@@ -59,7 +59,13 @@ ENTRY_CHUNKS_REQUIRED_OPERATIONS = {
     "deploy-account-deletion",
     "deploy-semantic-embedding",
     "deploy-semantic-memory",
+    "deploy-semantic-vector-index",
 }
+SEMANTIC_VECTOR_INDEX_NAME = "SemanticEmbeddingIndex"
+SEMANTIC_VECTOR_ATTRIBUTE = "embedding"
+SEMANTIC_VECTOR_PARTITION_ATTRIBUTE = "embeddingPartition"
+SEMANTIC_VECTOR_DIMENSIONS = 1024
+SEMANTIC_VECTOR_DISTANCE_FUNCTION = "COSINE"
 FRONTEND_STACK_COMPLETE_STATUSES = {
     "CREATE_COMPLETE",
     "UPDATE_COMPLETE",
@@ -413,6 +419,15 @@ def validate_entry_chunks_table_description(
     )
     latest_stream_arn = table.get("LatestStreamArn")
 
+    vector_indexes = table.get("VectorIndexes", [])
+    if vector_indexes is None:
+        vector_indexes = []
+    if not isinstance(vector_indexes, list):
+        raise EnvironmentContractError(
+            "Entry chunks vector indexes are malformed"
+        )
+    if vector_indexes:
+        expected_attributes[SEMANTIC_VECTOR_PARTITION_ATTRIBUTE] = "S"
     if (
         table.get("TableName") != table_name
         or table.get("TableArn") != expected_arn
@@ -420,15 +435,23 @@ def validate_entry_chunks_table_description(
         or actual_key_schema != expected_key_schema
         or len(key_schema) != 2
         or actual_attributes != expected_attributes
-        or len(attributes) != 2
+        or len(attributes) != len(expected_attributes)
         or billing_mode != "PAY_PER_REQUEST"
         or bool(table.get("GlobalSecondaryIndexes"))
         or bool(table.get("LocalSecondaryIndexes"))
-        or bool(table.get("VectorIndexes"))
     ):
         raise EnvironmentContractError(
             "Entry chunks table does not match the required contract"
         )
+    if vector_indexes:
+        state = _validated_semantic_vector_index(
+            vector_indexes,
+            table_arn=expected_arn,
+        )
+        if state != "READY":
+            raise EnvironmentContractError(
+                "Entry chunks vector index is not ready"
+            )
     if stream_enabled and (
         stream_view_type != "NEW_AND_OLD_IMAGES"
         or not isinstance(latest_stream_arn, str)
@@ -442,6 +465,137 @@ def validate_entry_chunks_table_description(
             "Entry chunks table deletion protection is not enabled"
         )
     return expected_arn
+
+
+def validate_entry_chunks_vector_index_description(
+    document: Mapping[str, Any],
+    *,
+    app_name: str,
+    stage: str,
+    account_id: str,
+    region: str,
+    table_name: str,
+) -> str:
+    """Return CREATE, WAIT, or READY for the exact semantic vector index."""
+
+    validate_entry_chunks_table_name(
+        app_name,
+        stage,
+        table_name,
+        f"{app_name}-{stage}-main",
+    )
+    table = document.get("Table") if isinstance(document, Mapping) else None
+    if not isinstance(table, Mapping):
+        raise EnvironmentContractError(
+            "Entry chunks vector index description is malformed"
+        )
+    expected_arn = f"arn:aws:dynamodb:{region}:{account_id}:table/{table_name}"
+    key_schema = table.get("KeySchema")
+    attributes = table.get("AttributeDefinitions")
+    billing = table.get("BillingModeSummary")
+    if (
+        table.get("TableName") != table_name
+        or table.get("TableArn") != expected_arn
+        or table.get("TableStatus") not in {"ACTIVE", "UPDATING"}
+        or not isinstance(key_schema, list)
+        or {
+            item.get("AttributeName"): item.get("KeyType")
+            for item in key_schema
+            if isinstance(item, Mapping)
+        } != {"PK": "HASH", "SK": "RANGE"}
+        or len(key_schema) != 2
+        or not isinstance(attributes, list)
+        or not isinstance(billing, Mapping)
+        or billing.get("BillingMode") != "PAY_PER_REQUEST"
+        or bool(table.get("GlobalSecondaryIndexes"))
+        or bool(table.get("LocalSecondaryIndexes"))
+    ):
+        raise EnvironmentContractError(
+            "Entry chunks table cannot host the semantic vector index"
+        )
+
+    vector_indexes = table.get("VectorIndexes", [])
+    if vector_indexes is None:
+        vector_indexes = []
+    if not isinstance(vector_indexes, list):
+        raise EnvironmentContractError(
+            "Entry chunks vector indexes are malformed"
+        )
+    actual_attributes = {
+        item.get("AttributeName"): item.get("AttributeType")
+        for item in attributes
+        if isinstance(item, Mapping)
+    }
+    if not vector_indexes:
+        if table.get("TableStatus") != "ACTIVE":
+            raise EnvironmentContractError(
+                "Entry chunks table must be active before vector index creation"
+            )
+        if actual_attributes != {"PK": "S", "SK": "S"} or len(attributes) != 2:
+            raise EnvironmentContractError(
+                "Entry chunks table attributes are incompatible"
+            )
+        return "CREATE"
+
+    if actual_attributes != {
+        "PK": "S",
+        "SK": "S",
+        SEMANTIC_VECTOR_PARTITION_ATTRIBUTE: "S",
+    } or len(attributes) != 3:
+        raise EnvironmentContractError(
+            "Entry chunks vector index attributes are incompatible"
+        )
+    return _validated_semantic_vector_index(vector_indexes, table_arn=expected_arn)
+
+
+def _validated_semantic_vector_index(
+    vector_indexes: object,
+    *,
+    table_arn: str,
+) -> str:
+    if (
+        not isinstance(vector_indexes, list)
+        or len(vector_indexes) != 1
+        or not isinstance(vector_indexes[0], Mapping)
+    ):
+        raise EnvironmentContractError(
+            "Entry chunks vector indexes are incompatible"
+        )
+    index = vector_indexes[0]
+    expected = {
+        "IndexName": SEMANTIC_VECTOR_INDEX_NAME,
+        "VectorAttribute": {"AttributeName": SEMANTIC_VECTOR_ATTRIBUTE},
+        "SearchSchema": [{
+            "AttributeName": SEMANTIC_VECTOR_PARTITION_ATTRIBUTE,
+            "SearchSchemaElementType": "HASH",
+        }],
+        "Projection": {"ProjectionType": "KEYS_ONLY"},
+        "Dimensions": SEMANTIC_VECTOR_DIMENSIONS,
+        "DistanceFunction": SEMANTIC_VECTOR_DISTANCE_FUNCTION,
+    }
+    if {key: index.get(key) for key in expected} != expected:
+        raise EnvironmentContractError(
+            "Entry chunks vector index does not match the required contract"
+        )
+    expected_index_arn = f"{table_arn}/index/{SEMANTIC_VECTOR_INDEX_NAME}"
+    index_arn = index.get("IndexArn")
+    if index_arn not in {None, expected_index_arn}:
+        raise EnvironmentContractError(
+            "Entry chunks vector index ARN is incompatible"
+        )
+    status = index.get("IndexStatus")
+    backfilling = index.get("Backfilling")
+    if (
+        status == "ACTIVE"
+        and backfilling in {False, None}
+        and index_arn == expected_index_arn
+    ):
+        return "READY"
+    if status in {"CREATING", "UPDATING"} and backfilling in {True, False, None}:
+        return "WAIT"
+    raise EnvironmentContractError(
+        "Entry chunks vector index is not in a recoverable state"
+    )
 
 
 def validate_entry_chunks_stream_description(
@@ -1709,6 +1863,24 @@ def main(argv: list[str]) -> None:
                 region=argv[6],
                 table_name=argv[7],
                 require_stream=argv[8] == "after",
+            ))
+            sys.exit(0)
+        except EnvironmentContractError as exc:
+            print(f"ENVIRONMENT_CONTRACT_ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif command == "entry-chunks-vector-index":
+        try:
+            if len(argv) != 8:
+                raise EnvironmentContractError(
+                    "Entry chunks vector index arguments are invalid"
+                )
+            print(validate_entry_chunks_vector_index_description(
+                _load_contract_json(argv[2]),
+                app_name=argv[3],
+                stage=argv[4],
+                account_id=argv[5],
+                region=argv[6],
+                table_name=argv[7],
             ))
             sys.exit(0)
         except EnvironmentContractError as exc:

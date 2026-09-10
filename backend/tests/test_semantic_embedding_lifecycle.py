@@ -16,6 +16,7 @@ sys.path.insert(0, str(FUNCTION_DIR))
 import semantic_embedding_lifecycle as lifecycle
 from semantic_embedding_contract import (
     EMBEDDING_DIMENSIONS,
+    SemanticEmbeddingContractError,
     validate_embedding_response,
 )
 from semantic_embedding_lifecycle import (
@@ -25,7 +26,9 @@ from semantic_embedding_lifecycle import (
     STALE,
     SemanticEmbeddingLifecycleError,
     apply_embedding_stream_record,
+    build_embedding_telemetry_document,
     process_embedding_stream_event,
+    process_embedding_stream_event_with_telemetry,
 )
 from semantic_embedding_provider import SemanticEmbeddingProviderError
 from semantic_embedding_store import (
@@ -36,6 +39,7 @@ from semantic_memory_store import (
     CHUNK_ENTITY_TYPE,
     MANIFEST_ENTITY_TYPE,
     SemanticMemoryIntegrityError,
+    SemanticMemoryStoreError,
 )
 
 
@@ -365,6 +369,75 @@ class TestEmbeddingBatchProcessing(unittest.TestCase):
                 {"Records": [record]},
             )
         self.assertEqual(response, {"batchItemFailures": []})
+
+    def test_failures_have_privacy_safe_aggregate_categories(self):
+        records = [
+            stream_record(
+                f"event-{index}",
+                sequence_number=f"sequence-{index}",
+            )
+            for index in range(5)
+        ]
+        errors = [
+            SemanticMemoryStoreError("private memory detail"),
+            SemanticEmbeddingProviderError("private provider detail"),
+            SemanticEmbeddingPersistenceError("private persistence detail"),
+            SemanticEmbeddingContractError("private contract detail"),
+            RuntimeError("private unexpected detail"),
+        ]
+
+        with patch.object(
+            lifecycle,
+            "apply_embedding_stream_record",
+            side_effect=errors,
+        ):
+            response, telemetry = process_embedding_stream_event_with_telemetry(
+                object(),
+                object(),
+                {"Records": records},
+            )
+
+        self.assertEqual(len(response["batchItemFailures"]), 5)
+        self.assertEqual(telemetry["recordCount"], 5)
+        self.assertEqual(telemetry["failureCount"], 5)
+        self.assertEqual(telemetry["failureCounts"], {
+            "MemoryReadFailures": 1,
+            "ProviderFailures": 1,
+            "PersistenceFailures": 1,
+            "ContractFailures": 1,
+            "UnexpectedFailures": 1,
+        })
+        self.assertNotIn("private", repr(telemetry))
+
+    def test_failure_telemetry_is_a_bounded_cloudwatch_emf_document(self):
+        telemetry = {
+            "recordCount": 3,
+            "failureCount": 1,
+            "failureCounts": {
+                "MemoryReadFailures": 1,
+                "ProviderFailures": 0,
+                "PersistenceFailures": 0,
+                "ContractFailures": 0,
+                "UnexpectedFailures": 0,
+            },
+        }
+
+        document = build_embedding_telemetry_document(
+            telemetry,
+            function_name="journalm8-prod-semantic-embedding-worker",
+            timestamp_ms=123456789,
+        )
+
+        self.assertEqual(
+            document["_aws"]["CloudWatchMetrics"][0]["Namespace"],
+            "JournalM8/SemanticEmbedding",
+        )
+        self.assertEqual(document["RecordCount"], 3)
+        self.assertEqual(document["RecordFailures"], 1)
+        self.assertEqual(document["MemoryReadFailures"], 1)
+        serialized = repr(document)
+        for forbidden in ("userId", "entryId", "chunkId", "text", "digest"):
+            self.assertNotIn(forbidden, serialized)
 
     def test_failure_without_sequence_number_fails_closed(self):
         record = stream_record(sequence_number=None)

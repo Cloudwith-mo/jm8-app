@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+: "${ENTRY_CHUNKS_TABLE_NAME:?ENTRY_CHUNKS_TABLE_NAME is required. Run: source .env}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="deploy-observability"
+jm8_validate_contract_or_exit
+
+DASHBOARD_NAME="${APP_NAME}-${STAGE}-semantic-pipeline"
+EXPECTED_TABLE_NAME="${APP_NAME}-${STAGE}-entry-chunks"
+BUILD_DIR="$(mktemp -d /tmp/jm8-semantic-dashboard.XXXXXX)"
+trap 'rm -rf -- "$BUILD_DIR"' EXIT
+
+if [ "$ENTRY_CHUNKS_TABLE_NAME" != "$EXPECTED_TABLE_NAME" ]; then
+  echo "Semantic dashboard table identity is invalid." >&2
+  exit 1
+fi
+
+ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Account \
+    --output text
+)"
+
+if [ "$ACCOUNT_ID" != "$EXPECTED_AWS_ACCOUNT_ID" ]; then
+  echo "Semantic dashboard AWS account is invalid." >&2
+  exit 1
+fi
+
+aws dynamodb describe-table \
+  --table-name "$ENTRY_CHUNKS_TABLE_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/table.json"
+
+python3 "$SCRIPT_DIR/jm8_semantic_pipeline_dashboard.py" \
+  --region "$AWS_REGION" \
+  --account-id "$ACCOUNT_ID" \
+  --app-name "$APP_NAME" \
+  --stage "$STAGE" \
+  --table-document "$BUILD_DIR/table.json" \
+  > "$BUILD_DIR/dashboard.json"
+
+aws cloudwatch put-dashboard \
+  --dashboard-name "$DASHBOARD_NAME" \
+  --dashboard-body "file://$BUILD_DIR/dashboard.json" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/put-dashboard.json"
+
+python3 - "$BUILD_DIR/put-dashboard.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+messages = response.get("DashboardValidationMessages")
+if messages != []:
+    raise SystemExit("CloudWatch rejected part of the semantic dashboard.")
+print("CloudWatch dashboard validation messages: 0")
+PY
+
+echo
+echo "Semantic pipeline dashboard deployed and accepted."
+echo "Dashboard: $DASHBOARD_NAME"
+echo "No log or journal content was read."

@@ -45,7 +45,7 @@ def persist_active_embedding(
 ) -> StoredSemanticEmbedding:
     """Persist an embedding only while its exact chunk generation is active."""
 
-    identity = _validated_chunk_identity(chunk)
+    identity = validate_embedding_chunk_identity(chunk)
     user_id, entry_id, content_digest, chunk_id, ordinal = identity
     validated = validate_stored_embedding(
         embedding,
@@ -86,7 +86,7 @@ def persist_active_embedding(
     return validated
 
 
-def _validated_chunk_identity(
+def validate_embedding_chunk_identity(
     chunk: Mapping[str, object],
 ) -> tuple[str, str, str, str, int]:
     if not isinstance(chunk, Mapping):
@@ -100,10 +100,10 @@ def _validated_chunk_identity(
     generation_id = chunk.get("generationId")
     chunk_id = chunk.get("chunkId")
     chunk_digest = chunk.get("chunkDigest")
-    ordinal = chunk.get("chunkOrdinal")
-    chunk_count = chunk.get("chunkCount")
-    character_count = chunk.get("characterCount")
-    word_count = chunk.get("wordCount")
+    ordinal = _integer_value(chunk.get("chunkOrdinal"))
+    chunk_count = _integer_value(chunk.get("chunkCount"))
+    character_count = _integer_value(chunk.get("characterCount"))
+    word_count = _integer_value(chunk.get("wordCount"))
     text = chunk.get("text")
 
     if (
@@ -115,17 +115,13 @@ def _validated_chunk_identity(
         or not isinstance(generation_id, str)
         or not isinstance(chunk_id, str)
         or not isinstance(chunk_digest, str)
-        or not isinstance(ordinal, int)
-        or isinstance(ordinal, bool)
+        or ordinal is None
         or ordinal < 0
-        or not isinstance(chunk_count, int)
-        or isinstance(chunk_count, bool)
+        or chunk_count is None
         or chunk_count < 1
         or ordinal >= chunk_count
-        or not isinstance(character_count, int)
-        or isinstance(character_count, bool)
-        or not isinstance(word_count, int)
-        or isinstance(word_count, bool)
+        or character_count is None
+        or word_count is None
         or not isinstance(text, str)
     ):
         raise SemanticEmbeddingPersistenceError(
@@ -291,6 +287,18 @@ def _dynamodb_value(value: object) -> object:
     return value
 
 
+def _integer_value(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal) and value.is_finite():
+        integral = value.to_integral_value()
+        if value == integral:
+            return int(integral)
+    return None
+
+
 def _transaction_client(table: object) -> tuple[str, TransactionClient]:
     table_name = getattr(table, "name", None) or getattr(
         table,
@@ -370,4 +378,5 @@ __all__ = [
     "SemanticEmbeddingPersistenceError",
     "SemanticEmbeddingStaleGenerationError",
     "persist_active_embedding",
+    "validate_embedding_chunk_identity",
 ]
