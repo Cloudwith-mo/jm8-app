@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 import boto3
 
@@ -20,6 +22,22 @@ from semantic_coverage_audit import (  # noqa: E402
     collect_eligible_entries,
     collect_semantic_records,
 )
+
+
+_T = TypeVar("_T")
+
+
+def _run_stage(label: str, operation: Callable[[], _T]) -> _T:
+    try:
+        return operation()
+    except Exception:
+        print(
+            f"Semantic coverage audit failed safely during {label}.",
+            file=sys.stderr,
+        )
+        raise SemanticCoverageAuditError(
+            f"semantic coverage {label} failed"
+        ) from None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,23 +67,43 @@ def main() -> int:
         return 1
 
     try:
-        session = boto3.Session(
-            profile_name=args.profile,
-            region_name=args.region,
+        session = _run_stage(
+            "AWS session setup",
+            lambda: boto3.Session(
+                profile_name=args.profile,
+                region_name=args.region,
+            ),
         )
-        caller = session.client("sts").get_caller_identity()
+        caller = _run_stage(
+            "account identity check",
+            lambda: session.client("sts").get_caller_identity(),
+        )
         if caller.get("Account") != args.account_id:
-            raise SemanticCoverageAuditError(
-                "semantic coverage account is invalid"
+            print(
+                "Semantic coverage audit failed safely during "
+                "account identity check.",
+                file=sys.stderr,
             )
-        dynamodb = session.resource("dynamodb")
+            return 1
+        dynamodb = _run_stage(
+            "DynamoDB client setup",
+            lambda: session.resource("dynamodb"),
+        )
         main_table = dynamodb.Table(args.main_table)
         chunks_table = dynamodb.Table(args.entry_chunks_table)
-        eligible = collect_eligible_entries(main_table)
-        records = collect_semantic_records(chunks_table)
-        report = audit_semantic_coverage(eligible, records)
-    except Exception:
-        print("Semantic coverage audit failed safely.", file=sys.stderr)
+        eligible = _run_stage(
+            "eligible-entry inventory",
+            lambda: collect_eligible_entries(main_table),
+        )
+        records = _run_stage(
+            "semantic-record inventory",
+            lambda: collect_semantic_records(chunks_table),
+        )
+        report = _run_stage(
+            "coverage evaluation",
+            lambda: audit_semantic_coverage(eligible, records),
+        )
+    except SemanticCoverageAuditError:
         return 1
 
     serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
