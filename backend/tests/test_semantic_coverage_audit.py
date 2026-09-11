@@ -272,6 +272,8 @@ class SemanticCoverageCollectionTests(unittest.TestCase):
                 set(values),
                 set(re.findall(r":[A-Za-z0-9]+", filter_expression)),
             )
+            self.assertIn(":analyzed", values)
+            self.assertEqual(values[":analyzed"], "ANALYZED")
 
     def test_semantic_scan_never_projects_chunk_text(self):
         table = FakeTable([{"Items": [manifest(), chunk()]}])
