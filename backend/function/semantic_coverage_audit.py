@@ -91,8 +91,16 @@ def collect_eligible_entries(table: object) -> list[dict[str, object]]:
         table,
         ProjectionExpression=projection,
         FilterExpression=f"#entity = :entryType AND ({clean})",
-        ExpressionAttributeNames=names,
-        ExpressionAttributeValues=values,
+        ExpressionAttributeNames={
+            token: name
+            for token, name in names.items()
+            if token != "#rawText"
+        },
+        ExpressionAttributeValues={
+            token: value
+            for token, value in values.items()
+            if token != ":typed"
+        },
         ConsistentRead=True,
     )
     raw_entries = _scan(
