@@ -13,6 +13,9 @@ from semantic_chunking import (
 )
 
 
+_APPROVED_ENTRY_STATUSES = frozenset({"REVIEWED", "ANALYZED"})
+
+
 class CanonicalEntryText(TypedDict):
     """Eligible source text and identity selected from a journal entry."""
 
@@ -53,7 +56,7 @@ def canonical_entry_text(
     review_status = _normalized_label(entry.get("reviewStatus"))
     reviewed_at = entry.get("reviewedAt")
     has_completed_review = (
-        status == "REVIEWED"
+        status in _APPROVED_ENTRY_STATUSES
         or review_status == "COMPLETED"
         or _non_empty_string(reviewed_at)
     )
@@ -71,7 +74,7 @@ def canonical_entry_text(
     raw_text = entry.get("rawText")
     if (
         source_type == "typed"
-        and status == "REVIEWED"
+        and status in _APPROVED_ENTRY_STATUSES
         and _non_empty_string(raw_text)
     ):
         return {
