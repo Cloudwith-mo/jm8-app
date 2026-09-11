@@ -258,3 +258,19 @@ class SemanticMemoryContractTests(unittest.TestCase):
             {"__future__", "collections", "typing", "semantic_chunking"},
         )
         for forbidden in (
+            "boto3",
+            "botocore",
+            "os.environ",
+            "getenv(",
+            "datetime.now",
+            "time.time",
+            "random",
+            "uuid",
+            "secrets",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
+
+if __name__ == "__main__":
+    unittest.main()
