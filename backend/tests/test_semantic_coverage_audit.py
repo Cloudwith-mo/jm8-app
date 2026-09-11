@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import stat
 import sys
 import unittest
@@ -251,7 +252,9 @@ class SemanticCoverageCollectionTests(unittest.TestCase):
         self.assertEqual(len(table.calls), 2)
         for call in table.calls:
             projection = call["ProjectionExpression"]
+            filter_expression = call["FilterExpression"]
             names = call["ExpressionAttributeNames"]
+            values = call["ExpressionAttributeValues"]
             projected_names = {
                 names[token.strip()]
                 for token in projection.split(",")
@@ -260,7 +263,15 @@ class SemanticCoverageCollectionTests(unittest.TestCase):
             self.assertNotIn("rawText", projected_names)
             self.assertNotIn("text", projected_names)
             self.assertIn("ConsistentRead", call)
-            self.assertIn("size(#", call["FilterExpression"])
+            self.assertIn("size(#", filter_expression)
+            self.assertEqual(
+                set(names),
+                set(re.findall(r"#[A-Za-z0-9]+", projection + filter_expression)),
+            )
+            self.assertEqual(
+                set(values),
+                set(re.findall(r":[A-Za-z0-9]+", filter_expression)),
+            )
 
     def test_semantic_scan_never_projects_chunk_text(self):
         table = FakeTable([{"Items": [manifest(), chunk()]}])
