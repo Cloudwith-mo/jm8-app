@@ -64,6 +64,7 @@ def collect_eligible_entries(table: object) -> list[dict[str, object]]:
     values = {
         ":entryType": "ENTRY",
         ":reviewed": "REVIEWED",
+        ":analyzed": "ANALYZED",
         ":completed": "COMPLETED",
         ":typed": "typed",
         ":stringType": "S",
@@ -74,7 +75,8 @@ def collect_eligible_entries(table: object) -> list[dict[str, object]]:
         "#reviewedAt, #createdAt, #updatedAt"
     )
     reviewed = (
-        "(#status = :reviewed OR #reviewStatus = :completed "
+        "(#status = :reviewed OR #status = :analyzed "
+        "OR #reviewStatus = :completed "
         "OR attribute_exists(#reviewedAt))"
     )
     clean = (
@@ -82,7 +84,8 @@ def collect_eligible_entries(table: object) -> list[dict[str, object]]:
         "AND size(#cleanText) > :zero"
     )
     raw = (
-        "#source = :typed AND #status = :reviewed "
+        "#source = :typed "
+        "AND (#status = :reviewed OR #status = :analyzed) "
         "AND attribute_type(#rawText, :stringType) "
         "AND size(#rawText) > :zero"
     )
