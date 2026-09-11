@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Run the read-only JM8 semantic coverage audit."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import boto3
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND_DIR / "function"))
+
+from semantic_coverage_audit import (  # noqa: E402
+    SemanticCoverageAuditError,
+    audit_semantic_coverage,
+    collect_eligible_entries,
+    collect_semantic_records,
+)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--region", required=True)
+    parser.add_argument("--account-id", required=True)
+    parser.add_argument("--app-name", required=True)
+    parser.add_argument("--stage", choices=("dev", "staging", "prod"), required=True)
+    parser.add_argument("--main-table", required=True)
+    parser.add_argument("--entry-chunks-table", required=True)
+    parser.add_argument("--output", type=Path)
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    expected_main = f"{args.app_name}-{args.stage}-main"
+    expected_chunks = f"{args.app_name}-{args.stage}-entry-chunks"
+    if (
+        not args.account_id.isdigit()
+        or len(args.account_id) != 12
+        or args.main_table != expected_main
+        or args.entry_chunks_table != expected_chunks
+    ):
+        print("Semantic coverage configuration is invalid.", file=sys.stderr)
+        return 1
+
+    try:
+        session = boto3.Session(
+            profile_name=args.profile,
+            region_name=args.region,
+        )
+        caller = session.client("sts").get_caller_identity()
+        if caller.get("Account") != args.account_id:
+            raise SemanticCoverageAuditError(
+                "semantic coverage account is invalid"
+            )
+        dynamodb = session.resource("dynamodb")
+        main_table = dynamodb.Table(args.main_table)
+        chunks_table = dynamodb.Table(args.entry_chunks_table)
+        eligible = collect_eligible_entries(main_table)
+        records = collect_semantic_records(chunks_table)
+        report = audit_semantic_coverage(eligible, records)
+    except Exception:
+        print("Semantic coverage audit failed safely.", file=sys.stderr)
+        return 1
+
+    serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.output is not None:
+        try:
+            args.output.write_text(serialized, encoding="utf-8")
+        except OSError:
+            print("Semantic coverage report could not be written.", file=sys.stderr)
+            return 1
+    print(serialized, end="")
+    return 0 if report["status"] != "BLOCKED" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
