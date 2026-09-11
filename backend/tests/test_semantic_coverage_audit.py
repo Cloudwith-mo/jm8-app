@@ -331,6 +331,20 @@ class SemanticCoverageCliContractTests(unittest.TestCase):
         self.assertNotIn("cleanText", source)
         self.assertNotIn("rawText", source)
 
+    def test_cli_reports_named_failure_stages(self):
+        path = FUNCTION_DIR.parent / "bin" / "audit-semantic-coverage"
+        source = path.read_text(encoding="utf-8")
+        for stage in (
+            "AWS session setup",
+            "account identity check",
+            "DynamoDB client setup",
+            "eligible-entry inventory",
+            "semantic-record inventory",
+            "coverage evaluation",
+        ):
+            with self.subTest(stage=stage):
+                self.assertIn(stage, source)
+
 
 if __name__ == "__main__":
     unittest.main()
