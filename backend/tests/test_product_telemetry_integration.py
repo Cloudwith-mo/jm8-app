@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 FUNCTION_DIR = Path(__file__).resolve().parents[1] / "function"
 sys.path.insert(0, str(FUNCTION_DIR))
@@ -40,6 +41,17 @@ class ProductTelemetryIntegrationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result["status"], "RECORDED")
+
+    def test_missing_stage_skips_storage(self):
+        calls = []
+        with patch.dict(os.environ, {}, clear=True):
+            result = record_authenticated_activity(
+                "private-user",
+                recorder=lambda *args: calls.append(args),
+            )
+        self.assertEqual(result["status"], "SKIPPED")
+        self.assertEqual(result["reason"], "StageUnavailable")
+        self.assertEqual(calls, [])
 
     def test_guard_failure_skips_activity_without_raising_or_writing(self):
         calls = []
