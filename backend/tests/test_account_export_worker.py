@@ -86,6 +86,12 @@ class AccountExportWorkerTests(unittest.TestCase):
             "PK": "USER#user-a", "SK": "ENTRY#token#GEN#digest#CHUNK#00000000#chunk_id",
             "entityType": "SEMANTIC_CHUNK", "text": "derived chunk must not export",
         }, {
+            "PK": "USER#user-a",
+            "SK": "PRODUCT_MILESTONE#ActivatedUser",
+            "entityType": "PRODUCT_MILESTONE",
+            "metricName": "ActivatedUser",
+            "metricValue": 1,
+        }, {
             "PK": "DELETED_SUBJECT#digest", "SK": "SEMANTIC_MEMORY_GUARD",
             "entityType": "SEMANTIC_MEMORY_DELETION_GUARD",
         }]
@@ -111,6 +117,7 @@ class AccountExportWorkerTests(unittest.TestCase):
                 "GSI1PK", "ACCOUNT_EXPORT_ACTIVE", "reservationId", "s3RawKey",
                 "stripeCustomerId", "derived chunk must not export",
                 "SEMANTIC_CHUNK", "SEMANTIC_MEMORY_DELETION_GUARD",
+                "PRODUCT_MILESTONE", "ActivatedUser",
             ):
                 self.assertNotIn(forbidden, all_json)
 

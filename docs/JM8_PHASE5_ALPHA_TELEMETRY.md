@@ -87,3 +87,27 @@ integration, dashboard, namespace-isolation, deletion, and failure-path tests
 all pass. Deployment requires a read-only preflight, exact production identity,
 clean Git state, no journal-content inspection, and post-deployment proof that
 the user journey still succeeds when telemetry is unavailable.
+
+## Observability and activation gate
+
+Each environment owns an exact `JM8/<stage>/Product` namespace, an
+`<app>-<stage>-alpha-telemetry` dashboard, and one dimensionless
+`TelemetryEmissionFailed` alarm routed to the existing stage alert topic.
+The dashboard enumerates the closed metric registry exactly and contains no log
+queries, dimensions, identifiers, journal text, prompts, answers, or evidence.
+
+`PRODUCT_MILESTONE#*` records are internal deduplication state. Account exports
+exclude them because exports use an explicit user-data allowlist. Account
+deletion removes them because the deletion engine exhaustively deletes and
+verifies the user's complete application partition.
+
+The Lambda build packages every `function/*.py` module, including the telemetry
+contract, store, emitter, and integration. Runtime IAM needs only the existing
+main-table `dynamodb:PutItem` permission; observability deployment is limited to
+stage-prefixed alarms, dashboards, and the exact alert topic.
+
+Production activation is blocked until the complete journey is exercised in
+staging, the staging dashboard receives its expected aggregate metrics, the
+emission-failure alarm and notification path are proven, export and deletion
+canaries pass, and staging returns to a healthy state. Synthetic events must
+never be emitted in production, preserving the five-person alpha baseline.

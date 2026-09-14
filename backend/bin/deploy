@@ -544,3 +544,7 @@ aws lambda get-function \
 # Publish the semantic pipeline efficiency dashboard only after the memory,
 # vector-index, and embedding-worker infrastructure has been reconciled.
 ./bin/deploy-semantic-observability
+
+# Publish the stage-isolated alpha telemetry dashboard and its failure alarm
+# only after the application and semantic observability are reconciled.
+./bin/deploy-product-telemetry-observability
