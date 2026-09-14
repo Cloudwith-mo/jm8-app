@@ -35,7 +35,7 @@ Never collect or emit:
 | Data rights | `AccountExportRequested`, `AccountExportCompleted`, `AccountExportFailed`, `AccountDeletionRequested`, `AccountDeletionCompleted`, `AccountDeletionFailed` | Workflow lifecycle counts; no request identifier is emitted. |
 | Billing | `CheckoutStarted`, `ProEntitlementActivated`, `CancellationRequested` | Backend-confirmed lifecycle counts; no Stripe reference is emitted. |
 | Meaning | `MeaningfulInsightYes`, `MeaningfulInsightNo`, `TimeToFirstMeaningfulInsightMs` | Explicit feedback only. Duration emits once after the first affirmative response. |
-| Safety | `TelemetryEmissionFailed` | Operational count proving telemetry failure did not break the user journey. |
+| Safety | `TelemetryEmissionFailed` | Operational count proving a milestone-storage or metric-sink failure did not break the user journey. |
 
 ## Deduplication
 
@@ -45,7 +45,8 @@ week. The user's existing partition key supplies tenancy; the metric event does
 not include that key. Account deletion removes these markers with the rest of
 the user's application partition.
 
-Retries must not double-count a first-time or weekly milestone. OCR, export,
+Retries must not double-count a successfully stored first-time or weekly
+milestone. OCR, export,
 deletion, Checkout, cancellation, feedback, and failure metrics represent
 individual authoritative transitions and require operation-level idempotency at
 their existing domain boundary.
@@ -57,6 +58,13 @@ must not turn a successful journal, OCR, analysis, Ask, export, deletion, or
 billing operation into a user-visible failure. The caller records only the safe
 `TelemetryEmissionFailed` operational event and continues. Telemetry failures
 must be alarmed because silent measurement loss invalidates the alpha readout.
+
+The milestone record is the deduplication authority. If metric emission fails
+after a milestone is stored, the safe result reports
+`RECORDED_EMISSION_FAILED`; it does not delete the marker or retry blindly.
+Before production deployment, reconciliation must define how a missing derived
+metric is repaired without double-counting. CloudWatch event counts are not an
+exactly-once database and must not replace the milestone inventory.
 
 ## Interpretation limits
 
