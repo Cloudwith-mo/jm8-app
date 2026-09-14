@@ -46,6 +46,20 @@ class SemanticMemoryContractTests(unittest.TestCase):
             },
         )
 
+    def test_analyzed_entries_remain_eligible(self):
+        typed = canonical_entry_text(base_entry(status="ANALYZED"))
+        scanned = canonical_entry_text(base_entry(
+            sourceType="image",
+            status="ANALYZED",
+            rawText="Machine transcript.",
+            cleanText="Text accepted before analysis.",
+        ))
+
+        self.assertIsNotNone(typed)
+        self.assertEqual(typed["textField"], "rawText")
+        self.assertIsNotNone(scanned)
+        self.assertEqual(scanned["textField"], "cleanText")
+
     def test_reviewed_ocr_entry_selects_clean_text(self):
         selected = canonical_entry_text(
             base_entry(
