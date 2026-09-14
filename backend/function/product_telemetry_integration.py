@@ -39,10 +39,18 @@ def record_authenticated_activity(
                 "metricStatuses": [],
             }
 
+    resolved_stage = _stage(stage)
+    if resolved_stage is None:
+        return {
+            "status": "SKIPPED",
+            "reason": "StageUnavailable",
+            "metricStatuses": [],
+        }
+
     return _record_milestones(
         user_id,
         ("ActivatedUser", "WeeklyActiveUser"),
-        stage=_stage(stage),
+        stage=resolved_stage,
         recorder=recorder,
     )
 
@@ -63,10 +71,18 @@ def record_product_outcome(
             "metricStatuses": [],
         }
 
+    resolved_stage = _stage(stage)
+    if resolved_stage is None:
+        return {
+            "status": "SKIPPED",
+            "reason": "StageUnavailable",
+            "metricStatuses": [],
+        }
+
     return _record_milestones(
         user_id,
         (milestone,),
-        stage=_stage(stage),
+        stage=resolved_stage,
         recorder=recorder,
     )
 
@@ -119,10 +135,10 @@ def _emit_failure_safely(stage: str) -> None:
         return
 
 
-def _stage(value: str | None) -> str:
-    candidate = value if value is not None else os.environ.get("STAGE", "dev")
-    normalized = str(candidate).strip()
-    return normalized or "dev"
+def _stage(value: str | None) -> str | None:
+    candidate = value if value is not None else os.environ.get("STAGE")
+    normalized = str(candidate or "").strip()
+    return normalized or None
 
 
 __all__ = [
