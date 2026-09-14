@@ -100,6 +100,11 @@ from account_deletion_guard import (
     ensure_user_mutation_allowed,
     route_requires_deletion_guard,
 )
+from product_telemetry_integration import (
+    is_grounded_answer,
+    record_authenticated_activity,
+    record_product_outcome,
+)
 from ocr_workflow_client import start_ocr_execution
 import base64
 import boto3
@@ -289,10 +294,20 @@ def lambda_handler(event, context):
                 "message": "Authentication is required.",
             })
 
-        if route_requires_deletion_guard(method, path):
+        requires_deletion_guard = route_requires_deletion_guard(method, path)
+        if requires_deletion_guard:
             guard_response = deletion_guard_response(user_id)
             if guard_response is not None:
                 return guard_response
+
+        record_authenticated_activity(
+            user_id,
+            mutation_guard=(
+                None
+                if requires_deletion_guard
+                else ensure_user_mutation_allowed
+            ),
+        )
 
         if method == "POST" and path == "/entries":
             body = parse_body(event)
@@ -302,6 +317,10 @@ def lambda_handler(event, context):
                 return response(400, {"error": "Text is required."})
 
             entry = create_text_entry(user_id=user_id, text=text)
+            record_product_outcome(
+                user_id,
+                "FirstEntryCreated",
+            )
 
             return response(201, {
                 "message": "Entry created.",
@@ -844,6 +863,12 @@ def lambda_handler(event, context):
                 return response(
                     503,
                     exc.payload,
+                )
+
+            if is_grounded_answer(answer):
+                record_product_outcome(
+                    user_id,
+                    "FirstGroundedAskCompleted",
                 )
 
             return response(200, {
@@ -1980,6 +2005,11 @@ def lambda_handler(event, context):
                     503,
                     exc.payload,
                 )
+
+            record_product_outcome(
+                user_id,
+                "FirstAnalysisCompleted",
+            )
 
             usage = analysis.get("usage") or {}
 
