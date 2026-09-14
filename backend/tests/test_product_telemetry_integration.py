@@ -126,6 +126,20 @@ class ProductTelemetryIntegrationTests(unittest.TestCase):
         self.assertNotIn("private-user", str(result))
         self.assertNotIn("private telemetry failure", str(result))
 
+    def test_store_or_emission_degradation_is_reported_as_partial(self):
+        for status in ("STORE_FAILED", "RECORDED_EMISSION_FAILED"):
+            with self.subTest(status=status):
+                result = record_product_outcome(
+                    "private-user",
+                    "FirstAnalysisCompleted",
+                    stage="prod",
+                    recorder=lambda *_args, status=status: {
+                        "status": status,
+                        "metricName": "FirstAnalysisCompleted",
+                    },
+                )
+                self.assertEqual(result["status"], "PARTIAL")
+
     def test_grounded_answer_requires_answered_status_and_evidence(self):
         self.assertTrue(is_grounded_answer({
             "status": "ANSWERED",
