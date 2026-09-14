@@ -121,7 +121,14 @@ def _record_milestones(
     return {
         "status": (
             "RECORDED"
-            if all(item.get("status") != "FAILED" for item in statuses)
+            if all(
+                isinstance(item, Mapping)
+                and item.get("status") in {
+                    "RECORDED_AND_EMITTED",
+                    "ALREADY_RECORDED",
+                }
+                for item in statuses
+            )
             else "PARTIAL"
         ),
         "metricStatuses": statuses,
