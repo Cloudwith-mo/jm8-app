@@ -1,0 +1,355 @@
+name: Staged deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: GitHub Environment and JM8 stage to deploy
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      release_sha:
+        description: Exact 40-character commit SHA from main
+        required: true
+        type: string
+      confirmation:
+        description: Enter deploy-dev, deploy-staging, or deploy-prod
+        required: true
+        type: string
+      deploy_frontend:
+        description: Deploy frontend assets for staging or production
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  release-candidate:
+    name: Build release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release identity
+        env:
+          REQUESTED_SHA: ${{ inputs.release_sha }}
+          REQUESTED_STAGE: ${{ inputs.stage }}
+          REQUESTED_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "release_sha must be an exact lowercase 40-character commit SHA." >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$REQUESTED_SHA" ]] || {
+            echo "Checked-out commit does not match release_sha." >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$REQUESTED_SHA" origin/main || {
+            echo "Only a commit contained in origin/main may be deployed." >&2
+            exit 1
+          }
+          [[ "$REQUESTED_CONFIRMATION" == "deploy-${REQUESTED_STAGE}" ]] || {
+            echo "Deployment confirmation does not match the requested stage." >&2
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Install backend test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade pip
+          python -m pip install --disable-pip-version-check -r backend/requirements-dev.txt pytest
+
+      - name: Test and package backend
+        working-directory: backend
+        run: |
+          python -m pytest -q
+          ./bin/package
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate frontend source
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run lint
+
+      - name: Create immutable release manifest
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          mkdir -p .release
+          cp backend/dist/function.zip .release/backend-function.zip
+          BACKEND_SHA256="$(shasum -a 256 .release/backend-function.zip | awk '{print $1}')"
+          printf '%s  %s\n' "$BACKEND_SHA256" backend-function.zip > .release/backend-function.sha256
+          python - "$RELEASE_SHA" "$BACKEND_SHA256" > .release/manifest.json <<'PY'
+          import json
+          import sys
+
+          release_sha, backend_sha256 = sys.argv[1:]
+          print(json.dumps({
+              "schemaVersion": 1,
+              "releaseSha": release_sha,
+              "backendArtifact": "backend-function.zip",
+              "backendSha256": backend_sha256,
+          }, sort_keys=True, indent=2))
+          PY
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: jm8-release-${{ inputs.release_sha }}
+          path: .release/
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy:
+    name: Deploy ${{ inputs.stage }}
+    needs: release-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: jm8-${{ inputs.stage }}
+    concurrency:
+      group: jm8-deploy-${{ inputs.stage }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      APP_NAME: journalm8
+      STAGE: ${{ inputs.stage }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+      EXPECTED_AWS_ACCOUNT_ID: ${{ vars.EXPECTED_AWS_ACCOUNT_ID }}
+      TABLE_NAME: ${{ vars.TABLE_NAME }}
+      ENTRY_CHUNKS_TABLE_NAME: ${{ vars.ENTRY_CHUNKS_TABLE_NAME }}
+      RAW_BUCKET: ${{ vars.RAW_BUCKET }}
+      EXPORT_BUCKET: ${{ vars.EXPORT_BUCKET }}
+      FRONTEND_BUCKET: ${{ vars.FRONTEND_BUCKET }}
+      CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN }}
+      ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+      API_NAME: ${{ vars.API_NAME }}
+      API_ENDPOINT: ${{ vars.API_ENDPOINT }}
+      COGNITO_USER_POOL_NAME: ${{ vars.COGNITO_USER_POOL_NAME }}
+      COGNITO_USER_POOL_ID: ${{ vars.COGNITO_USER_POOL_ID }}
+      COGNITO_APP_CLIENT_ID: ${{ vars.COGNITO_APP_CLIENT_ID }}
+      COGNITO_DOMAIN: ${{ vars.COGNITO_DOMAIN }}
+      COGNITO_ISSUER: ${{ vars.COGNITO_ISSUER }}
+      CALLBACK_URL: ${{ vars.CALLBACK_URL }}
+      LOGOUT_URL: ${{ vars.LOGOUT_URL }}
+      BEDROCK_ANALYSIS_MODEL_ID: ${{ vars.BEDROCK_ANALYSIS_MODEL_ID }}
+      ANALYSIS_SCHEMA_VERSION: ${{ vars.ANALYSIS_SCHEMA_VERSION }}
+      ANALYSIS_PROMPT_VERSION: ${{ vars.ANALYSIS_PROMPT_VERSION }}
+      STRIPE_SECRET_ARN: ${{ vars.STRIPE_SECRET_ARN }}
+      STRIPE_PRO_MONTHLY_PRICE_ID: ${{ vars.STRIPE_PRO_MONTHLY_PRICE_ID }}
+      STRIPE_CHECKOUT_SUCCESS_URL: ${{ vars.STRIPE_CHECKOUT_SUCCESS_URL }}
+      STRIPE_CHECKOUT_CANCEL_URL: ${{ vars.STRIPE_CHECKOUT_CANCEL_URL }}
+      STRIPE_PORTAL_RETURN_URL: ${{ vars.STRIPE_PORTAL_RETURN_URL }}
+      SEMANTIC_MEMORY_MAPPING_ENABLED: ${{ vars.SEMANTIC_MEMORY_MAPPING_ENABLED }}
+      SEMANTIC_EMBEDDING_MAPPING_ENABLED: ${{ vars.SEMANTIC_EMBEDDING_MAPPING_ENABLED }}
+      PRODUCTION_ISOLATION_MODE: ${{ vars.PRODUCTION_ISOLATION_MODE }}
+      DEPLOY_CONFIRMATION: ${{ inputs.stage }}
+      VITE_APP_STAGE: ${{ inputs.stage }}
+      VITE_API_ENDPOINT: ${{ vars.API_ENDPOINT }}
+      VITE_COGNITO_ENABLED: "true"
+      VITE_COGNITO_DOMAIN: ${{ vars.COGNITO_DOMAIN }}
+      VITE_COGNITO_CLIENT_ID: ${{ vars.COGNITO_APP_CLIENT_ID }}
+      VITE_COGNITO_REDIRECT_URI: ${{ vars.CALLBACK_URL }}
+      VITE_COGNITO_LOGOUT_URI: ${{ vars.LOGOUT_URL }}
+      STAGING_BASIC_AUTH_USERNAME: ${{ secrets.STAGING_BASIC_AUTH_USERNAME }}
+      STAGING_BASIC_AUTH_PASSWORD: ${{ secrets.STAGING_BASIC_AUTH_PASSWORD }}
+
+    steps:
+      - name: Check out exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.release_sha }}
+          persist-credentials: false
+
+      - name: Download immutable release candidate
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: jm8-release-${{ inputs.release_sha }}
+          path: .release
+
+      - name: Verify release candidate
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          (cd .release && shasum -a 256 --check backend-function.sha256)
+          python - "$RELEASE_SHA" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release_sha = sys.argv[1]
+          release_dir = pathlib.Path(".release")
+          manifest = json.loads((release_dir / "manifest.json").read_text())
+          artifact = release_dir / manifest["backendArtifact"]
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          if manifest.get("releaseSha") != release_sha:
+              raise SystemExit("Release manifest commit mismatch.")
+          if manifest.get("backendSha256") != digest:
+              raise SystemExit("Release manifest artifact mismatch.")
+          PY
+
+      - name: Enforce production release approval
+        if: inputs.stage == 'prod'
+        env:
+          PRODUCTION_RELEASE_STATE: ${{ vars.PRODUCTION_RELEASE_STATE }}
+        run: |
+          [[ "$PRODUCTION_RELEASE_STATE" == "verified" ]] || {
+            echo "Production remains blocked until PRODUCTION_RELEASE_STATE=verified." >&2
+            exit 1
+          }
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: jm8-${{ inputs.stage }}-${{ github.run_id }}
+          mask-aws-account-id: true
+
+      - name: Create canonical ephemeral AWS profile
+        run: |
+          if [[ "$STAGE" == "prod" ]]; then
+            AWS_PROFILE=jm8-prod
+          else
+            AWS_PROFILE=jm8-dev
+          fi
+          echo "AWS_PROFILE=$AWS_PROFILE" >> "$GITHUB_ENV"
+          umask 077
+          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID" --profile "$AWS_PROFILE"
+          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY" --profile "$AWS_PROFILE"
+          aws configure set aws_session_token "$AWS_SESSION_TOKEN" --profile "$AWS_PROFILE"
+          aws configure set region "$AWS_REGION" --profile "$AWS_PROFILE"
+          ACTUAL_ACCOUNT_ID="$(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text)"
+          [[ "$ACTUAL_ACCOUNT_ID" == "$EXPECTED_AWS_ACCOUNT_ID" ]] || {
+            echo "OIDC role resolved to the wrong AWS account." >&2
+            exit 1
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        if: inputs.deploy_frontend && inputs.stage != 'dev'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate stage contract before mutation
+        working-directory: backend
+        env:
+          JM8_OPERATION: deploy
+        run: python3 bin/jm8_environment_contract.py validate
+
+      - name: Deploy backend application
+        working-directory: backend
+        env:
+          JM8_DEPLOY_PACKAGE_PATH: ${{ github.workspace }}/.release/backend-function.zip
+          JM8_EXPECTED_PACKAGE_SHA256: ${{ hashFiles('.release/backend-function.zip') }}
+        run: |
+          test -z "${STRIPE_SECRET_KEY:-}"
+          test -z "${STRIPE_WEBHOOK_SECRET:-}"
+          ./bin/deploy
+          ./bin/create-api
+          ./bin/secure-api
+
+      - name: Prepare production frontend configuration
+        if: inputs.deploy_frontend && inputs.stage == 'prod'
+        working-directory: frontend
+        run: |
+          umask 077
+          env | awk -F= '/^VITE_/ {print}' > .env.production.local
+
+      - name: Deploy frontend application
+        if: inputs.deploy_frontend && inputs.stage != 'dev'
+        working-directory: backend
+        run: ./bin/deploy-frontend
+
+      - name: Record sanitized deployment evidence
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
+          read -r FUNCTION_STATE UPDATE_STATE FUNCTION_VERSION <<< "$(aws lambda get-function-configuration \
+            --function-name "$FUNCTION_NAME" \
+            --profile "$AWS_PROFILE" \
+            --region "$AWS_REGION" \
+            --query '[State,LastUpdateStatus,Version]' \
+            --output text)"
+          [[ "$FUNCTION_STATE" == "Active" && "$UPDATE_STATE" == "Successful" ]] || {
+            echo "Lambda post-deployment state is not healthy." >&2
+            exit 1
+          }
+          BACKEND_SHA256="$(shasum -a 256 .release/backend-function.zip | awk '{print $1}')"
+          python - "$STAGE" "$RELEASE_SHA" "$BACKEND_SHA256" "$FUNCTION_STATE" "$UPDATE_STATE" "$FUNCTION_VERSION" \
+            > deployment-evidence.json <<'PY'
+          import json
+          import sys
+
+          stage, release_sha, digest, state, update_state, version = sys.argv[1:]
+          print(json.dumps({
+              "schemaVersion": 1,
+              "stage": stage,
+              "releaseSha": release_sha,
+              "backendSha256": digest,
+              "lambdaState": state,
+              "lambdaLastUpdateStatus": update_state,
+              "lambdaVersion": version,
+          }, sort_keys=True, indent=2))
+          PY
+          {
+            echo "### JM8 deployment"
+            echo "- Stage: \`$STAGE\`"
+            echo "- Release: \`$RELEASE_SHA\`"
+            echo "- Backend SHA-256: \`$BACKEND_SHA256\`"
+            echo "- Lambda state: \`$FUNCTION_STATE / $UPDATE_STATE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: jm8-deployment-evidence-${{ inputs.stage }}-${{ github.run_id }}
+          path: deployment-evidence.json
+          if-no-files-found: warn
+          retention-days: 90

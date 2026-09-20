@@ -34,7 +34,7 @@ jm8_validate_contract_or_exit
 
 ROLE_NAME="${APP_NAME}-${STAGE}-lambda-basic-role"
 FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
-ZIP_FILE="dist/function.zip"
+ZIP_FILE="${JM8_DEPLOY_PACKAGE_PATH:-dist/function.zip}"
 OCR_WORKFLOW_NAME="${APP_NAME}-${STAGE}-ocr-workflow"
 HISTORICAL_REANALYSIS_WORKFLOW_NAME="${APP_NAME}-${STAGE}-historical-reanalysis-workflow"
 ACCOUNT_EXPORT_WORKFLOW_NAME="${APP_NAME}-${STAGE}-account-export-workflow"
@@ -51,7 +51,21 @@ FREE_MONTHLY_ENTRY_ANALYSES="${FREE_MONTHLY_ENTRY_ANALYSES:-10}"
 PRO_MONTHLY_ASK_QUESTIONS="${PRO_MONTHLY_ASK_QUESTIONS:-100}"
 PRO_MONTHLY_ENTRY_ANALYSES="${PRO_MONTHLY_ENTRY_ANALYSES:-250}"
 
-./bin/package
+if [[ -n "${JM8_DEPLOY_PACKAGE_PATH:-}" ]]; then
+  : "${JM8_EXPECTED_PACKAGE_SHA256:?JM8_EXPECTED_PACKAGE_SHA256 is required with JM8_DEPLOY_PACKAGE_PATH.}"
+  if [[ ! -f "$ZIP_FILE" ]]; then
+    echo "Prebuilt deployment package was not found." >&2
+    exit 1
+  fi
+  ACTUAL_PACKAGE_SHA256="$(shasum -a 256 "$ZIP_FILE" | awk '{print $1}')"
+  if [[ "$ACTUAL_PACKAGE_SHA256" != "$JM8_EXPECTED_PACKAGE_SHA256" ]]; then
+    echo "Prebuilt deployment package checksum does not match the release manifest." >&2
+    exit 1
+  fi
+  echo "Verified prebuilt backend deployment package."
+else
+  ./bin/package
+fi
 
 mkdir -p .build
 
