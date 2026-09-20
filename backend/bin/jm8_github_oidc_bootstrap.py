@@ -29,9 +29,6 @@ PROVIDER_STACK_NAME = "journalm8-github-oidc-provider"
 OIDC_HOST = "token.actions.githubusercontent.com"
 OIDC_URL = f"https://{OIDC_HOST}"
 OIDC_AUDIENCE = "sts.amazonaws.com"
-# Required by the IAM API. AWS normally validates GitHub through its trusted
-# root CA library and uses this SHA-1 thumbprint only as a fallback.
-GITHUB_OIDC_THUMBPRINT = "6938fd4d98bab03faadb97b34396831e3780aea1"
 COMPLETE_STACK_STATES = {"CREATE_COMPLETE", "UPDATE_COMPLETE"}
 SAFE_ERROR_CODES = {
     "AccessDenied",
@@ -165,7 +162,6 @@ def generate_templates(region: str) -> dict[str, dict[str, Any]]:
             "Properties": {
                 "Url": OIDC_URL,
                 "ClientIdList": [OIDC_AUDIENCE],
-                "ThumbprintList": [GITHUB_OIDC_THUMBPRINT],
                 "Tags": [
                     {"Key": "App", "Value": APP_NAME},
                     {"Key": "ManagedBy", "Value": "cloudformation"},
@@ -392,7 +388,6 @@ def verify_boundary(aws: AwsCli, region: str) -> None:
     if (
         provider.get("Url") != OIDC_HOST
         or provider.get("ClientIDList") != [OIDC_AUDIENCE]
-        or provider.get("ThumbprintList") != [GITHUB_OIDC_THUMBPRINT]
     ):
         raise OidcBootstrapError("GitHub OIDC provider configuration is incorrect.")
 

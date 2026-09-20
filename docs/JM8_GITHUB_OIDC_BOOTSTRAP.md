@@ -21,10 +21,11 @@ stage-specific managed policies generated from the existing reviewed production
 deployment inventory. No role receives wildcard actions, administrator policy,
 inline policy, cross-stage resources, or permission to modify itself.
 
-The IAM API requires an OIDC thumbprint value. The template records GitHub's
-published DigiCert root thumbprint; IAM normally validates GitHub against its
-trusted root certificate library and uses the configured thumbprint as a
-fallback. Review this value against current AWS/GitHub guidance before apply.
+The template intentionally omits `ThumbprintList`. Current AWS IAM and
+CloudFormation documentation states that IAM retrieves the top intermediate CA
+thumbprint when this optional property is absent. This avoids pinning a stale
+certificate-chain value while IAM continues to validate GitHub through its
+trusted root CA library and fallback mechanism.
 
 ## Generate and review (no AWS mutation)
 
