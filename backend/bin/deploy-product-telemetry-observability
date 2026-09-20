@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required. Run: source .env}"
+: "${AWS_REGION:?AWS_REGION is required. Run: source .env}"
+: "${APP_NAME:?APP_NAME is required. Run: source .env}"
+: "${STAGE:?STAGE is required. Run: source .env}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required. Run: source .env}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/jm8_deployment_guard.sh"
+export JM8_OPERATION="deploy-observability"
+jm8_validate_contract_or_exit
+
+NAMESPACE="JM8/${STAGE}/Product"
+DASHBOARD_NAME="${APP_NAME}-${STAGE}-alpha-telemetry"
+ALARM_NAME="${APP_NAME}-${STAGE}-product-telemetry-emission-failures"
+TOPIC_ARN="arn:aws:sns:${AWS_REGION}:${EXPECTED_AWS_ACCOUNT_ID}:${APP_NAME}-${STAGE}-alerts"
+BUILD_DIR="$(mktemp -d /tmp/jm8-product-telemetry.XXXXXX)"
+trap 'rm -rf -- "$BUILD_DIR"' EXIT
+
+ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --profile "$AWS_PROFILE" \
+    --region "$AWS_REGION" \
+    --query Account \
+    --output text
+)"
+
+if [ "$ACCOUNT_ID" != "$EXPECTED_AWS_ACCOUNT_ID" ]; then
+  echo "Product telemetry AWS account is invalid." >&2
+  exit 1
+fi
+
+aws sns get-topic-attributes \
+  --topic-arn "$TOPIC_ARN" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/topic.json"
+
+python3 - "$BUILD_DIR/topic.json" "$TOPIC_ARN" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if document.get("Attributes", {}).get("TopicArn") != sys.argv[2]:
+    raise SystemExit("Product telemetry alarm topic identity is invalid.")
+PY
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name "$ALARM_NAME" \
+  --alarm-description "JM8 alpha telemetry emission failed; product action remains available." \
+  --namespace "$NAMESPACE" \
+  --metric-name TelemetryEmissionFailed \
+  --statistic Sum \
+  --period 300 \
+  --evaluation-periods 1 \
+  --datapoints-to-alarm 1 \
+  --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --treat-missing-data notBreaching \
+  --alarm-actions "$TOPIC_ARN" \
+  --tags \
+    Key=App,Value="$APP_NAME" \
+    Key=Stage,Value="$STAGE" \
+    Key=ManagedBy,Value=aws-cli \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws cloudwatch describe-alarms \
+  --alarm-names "$ALARM_NAME" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/alarm.json"
+
+python3 - "$BUILD_DIR/alarm.json" "$ALARM_NAME" "$NAMESPACE" "$TOPIC_ARN" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+alarms = document.get("MetricAlarms")
+if not isinstance(alarms, list) or len(alarms) != 1:
+    raise SystemExit("Product telemetry alarm count is invalid.")
+alarm = alarms[0]
+expected = {
+    "AlarmName": sys.argv[2],
+    "Namespace": sys.argv[3],
+    "MetricName": "TelemetryEmissionFailed",
+    "Statistic": "Sum",
+    "Period": 300,
+    "EvaluationPeriods": 1,
+    "DatapointsToAlarm": 1,
+    "Threshold": 1.0,
+    "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+    "TreatMissingData": "notBreaching",
+    "AlarmActions": [sys.argv[4]],
+}
+for key, value in expected.items():
+    if alarm.get(key) != value:
+        raise SystemExit(f"Product telemetry alarm {key} is invalid.")
+if alarm.get("Dimensions") not in (None, []):
+    raise SystemExit("Product telemetry alarm dimensions are forbidden.")
+print("Product telemetry emission-failure alarm verified.")
+PY
+
+python3 "$SCRIPT_DIR/jm8_product_telemetry_dashboard.py" \
+  --region "$AWS_REGION" \
+  --account-id "$ACCOUNT_ID" \
+  --app-name "$APP_NAME" \
+  --stage "$STAGE" \
+  > "$BUILD_DIR/dashboard.json"
+
+aws cloudwatch put-dashboard \
+  --dashboard-name "$DASHBOARD_NAME" \
+  --dashboard-body "file://$BUILD_DIR/dashboard.json" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --output json \
+  > "$BUILD_DIR/put-dashboard.json"
+
+python3 - "$BUILD_DIR/put-dashboard.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if response.get("DashboardValidationMessages") != []:
+    raise SystemExit("CloudWatch rejected part of the alpha telemetry dashboard.")
+print("CloudWatch dashboard validation messages: 0")
+PY
+
+echo
+echo "Alpha telemetry observability deployed and accepted."
+echo "Dashboard: $DASHBOARD_NAME"
+echo "Alarm: $ALARM_NAME"
+echo "Namespace: $NAMESPACE"
+echo "No dimensions, identifiers, logs, or journal content were read."

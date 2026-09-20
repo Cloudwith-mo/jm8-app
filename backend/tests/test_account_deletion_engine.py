@@ -135,6 +135,49 @@ class AccountDeletionAdapterTests(unittest.TestCase):
         self.assertEqual(sizes, [25, 1, 5])
         sleeper.assert_called_once()
 
+    def test_dynamodb_deletes_every_product_milestone_shape(self):
+        table = MagicMock()
+        markers = [{
+            "PK": f"USER#{SUBJECT}",
+            "SK": "PRODUCT_MILESTONE#ActivatedUser",
+        }, {
+            "PK": f"USER#{SUBJECT}",
+            "SK": "PRODUCT_MILESTONE#FirstGroundedAskCompleted",
+        }, {
+            "PK": f"USER#{SUBJECT}",
+            "SK": "PRODUCT_MILESTONE#WeeklyActiveUser#2026-W37",
+        }]
+        table.query.side_effect = [
+            {"Items": markers},
+            {"Items": []},
+        ]
+        client = MagicMock()
+        client.batch_write_item.return_value = {"UnprocessedItems": {}}
+
+        deletion_dynamodb.delete_user_partition(
+            table,
+            client,
+            table_name="journalm8-test-main",
+            subject=SUBJECT,
+            sleeper=MagicMock(),
+        )
+
+        requests = client.batch_write_item.call_args.kwargs[
+            "RequestItems"
+        ]["journalm8-test-main"]
+        deleted_sort_keys = {
+            request["DeleteRequest"]["Key"]["SK"]["S"]
+            for request in requests
+        }
+        self.assertEqual(
+            deleted_sort_keys,
+            {marker["SK"] for marker in markers},
+        )
+        self.assertTrue(all(
+            value.startswith("PRODUCT_MILESTONE#")
+            for value in deleted_sort_keys
+        ))
+
     def test_quiescence_paginates_and_stops_only_actual_owned_execution_arn(self):
         table = MagicMock()
         table.query.side_effect = [

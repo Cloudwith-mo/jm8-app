@@ -69,6 +69,7 @@ class StoredSemanticChunk(EntrySemanticChunk):
     SK: str
     entityType: str
     generationId: str
+    replayToken: NotRequired[str]
 
 
 class ReplaceEntryMemoryResult(TypedDict):
@@ -86,11 +87,24 @@ def replace_entry_memory(
     *,
     max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE,
     overlap_size: int = DEFAULT_OVERLAP_SIZE,
+    replay_token: str | None = None,
 ) -> ReplaceEntryMemoryResult:
     """Atomically publish a complete generation from a reader's perspective."""
 
     entry_id, user_id = _entry_identity(entry)
     _validate_chunk_configuration(max_chunk_size, overlap_size)
+    if (
+        replay_token is not None
+        and (
+            not isinstance(replay_token, str)
+            or not replay_token.strip()
+            or replay_token != replay_token.strip()
+            or len(replay_token) > 128
+        )
+    ):
+        raise SemanticMemoryStoreError(
+            "semantic memory replay token is invalid"
+        )
     chunks = build_entry_semantic_chunks(
         entry,
         max_chunk_size=max_chunk_size,
@@ -120,7 +134,13 @@ def replace_entry_memory(
         )
     existing_items = _query_entry_records(table, user_id, entry_id)
     stored_chunks = [
-        _stored_chunk(user_id, entry_id, chunk) for chunk in chunks
+        _stored_chunk(
+            user_id,
+            entry_id,
+            chunk,
+            replay_token=replay_token,
+        )
+        for chunk in chunks
     ]
     active_keys = {(item["PK"], item["SK"]) for item in stored_chunks}
 
@@ -314,9 +334,11 @@ def _stored_chunk(
     user_id: str,
     entry_id: str,
     chunk: EntrySemanticChunk,
+    *,
+    replay_token: str | None = None,
 ) -> StoredSemanticChunk:
     content_digest = chunk["contentDigest"]
-    return {
+    stored: StoredSemanticChunk = {
         "PK": _user_pk(user_id),
         "SK": _chunk_sk(
             entry_id,
@@ -328,6 +350,9 @@ def _stored_chunk(
         **chunk,
         "generationId": content_digest,
     }
+    if replay_token is not None:
+        stored["replayToken"] = replay_token
+    return stored
 
 
 def _manifest_record(

@@ -491,6 +491,40 @@ class SemanticMemoryStoreTests(unittest.TestCase):
         self.assertEqual(first_items, table.items)
         self.assertEqual(first["status"], "ACTIVE")
 
+    def test_backfill_replay_token_changes_identical_chunk_once(self):
+        table = FakeTable()
+        entry = reviewed_entry()
+
+        replace_entry_memory(table, entry)
+        original = copy.deepcopy(table.items)
+
+        replace_entry_memory(
+            table,
+            entry,
+            replay_token="jm8-semantic-backfill-v1",
+        )
+        replayed = copy.deepcopy(table.items)
+
+        self.assertNotEqual(original, replayed)
+        chunks = [
+            item
+            for item in replayed.values()
+            if item.get("entityType") == CHUNK_ENTITY_TYPE
+        ]
+        self.assertTrue(chunks)
+        self.assertTrue(all(
+            item.get("replayToken")
+            == "jm8-semantic-backfill-v1"
+            for item in chunks
+        ))
+
+        replace_entry_memory(
+            table,
+            entry,
+            replay_token="jm8-semantic-backfill-v1",
+        )
+        self.assertEqual(replayed, table.items)
+
     def test_same_content_replacement_reuses_generation(self):
         table = FakeTable()
         first_entry = reviewed_entry(updatedAt="old")

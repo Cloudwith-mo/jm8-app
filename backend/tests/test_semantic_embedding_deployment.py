@@ -364,6 +364,15 @@ exit "$status"
         general = (BIN_DIR / "deploy").read_text(encoding="utf-8")
         self.assertIn("./bin/deploy-semantic-memory", general)
         self.assertIn("./bin/deploy-semantic-embedding", general)
+        for required in (
+            '${SEMANTIC_MEMORY_MAPPING_ENABLED:?',
+            '${SEMANTIC_EMBEDDING_MAPPING_ENABLED:?',
+        ):
+            self.assertIn(required, general)
+            self.assertLess(
+                general.index(required),
+                general.index("./bin/package"),
+            )
         self.assertLess(
             general.index("./bin/deploy-semantic-memory"),
             general.index("./bin/deploy-semantic-embedding"),

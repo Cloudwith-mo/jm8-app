@@ -802,6 +802,8 @@ class TestCompleteContractValidation(EnvironmentIsolationTestCase):
             "FRONTEND_BUCKET": "journalm8-prod-frontend-114743615542",
             "API_NAME": "journalm8-prod-api",
             "DEPLOY_CONFIRMATION": "prod",
+            "SEMANTIC_MEMORY_MAPPING_ENABLED": "false",
+            "SEMANTIC_EMBEDDING_MAPPING_ENABLED": "false",
             "STRIPE_SECRET_KEY": "",
             "STRIPE_SECRET_ARN": (
                 "arn:aws:secretsmanager:us-east-1:114743615542:"

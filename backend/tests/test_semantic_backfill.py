@@ -226,6 +226,10 @@ class SemanticBackfillExecutionTests(unittest.TestCase):
             "finalCoveredEntryCount": 1,
         })
         replace.assert_called_once()
+        self.assertEqual(
+            replace.call_args.kwargs["replay_token"],
+            BACKFILL_VERSION,
+        )
         sleeper.assert_called_once_with(0.25)
 
     def test_covered_entry_is_skipped_for_resumability(self):
