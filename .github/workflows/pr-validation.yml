@@ -35,6 +35,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -46,7 +48,7 @@ jobs:
       - name: Install backend test dependencies
         run: |
           python -m pip install --disable-pip-version-check --upgrade pip
-          python -m pip install --disable-pip-version-check             -r backend/requirements-dev.txt             pytest
+          python -m pip install --disable-pip-version-check -r backend/requirements-dev.txt pytest
 
       - name: Compile backend Python
         run: python -m compileall -q backend/function backend/bin
@@ -63,6 +65,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -100,13 +104,19 @@ jobs:
         run: npm run build:dev
 
   shell:
-    name: Shell syntax
+    name: Shell and diff validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check patch whitespace
+        run: git diff --check origin/main...HEAD
 
       - name: Validate executable shell scripts
         run: |
@@ -136,6 +146,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
