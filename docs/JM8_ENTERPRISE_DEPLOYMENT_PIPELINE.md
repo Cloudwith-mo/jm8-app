@@ -58,6 +58,9 @@ repository-wide copies of those secrets.
 
 ## AWS OIDC trust boundary
 
+Provision and verify this boundary with the reviewed procedure in
+`docs/JM8_GITHUB_OIDC_BOOTSTRAP.md`.
+
 Create one least-privilege deploy role per stage. Its trust policy must accept
 `sts:AssumeRoleWithWebIdentity` only from GitHub's OIDC provider, require the
 audience `sts.amazonaws.com`, and restrict the subject to the exact repository
