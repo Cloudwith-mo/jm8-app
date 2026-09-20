@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${AWS_PROFILE:?AWS_PROFILE is required.}"
+: "${AWS_REGION:?AWS_REGION is required.}"
+: "${EXPECTED_AWS_ACCOUNT_ID:?EXPECTED_AWS_ACCOUNT_ID is required.}"
+
+if [[ "$AWS_PROFILE" != "jm8-dev" ]]; then
+  echo "GitHub OIDC provisioning requires AWS_PROFILE=jm8-dev." >&2
+  exit 1
+fi
+
+if [[ "$EXPECTED_AWS_ACCOUNT_ID" != "114743615542" ]]; then
+  echo "GitHub OIDC provisioning requires the approved AWS account." >&2
+  exit 1
+fi
+
+MODE="${1:-}"
+case "$MODE" in
+  generate|verify)
+    ;;
+  apply)
+    if [[ "${GITHUB_OIDC_BOOTSTRAP_CONFIRMATION:-}" != "create-github-oidc-deployers" ]]; then
+      echo "Apply requires GITHUB_OIDC_BOOTSTRAP_CONFIRMATION=create-github-oidc-deployers." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Usage: provision-github-oidc-deployers {generate|apply|verify}" >&2
+    exit 1
+    ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUTPUT_DIR="${GITHUB_OIDC_OUTPUT_DIR:-$SCRIPT_DIR/../.build/github-oidc-deployers}"
+
+python3 "$SCRIPT_DIR/jm8_github_oidc_bootstrap.py" \
+  "$MODE" \
+  --aws-profile "$AWS_PROFILE" \
+  --aws-region "$AWS_REGION" \
+  --expected-account-id "$EXPECTED_AWS_ACCOUNT_ID" \
+  --output-dir "$OUTPUT_DIR"
