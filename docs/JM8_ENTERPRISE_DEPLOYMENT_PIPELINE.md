@@ -7,7 +7,9 @@ roles. Those remain explicit bootstrap operations.
 
 ## Release guarantees
 
-- Releases are manually dispatched with an exact 40-character commit SHA.
+- Releases are manually dispatched from the selected GitHub ref. The entered
+  40-character commit SHA must exactly match GitHub's resolved workflow commit;
+  it is confirmation only and is never used as an untrusted checkout ref.
 - The commit must already be contained in `main`.
 - Backend and frontend tests run before a release artifact is created.
 - The backend ZIP is checksummed, described by a manifest, and retained for 90
@@ -72,7 +74,8 @@ and do not reuse the production role in dev or staging.
 ## Promotion and rollback
 
 1. Merge a reviewed PR after every required CI and CodeQL check passes.
-2. Copy the resulting `main` commit SHA.
+2. Select `main` (or an approved immutable release tag) when dispatching the
+   workflow and enter its exact resolved commit SHA.
 3. Dispatch `Staged deployment` for `dev` with confirmation `deploy-dev`.
 4. Review sanitized evidence and perform the relevant smoke tests.
 5. Dispatch the same SHA for `staging` with `deploy-staging`; complete the V2

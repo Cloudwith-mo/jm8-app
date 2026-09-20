@@ -17,6 +17,8 @@ class EnterpriseDeploymentWorkflowTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertIn("release_sha:", self.workflow)
         self.assertIn("^[0-9a-f]{40}$", self.workflow)
+        self.assertIn("RELEASE_SHA: ${{ github.sha }}", self.workflow)
+        self.assertNotIn("ref: ${{ inputs.release_sha }}", self.workflow)
         self.assertIn("git merge-base --is-ancestor", self.workflow)
         self.assertIn('"deploy-${REQUESTED_STAGE}"', self.workflow)
 

@@ -42,13 +42,13 @@ jobs:
       - name: Check out exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.release_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Validate release identity
         env:
           REQUESTED_SHA: ${{ inputs.release_sha }}
+          RELEASE_SHA: ${{ github.sha }}
           REQUESTED_STAGE: ${{ inputs.stage }}
           REQUESTED_CONFIRMATION: ${{ inputs.confirmation }}
         run: |
@@ -56,12 +56,16 @@ jobs:
             echo "release_sha must be an exact lowercase 40-character commit SHA." >&2
             exit 1
           }
-          [[ "$(git rev-parse HEAD)" == "$REQUESTED_SHA" ]] || {
-            echo "Checked-out commit does not match release_sha." >&2
+          [[ "$REQUESTED_SHA" == "$RELEASE_SHA" ]] || {
+            echo "release_sha must match the commit selected for this workflow run." >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "Checked-out commit does not match the workflow commit." >&2
             exit 1
           }
           git fetch --no-tags origin main
-          git merge-base --is-ancestor "$REQUESTED_SHA" origin/main || {
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main || {
             echo "Only a commit contained in origin/main may be deployed." >&2
             exit 1
           }
@@ -105,7 +109,7 @@ jobs:
 
       - name: Create immutable release manifest
         env:
-          RELEASE_SHA: ${{ inputs.release_sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           mkdir -p .release
           cp backend/dist/function.zip .release/backend-function.zip
@@ -127,7 +131,7 @@ jobs:
       - name: Upload release candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: jm8-release-${{ inputs.release_sha }}
+          name: jm8-release-${{ github.sha }}
           path: .release/
           if-no-files-found: error
           retention-days: 90
@@ -194,18 +198,18 @@ jobs:
       - name: Check out exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.release_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Download immutable release candidate
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          name: jm8-release-${{ inputs.release_sha }}
+          name: jm8-release-${{ github.sha }}
           path: .release
 
       - name: Verify release candidate
         env:
-          RELEASE_SHA: ${{ inputs.release_sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           (cd .release && shasum -a 256 --check backend-function.sha256)
           python - "$RELEASE_SHA" <<'PY'
@@ -307,7 +311,7 @@ jobs:
 
       - name: Record sanitized deployment evidence
         env:
-          RELEASE_SHA: ${{ inputs.release_sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           FUNCTION_NAME="${APP_NAME}-${STAGE}-api"
           read -r FUNCTION_STATE UPDATE_STATE FUNCTION_VERSION <<< "$(aws lambda get-function-configuration \
