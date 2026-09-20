@@ -156,7 +156,11 @@ def execute_semantic_backfill(
             continue
 
         try:
-            replacement = replace_entry_memory(entry_chunks_table, current)
+            replacement = replace_entry_memory(
+                entry_chunks_table,
+                current,
+                replay_token=BACKFILL_VERSION,
+            )
         except Exception:
             raise SemanticBackfillError(
                 "semantic backfill persistence failed"

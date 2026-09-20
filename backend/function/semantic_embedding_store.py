@@ -229,6 +229,7 @@ def _transaction_request(
         "#characterCount": "characterCount",
         "#wordCount": "wordCount",
         "#chunkingVersion": "chunkingVersion",
+        "#replayToken": "replayToken",
     }
     update_values: dict[str, object] = {
         f":{name}": _dynamodb_value(value)
@@ -252,8 +253,12 @@ def _transaction_request(
     update = {
         "TableName": table_name,
         "Key": chunk_key,
-        "UpdateExpression": "SET " + ", ".join(
-            f"#{name} = :{name}" for name in embedding
+        "UpdateExpression": (
+            "SET "
+            + ", ".join(
+                f"#{name} = :{name}" for name in embedding
+            )
+            + " REMOVE #replayToken"
         ),
         "ConditionExpression": (
             "#entityType = :chunkType "

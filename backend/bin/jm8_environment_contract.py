@@ -1589,6 +1589,9 @@ def validate_operation_specific(
             require_workflows=False,
         )
 
+        validate_semantic_memory_activation(stage, os.environ)
+        validate_semantic_embedding_activation(stage, os.environ)
+
     if op == "deploy-account-export":
         validate_export_bucket_name(
             os.environ.get("APP_NAME", "").strip(),
