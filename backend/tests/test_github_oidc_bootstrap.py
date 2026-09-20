@@ -17,7 +17,6 @@ sys.path.insert(0, str(BIN_DIR))
 
 from jm8_github_oidc_bootstrap import (  # noqa: E402
     ACCOUNT_ID,
-    GITHUB_OIDC_THUMBPRINT,
     OIDC_AUDIENCE,
     OIDC_HOST,
     REPOSITORY,
@@ -85,7 +84,7 @@ class GenerationTests(unittest.TestCase):
                 )
         provider = templates["provider"]["Resources"]["GitHubOidcProvider"]["Properties"]
         self.assertEqual(provider["ClientIdList"], [OIDC_AUDIENCE])
-        self.assertEqual(provider["ThumbprintList"], [GITHUB_OIDC_THUMBPRINT])
+        self.assertNotIn("ThumbprintList", provider)
         for stage in STAGES:
             resources = templates[stage]["Resources"]
             types = [resource["Type"] for resource in resources.values()]
