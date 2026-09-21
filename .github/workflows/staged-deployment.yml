@@ -289,10 +289,15 @@ jobs:
         working-directory: backend
         env:
           JM8_DEPLOY_PACKAGE_PATH: ${{ github.workspace }}/release/backend-function.zip
-          JM8_EXPECTED_PACKAGE_SHA256: ${{ hashFiles('release/backend-function.zip') }}
         run: |
           test -z "${STRIPE_SECRET_KEY:-}"
           test -z "${STRIPE_WEBHOOK_SECRET:-}"
+          JM8_EXPECTED_PACKAGE_SHA256="$(awk 'NF {print $1; exit}' "$GITHUB_WORKSPACE/release/backend-function.sha256")"
+          [[ "$JM8_EXPECTED_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "Release manifest checksum is invalid." >&2
+            exit 1
+          }
+          export JM8_EXPECTED_PACKAGE_SHA256
           ./bin/deploy
           ./bin/create-api
           ./bin/secure-api
