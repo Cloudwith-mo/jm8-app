@@ -261,10 +261,11 @@ jobs:
           aws configure set aws_session_token "$AWS_SESSION_TOKEN" --profile "$AWS_PROFILE"
           aws configure set region "$AWS_REGION" --profile "$AWS_PROFILE"
           ACTUAL_ACCOUNT_ID="$(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text)"
-          [[ "$ACTUAL_ACCOUNT_ID" == "$EXPECTED_AWS_ACCOUNT_ID" ]] || {
+          [[ "$ACTUAL_ACCOUNT_ID" =~ ^[0-9]{12}$ && "$ACTUAL_ACCOUNT_ID" == "$EXPECTED_AWS_ACCOUNT_ID" ]] || {
             echo "OIDC role resolved to the wrong AWS account." >&2
             exit 1
           }
+          echo "ACCOUNT_ID=$ACTUAL_ACCOUNT_ID" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7

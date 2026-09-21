@@ -1,4 +1,8 @@
 import pathlib
+import os
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 
@@ -8,6 +12,38 @@ DEPLOY = ROOT / "backend" / "bin" / "deploy"
 
 
 class EnterpriseDeploymentWorkflowTests(unittest.TestCase):
+    def test_verified_account_is_exported_for_later_steps(self):
+        for stage in ("dev", "staging", "prod"):
+            with self.subTest(stage=stage):
+                self.check_account_export(stage, "114743615542", "114743615542", True)
+
+    def test_wrong_or_malformed_account_is_not_exported(self):
+        for actual, expected in (("000000000000", "114743615542"), ("None", "None"), ("", "")):
+            with self.subTest(actual=actual):
+                self.check_account_export("dev", actual, expected, False)
+
+    def check_account_export(self, stage, actual, expected, success):
+        step = self.workflow.split("      - name: Create canonical ephemeral AWS profile\n", 1)[1]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0])
+        stub = 'aws() { if [[ "$1" == "sts" ]]; then printf "%s\\n" "$TEST_ACCOUNT"; fi; }\n'
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = pathlib.Path(directory) / "github-env"
+            env = dict(os.environ, STAGE=stage, TEST_ACCOUNT=actual,
+                       EXPECTED_AWS_ACCOUNT_ID=expected, GITHUB_ENV=str(env_file),
+                       AWS_ACCESS_KEY_ID="test", AWS_SECRET_ACCESS_KEY="test",
+                       AWS_SESSION_TOKEN="test", AWS_REGION="us-east-1")
+            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", stub + script],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode == 0, success, result.stderr)
+            lines = env_file.read_text().splitlines()
+            account_lines = [line for line in lines if line.startswith("ACCOUNT_ID=")]
+            self.assertEqual(account_lines, ["ACCOUNT_ID=" + actual] if success else [])
+            if success:
+                later_env = dict(env, **dict(line.split("=", 1) for line in lines))
+                later = subprocess.run(["bash", "-c", ': "${ACCOUNT_ID:?missing}"; test "$ACCOUNT_ID" = "$TEST_ACCOUNT"'],
+                                       env=later_env, capture_output=True, text=True)
+                self.assertEqual(later.returncode, 0, later.stderr)
+
     @classmethod
     def setUpClass(cls):
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
