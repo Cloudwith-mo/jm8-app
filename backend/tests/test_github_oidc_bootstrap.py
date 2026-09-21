@@ -42,6 +42,20 @@ from jm8_github_oidc_bootstrap import (  # noqa: E402
 
 
 class GenerationTests(unittest.TestCase):
+    def test_dev_tag_read_grant_is_exact_and_read_only(self):
+        statement = stage_policies("dev", "us-east-1")["compute"]["Statement"][-1]
+        self.assertEqual(statement, {
+            "Sid": "ReadExactDevHttpApiTags", "Effect": "Allow",
+            "Action": ["apigateway:GET"],
+            "Resource": "arn:aws:apigateway:us-east-1::/tags/arn:aws:apigateway:us-east-1::/apis/u06tdrfsua",
+        })
+        self.assertNotIn("*", statement["Resource"])
+
+    def test_tag_read_grant_is_not_copied_to_other_stages_or_regions(self):
+        for stage, region in (("staging", "us-east-1"), ("prod", "us-east-1"), ("dev", "us-west-2")):
+            with self.subTest(stage=stage, region=region):
+                self.assertNotIn("ReadExactDevHttpApiTags", json.dumps(stage_policies(stage, region)))
+
     def test_secret_resources_and_names_are_exact_for_every_stage(self):
         for stage in STAGES:
             with self.subTest(stage=stage):
