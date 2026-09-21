@@ -123,6 +123,18 @@ def stage_policies(stage: str, region: str) -> dict[str, dict[str, Any]]:
     for source_name, document in source.items():
         group = source_name.rsplit("-", 1)[-1]
         result[group] = _transform(copy.deepcopy(document), stage)
+    # API Gateway authorizes GetTags against its tag endpoint, not /apis/*.
+    # Keep this read-only grant tied to the verified existing dev API inventory.
+    if stage == "dev" and region == "us-east-1":
+        result["compute"]["Statement"].append({
+            "Sid": "ReadExactDevHttpApiTags",
+            "Effect": "Allow",
+            "Action": ["apigateway:GET"],
+            "Resource": (
+                "arn:aws:apigateway:us-east-1::/tags/"
+                "arn:aws:apigateway:us-east-1::/apis/u06tdrfsua"
+            ),
+        })
     validate_stage_policies(stage, result)
     return result
 
