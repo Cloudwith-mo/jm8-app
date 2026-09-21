@@ -111,11 +111,11 @@ jobs:
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
-          mkdir -p .release
-          cp backend/dist/function.zip .release/backend-function.zip
-          BACKEND_SHA256="$(shasum -a 256 .release/backend-function.zip | awk '{print $1}')"
-          printf '%s  %s\n' "$BACKEND_SHA256" backend-function.zip > .release/backend-function.sha256
-          python - "$RELEASE_SHA" "$BACKEND_SHA256" > .release/manifest.json <<'PY'
+          mkdir -p release
+          cp backend/dist/function.zip release/backend-function.zip
+          BACKEND_SHA256="$(shasum -a 256 release/backend-function.zip | awk '{print $1}')"
+          printf '%s  %s\n' "$BACKEND_SHA256" backend-function.zip > release/backend-function.sha256
+          python - "$RELEASE_SHA" "$BACKEND_SHA256" > release/manifest.json <<'PY'
           import json
           import sys
 
@@ -132,7 +132,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: jm8-release-${{ github.sha }}
-          path: .release/
+          path: release/
           if-no-files-found: error
           retention-days: 90
 
@@ -205,13 +205,13 @@ jobs:
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: jm8-release-${{ github.sha }}
-          path: .release
+          path: release
 
       - name: Verify release candidate
         env:
           RELEASE_SHA: ${{ github.sha }}
         run: |
-          (cd .release && shasum -a 256 --check backend-function.sha256)
+          (cd release && shasum -a 256 --check backend-function.sha256)
           python - "$RELEASE_SHA" <<'PY'
           import hashlib
           import json
@@ -219,7 +219,7 @@ jobs:
           import sys
 
           release_sha = sys.argv[1]
-          release_dir = pathlib.Path(".release")
+          release_dir = pathlib.Path("release")
           manifest = json.loads((release_dir / "manifest.json").read_text())
           artifact = release_dir / manifest["backendArtifact"]
           digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -288,8 +288,8 @@ jobs:
       - name: Deploy backend application
         working-directory: backend
         env:
-          JM8_DEPLOY_PACKAGE_PATH: ${{ github.workspace }}/.release/backend-function.zip
-          JM8_EXPECTED_PACKAGE_SHA256: ${{ hashFiles('.release/backend-function.zip') }}
+          JM8_DEPLOY_PACKAGE_PATH: ${{ github.workspace }}/release/backend-function.zip
+          JM8_EXPECTED_PACKAGE_SHA256: ${{ hashFiles('release/backend-function.zip') }}
         run: |
           test -z "${STRIPE_SECRET_KEY:-}"
           test -z "${STRIPE_WEBHOOK_SECRET:-}"
@@ -324,7 +324,7 @@ jobs:
             echo "Lambda post-deployment state is not healthy." >&2
             exit 1
           }
-          BACKEND_SHA256="$(shasum -a 256 .release/backend-function.zip | awk '{print $1}')"
+          BACKEND_SHA256="$(shasum -a 256 release/backend-function.zip | awk '{print $1}')"
           python - "$STAGE" "$RELEASE_SHA" "$BACKEND_SHA256" "$FUNCTION_STATE" "$UPDATE_STATE" "$FUNCTION_VERSION" \
             > deployment-evidence.json <<'PY'
           import json

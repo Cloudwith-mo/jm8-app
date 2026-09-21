@@ -41,6 +41,14 @@ class EnterpriseDeploymentWorkflowTests(unittest.TestCase):
         self.assertIn("shasum -a 256 --check", self.workflow)
         self.assertIn("retention-days: 90", self.workflow)
 
+    def test_release_artifact_uses_a_visible_upload_directory(self):
+        self.assertIn("path: release/", self.workflow)
+        self.assertIn("path: release", self.workflow)
+        self.assertIn('pathlib.Path("release")', self.workflow)
+        self.assertNotIn("path: .release", self.workflow)
+        self.assertNotIn('pathlib.Path(".release")', self.workflow)
+        self.assertNotIn("/.release/backend-function.zip", self.workflow)
+
     def test_deploy_accepts_only_a_verified_prebuilt_package(self):
         self.assertIn("JM8_DEPLOY_PACKAGE_PATH", self.deploy)
         self.assertIn("JM8_EXPECTED_PACKAGE_SHA256", self.deploy)
