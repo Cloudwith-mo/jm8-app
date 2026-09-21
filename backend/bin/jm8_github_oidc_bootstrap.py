@@ -104,7 +104,9 @@ def _transform(value: Any, stage: str) -> Any:
     if isinstance(value, str):
         if value == "prod":
             return stage
-        return value.replace(f"{APP_NAME}-prod", f"{APP_NAME}-{stage}")
+        return value.replace(
+            f"{APP_NAME}-prod", f"{APP_NAME}-{stage}"
+        ).replace(f"{APP_NAME}/prod/", f"{APP_NAME}/{stage}/")
     if isinstance(value, list):
         return [_transform(item, stage) for item in value]
     if isinstance(value, dict):
@@ -129,6 +131,8 @@ def validate_stage_policies(
     stage: str,
     policies: dict[str, dict[str, Any]],
 ) -> None:
+    if stage not in STAGES:
+        raise OidcBootstrapError("Unsupported deployment stage.")
     expected_groups = {
         "foundation", "compute", "iam", "frontend", "observability", "secrets"
     }
@@ -136,7 +140,10 @@ def validate_stage_policies(
         raise OidcBootstrapError("Stage policy groups are not canonical.")
     serialized = compact_json(policies)
     for other_stage in set(STAGES) - {stage}:
-        if f"{APP_NAME}-{other_stage}" in serialized:
+        if (
+            f"{APP_NAME}-{other_stage}" in serialized
+            or f"{APP_NAME}/{other_stage}/" in serialized
+        ):
             raise OidcBootstrapError("Stage policy crosses an environment boundary.")
     if role_arn(stage) in serialized:
         raise OidcBootstrapError("A deployment policy permits role self-modification.")
