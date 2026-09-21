@@ -41,6 +41,14 @@ class EnterpriseDeploymentWorkflowTests(unittest.TestCase):
         self.assertIn("shasum -a 256 --check", self.workflow)
         self.assertIn("retention-days: 90", self.workflow)
 
+    def test_deploy_uses_the_verified_manifest_checksum(self):
+        self.assertIn(
+            'awk \'NF {print $1; exit}\' "$GITHUB_WORKSPACE/release/backend-function.sha256"',
+            self.workflow,
+        )
+        self.assertIn("export JM8_EXPECTED_PACKAGE_SHA256", self.workflow)
+        self.assertNotIn("hashFiles('release/backend-function.zip')", self.workflow)
+
     def test_release_artifact_uses_a_visible_upload_directory(self):
         self.assertIn("path: release/", self.workflow)
         self.assertIn("path: release", self.workflow)
