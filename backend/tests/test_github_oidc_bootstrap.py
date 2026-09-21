@@ -37,10 +37,44 @@ from jm8_github_oidc_bootstrap import (  # noqa: E402
     inspect_bootstrap_state,
     verify_identity,
     write_artifacts,
+    validate_stage_policies,
 )
 
 
 class GenerationTests(unittest.TestCase):
+    def test_secret_resources_and_names_are_exact_for_every_stage(self):
+        for stage in STAGES:
+            with self.subTest(stage=stage):
+                statements = stage_policies(stage, "us-east-1")["secrets"]["Statement"]
+                expected = f"arn:aws:secretsmanager:us-east-1:{ACCOUNT_ID}:secret:journalm8/{stage}/stripe-*"
+                self.assertEqual(len(statements), 2)
+                for statement in statements:
+                    self.assertEqual(statement["Resource"], expected)
+                conditions = statements[1]["Condition"]["StringEquals"]
+                self.assertEqual(conditions["secretsmanager:Name"], f"journalm8/{stage}/stripe")
+                self.assertEqual(conditions["aws:RequestTag/Stage"], stage)
+
+    def test_rejects_cross_stage_secret_resources_and_conditions(self):
+        for stage in STAGES:
+            for other in set(STAGES) - {stage}:
+                for location in ("resource", "condition"):
+                    with self.subTest(stage=stage, other=other, location=location):
+                        policies = stage_policies(stage, "us-east-1")
+                        statement = policies["secrets"]["Statement"][1]
+                        if location == "resource":
+                            statement["Resource"] = f"arn:aws:secretsmanager:us-east-1:{ACCOUNT_ID}:secret:journalm8/{other}/stripe-*"
+                        else:
+                            statement["Condition"]["StringEquals"]["secretsmanager:Name"] = f"journalm8/{other}/stripe"
+                        with self.assertRaises(OidcBootstrapError):
+                            validate_stage_policies(stage, policies)
+
+    def test_production_policies_unchanged(self):
+        from jm8_production_deployer_policies import generate_policies
+        source = generate_policies("us-east-1")
+        self.assertEqual(stage_policies("prod", "us-east-1"), {
+            name.rsplit("-", 1)[-1]: document for name, document in source.items()
+        })
+
     def test_trust_is_exact_per_environment(self):
         for stage in STAGES:
             with self.subTest(stage=stage):
