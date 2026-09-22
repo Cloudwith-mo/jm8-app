@@ -140,6 +140,7 @@ from storage import (
 def build_semantic_ask_context(
     user_id: str,
     ask_context: dict[str, Any],
+    source_references: dict | None = None,
 ) -> dict[str, Any]:
     semantic_retrieval = (
         retrieve_semantic_query_evidence(
@@ -159,6 +160,7 @@ def build_semantic_ask_context(
         compose_ask_context_with_semantic_evidence(
             ask_context,
             semantic_retrieval,
+            source_references=source_references,
         )
     )
 
@@ -601,10 +603,12 @@ def lambda_handler(event, context):
                 )
             )
 
+            source_references = {}
             try:
                 ask_context = (
                     build_ask_context(
                         entries,
+                        source_references=source_references,
                         question=body.get(
                             "question"
                         ),
@@ -648,6 +652,7 @@ def lambda_handler(event, context):
                     build_semantic_ask_context(
                         user_id,
                         ask_context,
+                        source_references=source_references,
                     )
                 )
 
@@ -716,7 +721,8 @@ def lambda_handler(event, context):
             try:
                 answer = (
                     answer_journal_history(
-                        ask_context
+                        ask_context,
+                        source_references=source_references
                     )
                 )
 

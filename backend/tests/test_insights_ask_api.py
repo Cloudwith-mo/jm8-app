@@ -140,7 +140,7 @@ class AskJm8ApiTests(
         self.addCleanup(self.guard.stop)
         self.semantic_context = patch(
             "app.build_semantic_ask_context",
-            side_effect=lambda _user_id, context: {
+            side_effect=lambda _user_id, context, source_references=None: {
                 **context,
                 "semanticEvidence": {
                     "status": "EMPTY",
@@ -188,7 +188,7 @@ class AskJm8ApiTests(
             question="What challenge keeps returning?",
             top_k=24,
         )
-        compose_context.assert_called_once_with(context, semantic)
+        compose_context.assert_called_once_with(context, semantic, source_references=None)
 
     @patch(
         "app.complete_ask_usage"
@@ -325,6 +325,7 @@ class AskJm8ApiTests(
         self.build_semantic_context.assert_called_once_with(
             "private-user",
             reserve_usage.call_args.args[1],
+            source_references=answer_history.call_args.kwargs["source_references"],
         )
 
         persist_history.assert_called_once_with(

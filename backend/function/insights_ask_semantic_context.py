@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ask_source_references import register_source
 import math
 from copy import deepcopy
 from datetime import date, datetime, timezone
@@ -23,6 +24,8 @@ class AskSemanticContextError(ValueError):
 def compose_ask_context_with_semantic_evidence(
     context: object,
     retrieval: object,
+    *,
+    source_references: dict | None = None,
 ) -> dict[str, Any]:
     """Attach a privacy-minimized, date-scoped semantic evidence section."""
 
@@ -93,6 +96,7 @@ def compose_ask_context_with_semantic_evidence(
             continue
 
         seen.add(identity)
+        normalized.update(register_source(source_references, raw_item.get("entryId")))
         items.append(normalized)
         included_characters += excerpt_characters
 

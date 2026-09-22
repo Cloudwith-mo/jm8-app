@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ask_source_references import valid_source_entry_id
 import re
 import uuid
 from datetime import (
@@ -944,6 +945,10 @@ def _normalize_evidence(
             "sourceType": source_type,
             "relevance": relevance,
         })
+        if "sourceEntryId" in item:
+            if not valid_source_entry_id(item["sourceEntryId"]):
+                _raise_contract_error("InvalidAskHistoryAnswer", "Invalid source entry reference")
+            normalized[-1]["sourceEntryId"] = item["sourceEntryId"]
 
     return normalized
 

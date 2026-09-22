@@ -1617,3 +1617,15 @@ button svg {
     justify-self: start;
   }
 }
+
+.ask-jm8-source-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.ask-jm8-source-link:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
