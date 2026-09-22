@@ -57,6 +57,7 @@ export type AskJm8Metrics = {
 
 
 export type AskJm8Evidence = {
+  sourceEntryId?: string;
   paraphrase: string;
   date: string;
   sourceType: AskJm8SourceType;
