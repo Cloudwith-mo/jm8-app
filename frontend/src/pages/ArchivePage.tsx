@@ -222,6 +222,25 @@ export default function ArchivePage() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [authUser, setAuthUser] = useState<AuthUser | null>(getCurrentUser());
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const signInPending = useRef(false);
+
+  async function startSignIn(signup = false) {
+    if (signInPending.current) return;
+    signInPending.current = true;
+    setIsSigningIn(true);
+    setAuthError("");
+    try {
+      await (signup ? signupWithCognito() : loginWithCognito());
+    } catch (error) {
+      setAuthError(getErrorMessage(error, "Sign-in could not be completed. Please try again."));
+    } finally {
+      signInPending.current = false;
+      setIsSigningIn(false);
+    }
+  }
+
   const [
     usage,
     setUsage,
@@ -943,6 +962,7 @@ export default function ArchivePage() {
         }
       } catch (error) {
         clearAccountDeletionReturnIntent();
+        setAuthError(getErrorMessage(error, "Could not restore your session."));
         updateStatus(getErrorMessage(error, "Cognito login failed."), "error", "Login failed");
       } finally {
         setIsAuthReady(true);
@@ -1043,7 +1063,7 @@ export default function ArchivePage() {
 
   function handleAccountDeletionReauthentication() {
     rememberAccountDeletionReturnIntent();
-    void loginWithCognito();
+    void startSignIn();
   }
 
   function handleAccountDeletionProcessed() {
@@ -1063,13 +1083,14 @@ export default function ArchivePage() {
   if (!isAuthReady || !authUser) {
     return (
       <AuthLandingPage
-        isReady={isAuthReady}
+        isReady={isAuthReady && !isSigningIn}
+        error={authError}
         acknowledgement={deletionAcknowledgement}
         onSignIn={() => {
-          void loginWithCognito();
+          void startSignIn();
         }}
         onCreateAccount={() => {
-          void signupWithCognito();
+          void startSignIn(true);
         }}
       />
     );

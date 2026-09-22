@@ -65,7 +65,7 @@ test("serialization removes duplicate, unsupported, callback, and injected param
 
 test("Cognito callback uses PKCE plus correlated state and always removes callback material", () => {
   assert.match(auth, /code_challenge_method: "S256"/);
-  assert.match(auth, /localStorage\.setItem\(OAUTH_STATE_KEY, state\)/);
+  assert.match(auth, /authStorage\.setItem\(OAUTH_STATE_KEY, state\)/);
   assert.match(auth, /callbackState !== expectedState/);
   assert.match(auth, /getAll\(name\)\.length > 1/);
   assert.match(auth, /finally \{[\s\S]*removeCallbackParameters\(url\)/);

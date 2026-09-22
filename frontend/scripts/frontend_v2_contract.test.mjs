@@ -31,8 +31,8 @@ test("signed-out experience is the real Cognito V2 landing", () => {
   }
 
   assert.match(archivePage, /<AuthLandingPage/);
-  assert.match(archivePage, /onSignIn=\{\(\) => \{[\s\S]*loginWithCognito/);
-  assert.match(archivePage, /onCreateAccount=\{\(\) => \{[\s\S]*signupWithCognito/);
+  assert.match(archivePage, /onSignIn=\{\(\) => \{[\s\S]*startSignIn\(\)/);
+  assert.match(archivePage, /onCreateAccount=\{\(\) => \{[\s\S]*startSignIn\(true\)/);
   assert.match(landing, /<div className="jm8-journal-sheet sheet-one">/);
   assert.match(landing, /<div className="jm8-archive-preview">/);
   assert.doesNotMatch(landing, /Google|password|type="email"|type="password"|demo-user|x-user-id/i);
