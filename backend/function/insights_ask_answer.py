@@ -1,3 +1,4 @@
+from ask_source_references import source_reference, resolve_answer_sources
 import json
 import math
 import os
@@ -23,7 +24,7 @@ from llm_journal_analyzer import (
 
 
 ASK_ANSWER_VERSION = "1.0"
-ASK_PROMPT_VERSION = "ask-jm8-v2"
+ASK_PROMPT_VERSION = "ask-jm8-v3-citations"
 
 MAX_MODEL_CONTEXT_CHARACTERS = 70_000
 MAX_MODEL_SOURCE_SIGNALS = 10
@@ -130,6 +131,7 @@ ASK_ANSWER_OUTPUT_SCHEMA: dict[
             "items": {
                 "type": "object",
                 "properties": {
+                    "sourceRef": {"type": "string"},
                     "paraphrase": {
                         "type": "string",
                     },
@@ -154,6 +156,7 @@ ASK_ANSWER_OUTPUT_SCHEMA: dict[
                     },
                 },
                 "required": [
+                    "sourceRef",
                     "paraphrase",
                     "date",
                     "sourceType",
@@ -231,7 +234,9 @@ Grounding rules:
 3. Do not diagnose mental-health conditions or make clinical judgments.
 4. Do not reproduce or directly quote journal excerpts. Evidence must be a
    concise paraphrase of a supplied source signal or semantic excerpt.
-5. Evidence dates and source types must exactly match a supplied source
+5. Each evidence item must copy sourceRef from the exact supplied source it
+   paraphrases. Use an empty string if that source has no sourceRef. Never
+   invent references. Evidence dates and source types must exactly match a supplied source
    signal or semantic excerpt.
 6. A related theme must already appear in the supplied aggregate themes
    or emerging topics.
@@ -486,6 +491,7 @@ def compact_source_signal(
         source_type = "unknown"
 
     return {
+        **source_reference(signal),
         "date": clean_text_value(
             signal.get("date"),
             max_characters=10,
@@ -836,6 +842,7 @@ def normalize_semantic_evidence(
             continue
 
         items.append({
+            **source_reference(item),
             "date": evidence_date,
             "sourceType": source_type,
             "distance": round(float(distance), 8),
@@ -1293,6 +1300,13 @@ def normalize_evidence(
                     source_type,
                 ))
 
+    sources = list(source_signals or [])
+    sources.extend((semantic_evidence or {}).get("items", []))
+    references = {
+        source["sourceRef"]: (source.get("date"), source.get("sourceType"))
+        for source in sources if isinstance(source, dict) and source_reference(source)
+    }
+
     results: list[
         dict[str, Any]
     ] = []
@@ -1349,6 +1363,11 @@ def normalize_evidence(
         ) not in allowed_sources:
             continue
 
+        reference = source_reference(item)
+        raw_reference = item.get("sourceRef")
+        if raw_reference and (not reference or references.get(raw_reference) != (evidence_date, source_type)):
+            continue
+
         identity = (
             paraphrase.casefold(),
             evidence_date,
@@ -1361,6 +1380,7 @@ def normalize_evidence(
         seen.add(identity)
 
         results.append({
+            **reference,
             "paraphrase": (
                 paraphrase
             ),
@@ -1861,6 +1881,7 @@ def answer_journal_history(
     context: Any,
     *,
     client: Any | None = None,
+    source_references: dict | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     prepared_context = (
@@ -2130,4 +2151,4 @@ def answer_journal_history(
         sort_keys=True,
     ))
 
-    return normalized
+    return resolve_answer_sources(normalized, source_references)
