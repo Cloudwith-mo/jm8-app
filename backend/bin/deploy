@@ -567,4 +567,3 @@ aws lambda get-function \
 # Publish the stage-isolated alpha telemetry dashboard and its failure alarm
 # only after the application and semantic observability are reconciled.
 ./bin/deploy-product-telemetry-observability
-
