@@ -89,6 +89,9 @@ jm8_reconcile_bedrock_analysis_policy \
   "$BEDROCK_ANALYSIS_MODEL_ID" \
   ".build/bedrock"
 
+# Grant the API evidence reads independently of ingestion worker permissions.
+python3 "$SCRIPT_DIR/jm8_api_semantic_policy.py" apply
+
 echo "Resolving OCR workflow: $OCR_WORKFLOW_NAME"
 
 OCR_WORKFLOW_ARN="$(
