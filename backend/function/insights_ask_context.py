@@ -1,3 +1,4 @@
+from ask_source_references import register_source
 from collections import defaultdict
 from datetime import (
     date,
@@ -624,6 +625,7 @@ def source_signal_blob(
         if key in {
             "date",
             "sourceType",
+            "sourceRef",
         }:
             continue
 
@@ -694,6 +696,7 @@ def select_source_signals(
     ],
     *,
     question: str,
+    source_references: dict | None = None,
 ) -> list[dict[str, Any]]:
     question_tokens = tokenize(
         question
@@ -724,6 +727,8 @@ def select_source_signals(
             entry,
             analysis,
         )
+
+        signal.update(register_source(source_references, entry.get("entryId")))
 
         score = score_source_signal(
             signal,
@@ -970,6 +975,7 @@ def build_ask_context(
     start_date: Any = None,
     end_date: Any = None,
     now: datetime | None = None,
+    source_references: dict | None = None,
 ) -> dict[str, Any]:
     normalized_question = (
         normalize_question(
@@ -1059,6 +1065,7 @@ def build_ask_context(
     source_signals = (
         select_source_signals(
             analyzed_entries,
+            source_references=source_references,
             question=(
                 normalized_question
             ),
