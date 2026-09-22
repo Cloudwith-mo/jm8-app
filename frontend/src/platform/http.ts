@@ -1,8 +1,9 @@
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 
+const cognitoOrigin = "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com";
 const nativeOrigins = new Set([
   "https://u06tdrfsua.execute-api.us-east-1.amazonaws.com",
-  "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com",
+  cognitoOrigin,
 ]);
 
 /** Native transport for dev API JSON and Cognito token requests only. */
@@ -10,7 +11,7 @@ export async function serviceFetch(url: string, options: RequestInit = {}): Prom
   if (Capacitor.getPlatform() !== "ios") return fetch(url, options);
   const target = new URL(url);
   if (!nativeOrigins.has(target.origin) || target.username || target.password
-    || (target.hostname.endsWith("amazoncognito.com") && target.pathname !== "/oauth2/token")) {
+    || (target.origin === cognitoOrigin && target.pathname !== "/oauth2/token")) {
     throw new Error("Unsupported native service URL.");
   }
   const signal = options.signal;
