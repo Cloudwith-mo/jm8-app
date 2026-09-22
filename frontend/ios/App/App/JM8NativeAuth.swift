@@ -9,11 +9,6 @@ final class JM8BridgeViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(JM8NativeAuth())
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        // Constrain the entire web viewport, including fixed headers and dialogs.
-        webView?.frame = view.safeAreaLayoutGuide.layoutFrame
-    }
 }
 
 @objc(JM8NativeAuth)
