@@ -135,6 +135,43 @@ def stage_policies(stage: str, region: str) -> dict[str, dict[str, Any]]:
                 "arn:aws:apigateway:us-east-1::/apis/u06tdrfsua"
             ),
         })
+    if stage == "dev" and region == "us-east-1":
+        api = "arn:aws:apigateway:us-east-1::/apis/u06tdrfsua"
+        result["compute"]["Statement"].extend([
+            {
+                "Sid": "WriteExactDevHttpApiTags",
+                "Effect": "Allow",
+                "Action": ["apigateway:POST"],
+                "Resource": f"arn:aws:apigateway:us-east-1::/tags/{api}",
+                "Condition": {
+                    "StringEquals": {
+                        "aws:RequestTag/App": APP_NAME,
+                        "aws:RequestTag/Stage": "dev",
+                        "aws:RequestTag/ManagedBy": "aws-cli",
+                    },
+                    "ForAllValues:StringEquals": {
+                        "aws:TagKeys": ["App", "Stage", "ManagedBy"],
+                    },
+                },
+            },
+            # HTTP API child resources do not inherit REST API resource tags.
+            # Pin the API ID and enumerate only collections used by our scripts.
+            {
+                "Sid": "ManageExactDevHttpApiCollections",
+                "Effect": "Allow",
+                "Action": ["apigateway:GET", "apigateway:POST"],
+                "Resource": [f"{api}/{kind}" for kind in
+                             ("integrations", "routes", "authorizers", "stages")],
+            },
+            {
+                "Sid": "ManageExactDevHttpApiChildren",
+                "Effect": "Allow",
+                "Action": ["apigateway:GET", "apigateway:PATCH"],
+                "Resource": [f"{api}/{kind}/*" for kind in
+                             ("integrations", "routes", "authorizers")]
+                            + [f"{api}/stages/$default"],
+            },
+        ])
     validate_stage_policies(stage, result)
     return result
 
