@@ -365,6 +365,14 @@ function isMissingHistoryError(
 }
 
 
+function SourceLink({ evidence }: { evidence: AskJm8Evidence }) {
+  const label = formatSourceType(evidence.sourceType);
+  const id = evidence.sourceEntryId;
+  if (!id || !/^entry_[A-Za-z0-9_-]{1,160}$/.test(id)) return <>{label}</>;
+  return <a className="ask-jm8-source-link" href={`?entry=${encodeURIComponent(id)}`}
+    aria-label={`Open ${label.toLowerCase()} from ${formatDate(evidence.date)}`}>{label}</a>;
+}
+
 function SourceIcon({
   sourceType,
 }: {
@@ -1843,10 +1851,7 @@ export default function AskJm8Panel({
                                 }
                               />
 
-                              {formatSourceType(
-                                evidence
-                                  .sourceType
-                              )}
+                              <SourceLink evidence={evidence} />
 
                               <small>
                                 {formatDate(
@@ -2072,10 +2077,7 @@ export default function AskJm8Panel({
 
                             <span>
                               <strong>
-                                {formatSourceType(
-                                  evidence
-                                    .sourceType
-                                )}
+                                <SourceLink evidence={evidence} />
                               </strong>
 
                               <small>
