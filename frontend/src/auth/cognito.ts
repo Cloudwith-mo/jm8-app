@@ -1,3 +1,4 @@
+import { serviceFetch } from "../platform/http";
 import { authStorage, isNativeIos, nativeCallback, openNativeAuthorization, persistNativeSession, restoreNativeSession, clearNativeSession } from "./nativeSession";
 import { frontendEnv } from "../config/env";
 
@@ -280,7 +281,7 @@ async function exchangeCognitoCallback(url = new URL(window.location.href)) {
   });
 
   try {
-    const response = await fetch(`${domain}/oauth2/token`, {
+    const response = await serviceFetch(`${domain}/oauth2/token`, {
       method: "POST",
       headers: {
         "content-type": "application/x-www-form-urlencoded",

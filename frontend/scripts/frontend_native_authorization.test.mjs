@@ -31,11 +31,11 @@ function harness(callbackMode = "valid") {
   };
   const exports = {};
   const code = ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  vm.runInNewContext(code, {
+  const context = {
     exports, crypto: webcrypto, Uint8Array, TextEncoder, URL, URLSearchParams, Date, Event, atob, btoa,
     sessionStorage: storage,
     window: { location: { href: "capacitor://localhost/", reload() { counts.reloads++; } }, dispatchEvent() {} },
-    require: name => name === "./nativeSession" ? native : { frontendEnv: {
+    require: name => name === "../platform/http" ? { serviceFetch: (...args) => context.fetch(...args) } : name === "./nativeSession" ? native : { frontendEnv: {
       appStage: "dev", apiEndpoint: "https://u06tdrfsua.execute-api.us-east-1.amazonaws.com",
       cognitoEnabled: true, cognitoDomain: "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com",
       cognitoClientId: "4t37mcfdkg5gdvl7ev8vt91ojg", cognitoRedirectUri: "http://localhost:5173/", cognitoLogoutUri: "http://localhost:5173/",
@@ -50,7 +50,8 @@ function harness(callbackMode = "valid") {
         expires_in: 3600, token_type: "Bearer",
       }; } };
     },
-  });
+  };
+  vm.runInNewContext(code, context);
   return { api: exports, counts, data };
 }
 

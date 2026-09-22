@@ -1388,8 +1388,7 @@ def validate_allowed_origins(stage: str, allowed_origins_csv: str) -> list[str]:
         if not item:
             continue
 
-        # Only this exact local WebView origin is accepted for the dev prototype.
-        origin = item if stage == "dev" and item == "capacitor://localhost" else _normalize_origin(item)
+        origin = _normalize_origin(item)
         parsed = urlsplit(origin)
         host = (parsed.hostname or "").lower()
 

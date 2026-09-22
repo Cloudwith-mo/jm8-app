@@ -19,7 +19,12 @@ It does not require a local Vite server. It does not change AWS.
 ## Development authentication configuration
 
 The iOS session returns to `com.cloudwithmo.journalm8.dev://auth/callback`.
-The app's API requests originate from `capacitor://localhost`.
+API Gateway rejects custom-scheme origins, so API and token requests use the
+built-in Capacitor native HTTP transport. Web requests retain browser fetch.
+Transport is limited to the approved dev API and Cognito token endpoint, with
+redirects disabled. S3 file uploads are unchanged and remain a separate mobile
+acceptance item. AbortSignal discards native results but does not stop the native
+network operation itself.
 
 Using the existing backend Python environment with boto3 installed, review:
 
@@ -27,18 +32,14 @@ Using the existing backend Python environment with boto3 installed, review:
 python3 backend/bin/configure_dev_ios_auth.py
 ```
 
-Then apply the reviewed additions with the same command plus `--apply`.
+Then apply the reviewed callback addition with the same command plus `--apply`.
 The helper checks the account and fixed dev resource identities, preserves
-existing browser callbacks and client settings, and verifies callback/CORS readback.
-It does not change staging or production. If interrupted after one API update,
-rerun its review and apply; both additions are idempotent.
-
-Before the next dev backend deployment, add `capacitor://localhost` to the existing
-comma-separated `ALLOWED_ORIGINS` GitHub variable in `jm8-dev`. Preserve its current
-origins. The backend environment-contract change in this branch must be merged
-before a deployment can accept that value. Deployments from older commits may
-remove the manually added API origin. Cognito branding/adoption helpers with an
-exact browser callback contract also need review before rerunning them.
+existing browser callbacks/client settings, and verifies the callback readback.
+It does not modify API Gateway CORS, staging, production or GitHub variables.
+It is safe to rerun after the previous helper partially completed. No
+`capacitor://localhost` origin should be added to `ALLOWED_ORIGINS`.
+Cognito branding/adoption helpers with an exact browser callback contract need
+review before rerunning them.
 
 ## Session behavior
 

@@ -1,3 +1,4 @@
+import { serviceFetch } from "../platform/http";
 import { expireAuthSession, getAccessToken, getIdToken } from "../auth/cognito";
 import { frontendEnv } from "../config/env";
 import type {
@@ -123,7 +124,7 @@ async function apiRequestResult<T>(
   const { useIdentityToken, ...requestOptions } = options;
   const accessToken = useIdentityToken ? getIdToken() : getAccessToken();
 
-  const response = await fetch(`${API_ENDPOINT}${path}`, {
+  const response = await serviceFetch(`${API_ENDPOINT}${path}`, {
     ...requestOptions,
     headers: {
       "content-type": "application/json",
