@@ -32,7 +32,7 @@ test("token form body is encoded once", async () => {
 });
 test("unapproved native destinations fail before sending credentials", async () => {
   const h = setup();
-  for (const url of ["https://evil.test", "http://u06tdrfsua.execute-api.us-east-1.amazonaws.com/entries", "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com/other"]) {
+  for (const url of ["https://evil.test", "https://evilamazoncognito.com/oauth2/token", "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com.evil.test/oauth2/token", "http://u06tdrfsua.execute-api.us-east-1.amazonaws.com/entries", "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com/other"]) {
     await assert.rejects(h.send(url));
   }
   assert.equal(h.calls.length, 0);
