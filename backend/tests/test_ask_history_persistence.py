@@ -242,7 +242,7 @@ class AskHistoryPersistenceTests(
         self.addCleanup(self.guard.stop)
         self.semantic_context = patch(
             "app.build_semantic_ask_context",
-            side_effect=lambda _user_id, context: {
+            side_effect=lambda _user_id, context, source_references=None: {
                 **context,
                 "semanticEvidence": {
                     "status": "EMPTY",
