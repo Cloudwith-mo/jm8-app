@@ -43,7 +43,7 @@ from jm8_github_oidc_bootstrap import (  # noqa: E402
 
 class GenerationTests(unittest.TestCase):
     def test_dev_tag_read_grant_is_exact_and_read_only(self):
-        statement = stage_policies("dev", "us-east-1")["compute"]["Statement"][-1]
+        statement = next(s for s in stage_policies("dev", "us-east-1")["compute"]["Statement"] if s["Sid"] == "ReadExactDevHttpApiTags")
         self.assertEqual(statement, {
             "Sid": "ReadExactDevHttpApiTags", "Effect": "Allow",
             "Action": ["apigateway:GET"],
