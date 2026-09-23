@@ -1,3 +1,4 @@
+import { uploadContentType, validateImageUpload } from "../platform/upload";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, CalendarDays, Image as ImageIcon, Menu, Upload, UserRound, X } from "lucide-react";
 import ArchiveSidebar, {
@@ -370,7 +371,7 @@ export default function ArchivePage() {
 
     setToasts((currentToasts) => [
       { id, kind, title, message },
-      ...currentToasts.slice(0, 3),
+      ...currentToasts.filter((toast) => toast.kind !== "loading").slice(0, 3),
     ]);
 
     window.setTimeout(() => dismissToast(id), kind === "loading" ? 2600 : 4200);
@@ -687,7 +688,8 @@ export default function ArchivePage() {
     updateStatus("Creating secure S3 upload URL...", "loading", "Preparing upload");
 
     try {
-      const upload = await createUploadUrl(file.name, file.type || "image/jpeg");
+      validateImageUpload(file);
+      const upload = await createUploadUrl(file.name, uploadContentType(file));
 
       updateStatus("Uploading image to S3...", "loading", "Uploading image");
       await uploadFileToS3(upload.upload.uploadUrl, file);

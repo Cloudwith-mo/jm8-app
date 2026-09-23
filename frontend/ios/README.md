@@ -22,8 +22,10 @@ The iOS session returns to `com.cloudwithmo.journalm8.dev://auth/callback`.
 API Gateway rejects custom-scheme origins, so API and token requests use the
 built-in Capacitor native HTTP transport. Web requests retain browser fetch.
 Transport is limited to the approved dev API and Cognito token endpoint, with
-redirects disabled. S3 file uploads are unchanged and remain a separate mobile
-acceptance item. AbortSignal discards native results but does not stop the native
+redirects disabled. S3 image uploads use native binary PUT to the exact dev raw
+bucket host, preserving signed URLs and content type. Images are limited to
+10 MiB on iOS to bound base64 bridge memory; browser uploads still use fetch.
+No bucket CORS changes are required. AbortSignal discards native results but does not stop the native
 network operation itself.
 
 Using the existing backend Python environment with boto3 installed, review:
@@ -71,3 +73,13 @@ CI compiles an unsigned simulator build. Real-device testing, native session
 refresh, mobile upload/export, subscription flows, release branding and App Store
 submission remain separate work. AWS configuration and simulator acceptance must
 be verified before this draft is considered complete.
+
+## Simulator acceptance recorded September 22, 2026
+
+User verified launch, sign-in, typed entry creation/analysis, Ask JM8 retrieval,
+source navigation, saved-answer links, unexpired session restoration, logout,
+and sign-in cancellation/retry. The safe-area container fixed the black screen.
+
+September 23: image selection and upload URL creation succeeded, but browser
+S3 transfer returned Load failed. Native binary transfer is now implemented;
+image upload through completed OCR and export still need simulator acceptance.
