@@ -7,6 +7,7 @@ import Security
 final class JM8BridgeViewController: CAPBridgeViewController {
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(JM8NativeAuth())
+        bridge?.registerPluginInstance(JM8NativeExport())
     }
 
 }
@@ -128,5 +129,70 @@ public class JM8NativeAuth: CAPPlugin, CAPBridgedPlugin, ASWebAuthenticationPres
             call.reject("Could not clear the secure session.", "KEYCHAIN_DELETE"); return
         }
         call.resolve()
+    }
+}
+
+// Entry transcripts leave the app only through an explicit system share action.
+@objc(JM8NativeExport)
+public class JM8NativeExport: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "JM8NativeExport"
+    public let jsName = "JM8NativeExport"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "shareTranscript", returnType: CAPPluginReturnPromise)
+    ]
+    private var sharing = false
+    private let exportDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("JM8TranscriptExports", isDirectory: true)
+
+    override public func load() {
+        // Remove leftovers if the process was killed while the sheet was open.
+        try? FileManager.default.removeItem(at: exportDirectory)
+    }
+
+    @objc func shareTranscript(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard !self.sharing, let presenter = self.bridge?.viewController,
+                  presenter.view.window != nil, presenter.presentedViewController == nil else {
+                call.reject("Another dialog is open. Close it and retry export.", "EXPORT_BUSY")
+                return
+            }
+            guard let filename = call.getString("filename"),
+                  filename.range(of: "^[A-Za-z0-9_-]{1,180}\\.txt$", options: .regularExpression) != nil,
+                  let text = call.getString("text"), !text.isEmpty,
+                  text.utf8.count <= 5 * 1024 * 1024 else {
+                call.reject("Invalid transcript export.", "EXPORT_INPUT")
+                return
+            }
+            let directory = self.exportDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let file = directory.appendingPathComponent(filename)
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try Data(text.utf8).write(to: file, options: [.atomic, .completeFileProtection])
+            } catch {
+                try? FileManager.default.removeItem(at: directory)
+                call.reject("Could not prepare the transcript file.", "EXPORT_WRITE")
+                return
+            }
+            self.sharing = true
+            let sheet = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+            sheet.completionWithItemsHandler = { _, completed, _, error in
+                DispatchQueue.main.async {
+                    try? FileManager.default.removeItem(at: directory)
+                    self.sharing = false
+                    if error != nil {
+                        call.reject("Could not complete transcript export.", "EXPORT_SHARE")
+                    } else {
+                        call.resolve(["completed": completed])
+                    }
+                }
+            }
+            if let popover = sheet.popoverPresentationController {
+                popover.sourceView = presenter.view
+                popover.sourceRect = CGRect(x: presenter.view.bounds.midX,
+                                            y: presenter.view.bounds.midY, width: 1, height: 1)
+                popover.permittedArrowDirections = []
+            }
+            presenter.present(sheet, animated: true)
+        }
     }
 }

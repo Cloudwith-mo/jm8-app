@@ -83,3 +83,19 @@ and sign-in cancellation/retry. The safe-area container fixed the black screen.
 September 23: image selection and upload URL creation succeeded, but browser
 S3 transfer returned Load failed. Native binary transfer is now implemented;
 image upload through completed OCR and export still need simulator acceptance.
+
+## Entry transcript export on iOS
+
+Export opens the system share sheet with a UTF-8 `.txt` file. Choose Save to
+Files or a sharing destination. Completion is reported only after the system
+reports a completed action; cancellation is not success. The temporary file is
+protected on disk and removed when the sheet finishes. Leftovers from an
+interrupted process are removed when the export plugin next loads. Filenames
+are restricted to a single text-file basename; exports are bounded to 5 MiB.
+The browser retains its text-file download. Account ZIP export is separate.
+
+User verified native image upload, completed OCR, transcript display and
+analysis on September 23. Retrieval for that scanned entry remains unverified
+because the development account reached its monthly Ask JM8 allowance.
+Native transcript export still needs Save to Files, file-content and cancel/retry
+acceptance on the simulator.

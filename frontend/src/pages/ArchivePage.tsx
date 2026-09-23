@@ -1,3 +1,4 @@
+import { exportTranscriptFile } from "../platform/export";
 import { uploadContentType, validateImageUpload } from "../platform/upload";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, CalendarDays, Image as ImageIcon, Menu, Upload, UserRound, X } from "lucide-react";
@@ -837,7 +838,7 @@ export default function ArchivePage() {
     }
   }
 
-  function handleExportTranscript() {
+  async function handleExportTranscript() {
     const transcript = getSelectedTranscript();
 
     if (!selectedEntry || !transcript.trim()) {
@@ -865,16 +866,18 @@ export default function ArchivePage() {
       transcript,
     ].join("\n");
 
-    const blob = new Blob([fileBody], { type: "text/plain;charset=utf-8" });
-    const url = window.URL.createObjectURL(blob);
-
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.click();
-
-    window.URL.revokeObjectURL(url);
-    updateStatus("Transcript exported as a text file.", "success", "Export ready");
+    try {
+      const result = await exportTranscriptFile(filename, fileBody);
+      if (result === "cancelled") {
+        updateStatus("Export canceled.");
+      } else if (result === "shared") {
+        updateStatus("Transcript shared or saved.", "success", "Export complete");
+      } else {
+        updateStatus("Transcript download started.", "success", "Export ready");
+      }
+    } catch {
+      updateStatus("Could not export the transcript. Please retry.", "error", "Export failed");
+    }
   }
 
   function handleDownloadImage() {
