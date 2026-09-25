@@ -197,6 +197,28 @@ export default function ArchivePage() {
   const [isEntryLoading, setIsEntryLoading] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isAccountPanelOpen, setIsAccountPanelOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isAccountPanelOpen) return;
+    function dismissOutside(event: PointerEvent) {
+      if (event.target instanceof Element && event.target.closest(".phase2-account-surface")) return;
+      setIsAccountPanelOpen(false);
+    }
+    function dismissWithEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setIsAccountPanelOpen(false);
+      const surface = event.target instanceof Element
+        ? event.target.closest(".phase2-account-surface") : null;
+      surface?.querySelector<HTMLElement>("summary")?.focus();
+    }
+    document.addEventListener("pointerdown", dismissOutside, true);
+    document.addEventListener("keydown", dismissWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside, true);
+      document.removeEventListener("keydown", dismissWithEscape);
+    };
+  }, [isAccountPanelOpen]);
+
   const [focusAccountDeletion, setFocusAccountDeletion] = useState(false);
   const [deletionAcknowledgement, setDeletionAcknowledgement] = useState(
     () => consumeAccountDeletionAcknowledgement()
@@ -1113,6 +1135,17 @@ export default function ArchivePage() {
           <span><strong>{accountEntitlement?.plan.label || "Account"}</strong><small>Plan & usage</small></span>
         </summary>
         <div className="phase2-account-popover">
+          <div className="phase2-account-popover-header">
+            <strong>Account, plan &amp; usage</strong>
+            <IconButton
+              label="Close account, plan, and usage"
+              icon={<X size={20} />}
+              onClick={(event) => {
+                setIsAccountPanelOpen(false);
+                event.currentTarget.closest("details")?.querySelector<HTMLElement>("summary")?.focus();
+              }}
+            />
+          </div>
           <AuthStatus user={authUser} isAuthReady={isAuthReady} onLogin={loginWithCognito} onLogout={handleLogout} />
           <AccountPlanCard
             entitlement={accountEntitlement} isLoading={isEntitlementLoading} errorMessage={entitlementError}
