@@ -1,3 +1,5 @@
+import { serviceFetch } from "../platform/http";
+import { authStorage, isNativeIos, nativeCallback, openNativeAuthorization, persistNativeSession, restoreNativeSession, clearNativeSession } from "./nativeSession";
 import { frontendEnv } from "../config/env";
 
 const COGNITO_ENABLED = frontendEnv.cognitoEnabled;
@@ -45,10 +47,17 @@ function getRequiredConfig() {
     throw new Error("Missing Cognito frontend environment variables.");
   }
 
+  if (isNativeIos && (frontendEnv.appStage !== "dev"
+    || COGNITO_DOMAIN !== "https://journalm8-dev-114743615542.auth.us-east-1.amazoncognito.com"
+    || COGNITO_CLIENT_ID !== "4t37mcfdkg5gdvl7ev8vt91ojg"
+    || frontendEnv.apiEndpoint !== "https://u06tdrfsua.execute-api.us-east-1.amazonaws.com")) {
+    throw new Error("The iOS prototype requires the approved development environment.");
+  }
+
   return {
     domain: COGNITO_DOMAIN,
     clientId: COGNITO_CLIENT_ID,
-    redirectUri: COGNITO_REDIRECT_URI,
+    redirectUri: isNativeIos ? nativeCallback : COGNITO_REDIRECT_URI,
     logoutUri: COGNITO_LOGOUT_URI,
   };
 }
@@ -133,14 +142,15 @@ function parseTokenResponse(value: unknown): CognitoTokenResponse {
 }
 
 function removeCallbackParameters(url: URL) {
+  if (isNativeIos) return;
   url.search = "";
   url.hash = "";
   window.history.replaceState({}, document.title, url.toString());
 }
 
 export function getAccessToken() {
-  const token = localStorage.getItem(ACCESS_TOKEN_KEY);
-  const expiresAt = Number(localStorage.getItem(TOKEN_EXPIRES_AT_KEY) || "0");
+  const token = authStorage.getItem(ACCESS_TOKEN_KEY);
+  const expiresAt = Number(authStorage.getItem(TOKEN_EXPIRES_AT_KEY) || "0");
 
   if (!token || Date.now() > expiresAt) {
     return null;
@@ -150,12 +160,12 @@ export function getAccessToken() {
 }
 
 export function getAuthSessionExpiresAt(): number | null {
-  const value = Number(localStorage.getItem(TOKEN_EXPIRES_AT_KEY));
+  const value = Number(authStorage.getItem(TOKEN_EXPIRES_AT_KEY));
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function getIdToken() {
-  return localStorage.getItem(ID_TOKEN_KEY);
+  return authStorage.getItem(ID_TOKEN_KEY);
 }
 
 export function getCurrentUser(): AuthUser | null {
@@ -181,12 +191,13 @@ export function isAuthenticated() {
 async function beginCognitoAuthorization(path: "/oauth2/authorize" | "/signup") {
   const { domain, clientId, redirectUri } = getRequiredConfig();
 
+  if (isNativeIos) await clearNativeSession();
   const codeVerifier = randomString();
   const codeChallenge = base64UrlEncode(await sha256(codeVerifier));
   const state = randomString(32);
 
-  localStorage.setItem(PKCE_VERIFIER_KEY, codeVerifier);
-  localStorage.setItem(OAUTH_STATE_KEY, state);
+  authStorage.setItem(PKCE_VERIFIER_KEY, codeVerifier);
+  authStorage.setItem(OAUTH_STATE_KEY, state);
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -198,7 +209,19 @@ async function beginCognitoAuthorization(path: "/oauth2/authorize" | "/signup") 
     state,
   });
 
-  window.location.assign(`${domain}${path}?${params.toString()}`);
+  const authorizationUrl = `${domain}${path}?${params.toString()}`;
+  if (isNativeIos) {
+    try {
+      const callback = await openNativeAuthorization(authorizationUrl);
+      await exchangeCognitoCallback(callback);
+      window.location.reload();
+    } catch (error) {
+      clearAuthTokens();
+      throw error;
+    }
+    return;
+  }
+  window.location.assign(authorizationUrl);
 }
 
 export async function loginWithCognito() {
@@ -209,8 +232,7 @@ export async function signupWithCognito() {
   await beginCognitoAuthorization("/signup");
 }
 
-async function exchangeCognitoCallback() {
-  const url = new URL(window.location.href);
+async function exchangeCognitoCallback(url = new URL(window.location.href)) {
   const code = url.searchParams.get("code");
   const error = url.searchParams.get("error");
   const callbackState = url.searchParams.get("state");
@@ -241,8 +263,8 @@ async function exchangeCognitoCallback() {
   }
 
   const { domain, clientId, redirectUri } = getRequiredConfig();
-  const codeVerifier = localStorage.getItem(PKCE_VERIFIER_KEY);
-  const expectedState = localStorage.getItem(OAUTH_STATE_KEY);
+  const codeVerifier = authStorage.getItem(PKCE_VERIFIER_KEY);
+  const expectedState = authStorage.getItem(OAUTH_STATE_KEY);
 
   if (!codeVerifier || !expectedState || callbackState !== expectedState) {
     clearAuthTokens();
@@ -259,7 +281,7 @@ async function exchangeCognitoCallback() {
   });
 
   try {
-    const response = await fetch(`${domain}/oauth2/token`, {
+    const response = await serviceFetch(`${domain}/oauth2/token`, {
       method: "POST",
       headers: {
         "content-type": "application/x-www-form-urlencoded",
@@ -274,21 +296,22 @@ async function exchangeCognitoCallback() {
     const tokens = parseTokenResponse(await response.json());
     const expiresAt = Date.now() + tokens.expires_in * 1000 - 30_000;
 
-    localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
-    localStorage.setItem(ID_TOKEN_KEY, tokens.id_token);
-    localStorage.setItem(TOKEN_EXPIRES_AT_KEY, String(expiresAt));
+    authStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
+    authStorage.setItem(ID_TOKEN_KEY, tokens.id_token);
+    authStorage.setItem(TOKEN_EXPIRES_AT_KEY, String(expiresAt));
 
     if (tokens.refresh_token) {
-      localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
+      authStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
     }
 
+    await persistNativeSession();
     return getCurrentUser();
   } catch (exchangeError) {
     clearAuthTokens();
     throw exchangeError;
   } finally {
-    localStorage.removeItem(PKCE_VERIFIER_KEY);
-    localStorage.removeItem(OAUTH_STATE_KEY);
+    authStorage.removeItem(PKCE_VERIFIER_KEY);
+    authStorage.removeItem(OAUTH_STATE_KEY);
     removeCallbackParameters(url);
   }
 }
@@ -297,7 +320,9 @@ export function handleCognitoCallback():
   Promise<AuthUser | null> {
   if (!callbackExchangePromise) {
     callbackExchangePromise =
-      exchangeCognitoCallback().finally(
+      (isNativeIos
+        ? restoreNativeSession().then(() => null)
+        : exchangeCognitoCallback()).finally(
         () => {
           callbackExchangePromise = null;
         }
@@ -309,12 +334,16 @@ export function handleCognitoCallback():
 
 
 export function clearAuthTokens() {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(ID_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
-  localStorage.removeItem(TOKEN_EXPIRES_AT_KEY);
-  localStorage.removeItem(PKCE_VERIFIER_KEY);
-  localStorage.removeItem(OAUTH_STATE_KEY);
+  // Protected UI is cleared synchronously; the tombstone blocks failed restores.
+  void clearNativeSession().catch(() => {
+    window.dispatchEvent(new Event("jm8:secure-session-clear-failed"));
+  });
+  authStorage.removeItem(ACCESS_TOKEN_KEY);
+  authStorage.removeItem(ID_TOKEN_KEY);
+  authStorage.removeItem(REFRESH_TOKEN_KEY);
+  authStorage.removeItem(TOKEN_EXPIRES_AT_KEY);
+  authStorage.removeItem(PKCE_VERIFIER_KEY);
+  authStorage.removeItem(OAUTH_STATE_KEY);
 }
 
 export function rememberAccountDeletionReturnIntent() {
@@ -357,6 +386,13 @@ export function expireAuthSession() {
 export function logoutFromCognito() {
   clearAuthTokens();
 
+  if (isNativeIos) {
+    // Authentication uses an ephemeral browser session; no shared SSO cookie remains.
+    void clearNativeSession().then(() => window.location.replace("/")).catch(() => {
+      window.dispatchEvent(new Event("jm8:secure-session-clear-failed"));
+    });
+    return;
+  }
   const { domain, clientId, logoutUri } = getRequiredConfig();
 
   const params = new URLSearchParams({

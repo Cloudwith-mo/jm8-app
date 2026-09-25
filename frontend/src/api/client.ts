@@ -1,3 +1,5 @@
+import { uploadJournalImage } from "../platform/upload";
+import { serviceFetch } from "../platform/http";
 import { expireAuthSession, getAccessToken, getIdToken } from "../auth/cognito";
 import { frontendEnv } from "../config/env";
 import type {
@@ -123,7 +125,7 @@ async function apiRequestResult<T>(
   const { useIdentityToken, ...requestOptions } = options;
   const accessToken = useIdentityToken ? getIdToken() : getAccessToken();
 
-  const response = await fetch(`${API_ENDPOINT}${path}`, {
+  const response = await serviceFetch(`${API_ENDPOINT}${path}`, {
     ...requestOptions,
     headers: {
       "content-type": "application/json",
@@ -347,17 +349,7 @@ export async function createUploadUrl(
 }
 
 export async function uploadFileToS3(uploadUrl: string, file: File): Promise<void> {
-  const response = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: {
-      "content-type": file.type,
-    },
-    body: file,
-  });
-
-  if (!response.ok) {
-    throw new Error("S3 upload failed");
-  }
+  await uploadJournalImage(uploadUrl, file);
 }
 
 export type OcrJobAcceptedResponse = {

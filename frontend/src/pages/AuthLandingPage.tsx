@@ -20,6 +20,7 @@ type AuthLandingPageProps = {
   onSignIn: () => void;
   onCreateAccount: () => void;
   acknowledgement?: string;
+  error?: string;
 };
 
 export default function AuthLandingPage({
@@ -27,6 +28,7 @@ export default function AuthLandingPage({
   onSignIn,
   onCreateAccount,
   acknowledgement,
+  error,
 }: AuthLandingPageProps) {
   if (!isReady) {
     return (
@@ -39,6 +41,7 @@ export default function AuthLandingPage({
 
   return (
     <main className="jm8-auth-landing">
+      {error && <p role="alert">{error}</p>}
       <section className="jm8-auth-story" aria-labelledby="jm8-auth-story-title">
         <BrandMark large />
 

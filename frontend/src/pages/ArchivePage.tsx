@@ -1,3 +1,5 @@
+import { exportTranscriptFile } from "../platform/export";
+import { uploadContentType, validateImageUpload } from "../platform/upload";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, CalendarDays, Image as ImageIcon, Menu, Upload, UserRound, X } from "lucide-react";
 import ArchiveSidebar, {
@@ -195,6 +197,28 @@ export default function ArchivePage() {
   const [isEntryLoading, setIsEntryLoading] = useState(false);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [isAccountPanelOpen, setIsAccountPanelOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isAccountPanelOpen) return;
+    function dismissOutside(event: PointerEvent) {
+      if (event.target instanceof Element && event.target.closest(".phase2-account-surface")) return;
+      setIsAccountPanelOpen(false);
+    }
+    function dismissWithEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setIsAccountPanelOpen(false);
+      const surface = event.target instanceof Element
+        ? event.target.closest(".phase2-account-surface") : null;
+      surface?.querySelector<HTMLElement>("summary")?.focus();
+    }
+    document.addEventListener("pointerdown", dismissOutside, true);
+    document.addEventListener("keydown", dismissWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside, true);
+      document.removeEventListener("keydown", dismissWithEscape);
+    };
+  }, [isAccountPanelOpen]);
+
   const [focusAccountDeletion, setFocusAccountDeletion] = useState(false);
   const [deletionAcknowledgement, setDeletionAcknowledgement] = useState(
     () => consumeAccountDeletionAcknowledgement()
@@ -222,6 +246,25 @@ export default function ArchivePage() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [authUser, setAuthUser] = useState<AuthUser | null>(getCurrentUser());
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const signInPending = useRef(false);
+
+  async function startSignIn(signup = false) {
+    if (signInPending.current) return;
+    signInPending.current = true;
+    setIsSigningIn(true);
+    setAuthError("");
+    try {
+      await (signup ? signupWithCognito() : loginWithCognito());
+    } catch (error) {
+      setAuthError(getErrorMessage(error, "Sign-in could not be completed. Please try again."));
+    } finally {
+      signInPending.current = false;
+      setIsSigningIn(false);
+    }
+  }
+
   const [
     usage,
     setUsage,
@@ -351,7 +394,7 @@ export default function ArchivePage() {
 
     setToasts((currentToasts) => [
       { id, kind, title, message },
-      ...currentToasts.slice(0, 3),
+      ...currentToasts.filter((toast) => toast.kind !== "loading").slice(0, 3),
     ]);
 
     window.setTimeout(() => dismissToast(id), kind === "loading" ? 2600 : 4200);
@@ -668,7 +711,8 @@ export default function ArchivePage() {
     updateStatus("Creating secure S3 upload URL...", "loading", "Preparing upload");
 
     try {
-      const upload = await createUploadUrl(file.name, file.type || "image/jpeg");
+      validateImageUpload(file);
+      const upload = await createUploadUrl(file.name, uploadContentType(file));
 
       updateStatus("Uploading image to S3...", "loading", "Uploading image");
       await uploadFileToS3(upload.upload.uploadUrl, file);
@@ -816,7 +860,7 @@ export default function ArchivePage() {
     }
   }
 
-  function handleExportTranscript() {
+  async function handleExportTranscript() {
     const transcript = getSelectedTranscript();
 
     if (!selectedEntry || !transcript.trim()) {
@@ -844,16 +888,18 @@ export default function ArchivePage() {
       transcript,
     ].join("\n");
 
-    const blob = new Blob([fileBody], { type: "text/plain;charset=utf-8" });
-    const url = window.URL.createObjectURL(blob);
-
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.click();
-
-    window.URL.revokeObjectURL(url);
-    updateStatus("Transcript exported as a text file.", "success", "Export ready");
+    try {
+      const result = await exportTranscriptFile(filename, fileBody);
+      if (result === "cancelled") {
+        updateStatus("Export canceled.");
+      } else if (result === "shared") {
+        updateStatus("Transcript shared or saved.", "success", "Export complete");
+      } else {
+        updateStatus("Transcript download started.", "success", "Export ready");
+      }
+    } catch {
+      updateStatus("Could not export the transcript. Please retry.", "error", "Export failed");
+    }
   }
 
   function handleDownloadImage() {
@@ -943,6 +989,7 @@ export default function ArchivePage() {
         }
       } catch (error) {
         clearAccountDeletionReturnIntent();
+        setAuthError(getErrorMessage(error, "Could not restore your session."));
         updateStatus(getErrorMessage(error, "Cognito login failed."), "error", "Login failed");
       } finally {
         setIsAuthReady(true);
@@ -1043,7 +1090,7 @@ export default function ArchivePage() {
 
   function handleAccountDeletionReauthentication() {
     rememberAccountDeletionReturnIntent();
-    void loginWithCognito();
+    void startSignIn();
   }
 
   function handleAccountDeletionProcessed() {
@@ -1063,13 +1110,14 @@ export default function ArchivePage() {
   if (!isAuthReady || !authUser) {
     return (
       <AuthLandingPage
-        isReady={isAuthReady}
+        isReady={isAuthReady && !isSigningIn}
+        error={authError}
         acknowledgement={deletionAcknowledgement}
         onSignIn={() => {
-          void loginWithCognito();
+          void startSignIn();
         }}
         onCreateAccount={() => {
-          void signupWithCognito();
+          void startSignIn(true);
         }}
       />
     );
@@ -1087,6 +1135,17 @@ export default function ArchivePage() {
           <span><strong>{accountEntitlement?.plan.label || "Account"}</strong><small>Plan & usage</small></span>
         </summary>
         <div className="phase2-account-popover">
+          <div className="phase2-account-popover-header">
+            <strong>Account, plan &amp; usage</strong>
+            <IconButton
+              label="Close account, plan, and usage"
+              icon={<X size={20} />}
+              onClick={(event) => {
+                setIsAccountPanelOpen(false);
+                event.currentTarget.closest("details")?.querySelector<HTMLElement>("summary")?.focus();
+              }}
+            />
+          </div>
           <AuthStatus user={authUser} isAuthReady={isAuthReady} onLogin={loginWithCognito} onLogout={handleLogout} />
           <AccountPlanCard
             entitlement={accountEntitlement} isLoading={isEntitlementLoading} errorMessage={entitlementError}
